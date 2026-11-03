@@ -25,9 +25,9 @@ test("D1 schema has unique order idempotency and stock ledger constraints", () =
 
 test("legacy orders are imported without a second stock deduction", () => {
   assert.match(layer, /stock_reserved,[\s\S]{0,80}VALUES\([\s\S]{0,120}\)\.bind\([\s\S]{0,600}clean\(r\[19\],40\),0,i\+2/);
-  assert.match(layer, /IMPORTING:\\+Date\\.now\\(\\)/);
-  assert.match(layer, /WHERE key='transaction_store_state' AND value=\\?/);
-  assert.match(layer, /value='READY',updated_at=\\?/);
+  assert.ok(layer.includes('const importing="IMPORTING:"+Date.now();'));
+  assert.ok(layer.includes("WHERE key='transaction_store_state' AND value=?"));
+  assert.ok(layer.includes("value='READY',updated_at=?"));
 });
 
 test("new orders reserve finite stock in the same D1 batch", () => {
