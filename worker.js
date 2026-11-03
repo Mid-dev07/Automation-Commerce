@@ -259,7 +259,10 @@ async function appendOrder(env, order) {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ values: [row] })
   });
-  if (!response.ok) throw new Error(`Google Sheets append gagal (${response.status}): ${(await response.text()).slice(0,300)}`);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0,500);
+    throw new Error(`Google Sheets append gagal (${response.status}): ${detail}`);
+  }
 }
 
 async function readSheet(env, range) {
@@ -268,7 +271,10 @@ async function readSheet(env, range) {
   const response = await fetch(`${SHEETS_BASE}/${env.GOOGLE_SHEETS_ID}/values/${encoded}`, {
     headers: { Authorization: `Bearer ${token}` }
   });
-  if (!response.ok) throw new Error(`Google Sheets read gagal (${response.status})`);
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0,500);
+    throw new Error(`Google Sheets read gagal (${response.status}): ${detail}`);
+  }
   const data = await response.json();
   return data.values || [];
 }
