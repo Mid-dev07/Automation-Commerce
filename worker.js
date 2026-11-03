@@ -726,9 +726,9 @@ async function handleTelegramCallback(env, query) {
     }
     const sku = data.slice("prod:delete:".length);
     await updateTelegramMessage(env, message, {
-      text: "Yakin ingin menghapus produk " + sku + "? Baris katalog akan dihapus permanen. Riwayat pesanan tidak ikut terhapus.",
+      text: "Yakin ingin menghapus produk " + sku + "? Produk akan dinonaktifkan agar riwayat pesanan tetap utuh.",
       replyMarkup: { inline_keyboard: [
-        [{ text: "🗑️ Ya, hapus permanen", callback_data: "prod:delok:" + sku }],
+        [{ text: "🗑️ Ya, arsipkan produk", callback_data: "prod:delok:" + sku }],
         [{ text: "Batal", callback_data: "adm:catalog" }]
       ] }
     });
@@ -908,7 +908,7 @@ async function handleTelegramCallback(env, query) {
 }
 
 async function showCustomerCatalogPage(env, message, page = 0) {
-  const rows = await readSheet(env, "Katalog_Produk!A2:G");
+  const rows = await readCatalogRows(env);
   const products = rows.filter(r => r[0] && parseCatalogProduct(r).active);
   if (!products.length) {
     await updateTelegramMessage(env, message, { text: "Katalog belum memiliki produk aktif.", replyMarkup: customerMenuKeyboard() });
@@ -945,7 +945,7 @@ async function showCustomerCatalogPage(env, message, page = 0) {
 }
 
 async function showAdminCatalogPage(env, message, page = 0) {
-  const rows = await readSheet(env, "Katalog_Produk!A2:G");
+  const rows = await readCatalogRows(env);
   const products = rows.filter(r => r[0]);
   if (!products.length) {
     await updateTelegramMessage(env, message, { text: "Katalog masih kosong.", replyMarkup: adminCatalogKeyboard() });
