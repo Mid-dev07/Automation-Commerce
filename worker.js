@@ -1374,27 +1374,39 @@ async function rejectPaymentRequest(env, rowNumber) {
   return r;
 }
 async function createPickupTicketToken(env, orderId, receiptCode) {
-  const payload = base64url(JSON.stringify({ order: orderId, code: receiptCode, v: 1 }));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = base64url(JSON.stringify({
+    order: orderId, code: receiptCode, v: 2,
+    iat: now, exp: now + 30 * 24 * 60 * 60
+  }));
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("SEITON_PICKUP_TICKET_V1." + payload));
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("SEITON_PICKUP_TICKET_V2." + payload));
   return payload + "." + base64urlBytes(new Uint8Array(sig));
 }
+
 async function verifyPickupTicketToken(env, token) {
   if (!env.TELEGRAM_WEBHOOK_SECRET) return null;
   const parts = String(token || "").split(".");
   if (parts.length !== 2) return null;
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("SEITON_PICKUP_TICKET_V1." + parts[0]));
-  if (!constantTimeEqual(base64urlBytes(new Uint8Array(sig)), parts[1])) return null;
   try {
     const encoded = parts[0].replace(/-/g, "+").replace(/_/g, "/");
-    const payload = JSON.parse(atob(encoded + "=".repeat((4 - encoded.length % 4) % 4)));
-    return payload.v === 1 && payload.order && payload.code ? payload : null;
-  } catch { return null; }
+    const decoded = atob(encoded + "=".repeat((4 - encoded.length % 4) % 4));
+    const payload = JSON.parse(decoded);
+    if (!payload || !payload.order || !payload.code || ![1, 2].includes(payload.v)) return null;
+    if (payload.v === 2 && (!Number.isFinite(Number(payload.exp)) || Number(payload.exp) <= Math.floor(Date.now() / 1000))) return null;
+    const prefix = payload.v === 2 ? "SEITON_PICKUP_TICKET_V2." : "SEITON_PICKUP_TICKET_V1.";
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(prefix + parts[0]));
+    if (!constantTimeEqual(base64urlBytes(new Uint8Array(sig)), parts[1])) return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }
+
 async function createPickupTicketUrl(env, orderId, receiptCode) {
   const token = await createPickupTicketToken(env, orderId, receiptCode);
-  return "https://seiton-order-bot.midzpribadi.workers.dev/pickup?ticket=" + encodeURIComponent(token);
+  return "https://automate-bot.seiton.biz.id/pickup?ticket=" + encodeURIComponent(token);
 }
 function escapeHtml(value) {
   return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
@@ -1577,7 +1589,11 @@ async function createOrder(env, input) {
   };
   await appendOrder(env, order);
   if (env.ORDERS_KV && idempotencyKey) {
-    await env.ORDERS_KV.put(idempotencyKey, JSON.stringify(order), { expirationTtl: 86400 });
+    try {
+      await env.ORDERS_KV.put(idempotencyKey, JSON.stringify(order), { expirationTtl: 86400 });
+    } catch (error) {
+      console.warn(JSON.stringify({level:"warn",event:"order_dedupe_cache",order_id:order.orderId,message:error.message}));
+    }
   }
   return order;
 }
