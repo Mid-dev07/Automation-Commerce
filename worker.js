@@ -5,8 +5,9 @@ import {
   deleteProductTransactional, setLegacyRowTransactional, updateProofTransactional,
   requestVerificationTransactional, approvePaymentTransactional, rejectPaymentTransactional,
   setOrderStatusTransactional, markPickedUpTransactional, listDashboardDataTransactional,
-  orderToSheetRow
+  orderToSheetRow, OrderCoordinator
 } from "./transaction-layer.js";
+export { OrderCoordinator };
 /**
  * ============================================================================
  * SEITON.ID - HIGH-PERFORMANCE BOT & INTERACTIVE DASHBOARD ENGINE
