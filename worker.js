@@ -133,7 +133,11 @@ async function handleTelegram(request, env, ctx) {
   })();
   ctx.waitUntil(work.catch(async error => {
     console.error(JSON.stringify({ level: "error", event: "telegram_processing", message: error.message }));
-    await sendTelegram(env, chatId, "⚠️ Pesanan belum dapat diproses. Silakan coba kembali atau hubungi admin.");
+    try {
+      await sendTelegram(env, chatId, "⚠️ Pesanan belum dapat diproses. Silakan coba kembali atau hubungi admin.");
+    } catch (sendError) {
+      console.error(JSON.stringify({level:"error",event:"telegram_fallback_notice",message:sendError.message}));
+    }
   }));
   return json({ ok: true });
 }
@@ -228,7 +232,7 @@ async function saveCatalogProduct(env, product, originalSku = "") {
 
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU hanya boleh berisi huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
   if (!name || name.length > 100) throw new Error("Nama produk wajib diisi (maksimal 100 karakter).");
-  if (priceText === "" || !Number.isFinite(price) || price < 0 || !Number.isSafeInteger(stock) || stock < 0) {
+  if (priceText === "" || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(stock) || stock < 0) {
     throw new Error("Harga harus valid dan stok harus bilangan bulat nol atau lebih.");
   }
   if (typeof product.active !== "boolean") throw new Error("Status aktif harus boolean.");
@@ -1565,7 +1569,9 @@ async function createOrder(env, input) {
 
   const subtotal = product.price * input.quantity;
   const shipping = env.DEFAULT_SHIPPING == null || env.DEFAULT_SHIPPING === "" ? 0 : Number(env.DEFAULT_SHIPPING);
-  if (!Number.isFinite(shipping) || shipping < 0) throw new Error("DEFAULT_SHIPPING harus berupa angka nol atau lebih.");
+  if (!Number.isSafeInteger(subtotal)) throw new Error("Subtotal pesanan melebihi batas angka aman.");
+  if (!Number.isSafeInteger(shipping) || shipping < 0) throw new Error("DEFAULT_SHIPPING harus berupa bilangan Rupiah nol atau lebih.");
+  if (!Number.isSafeInteger(subtotal + shipping)) throw new Error("Total pesanan melebihi batas angka aman.");
   // Store Jakarta-local ISO text so spreadsheet text-prefix formulas can group by business date.
   const createdAt = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().replace("Z", "+07:00");
   const dateStamp = localDateKey(createdAt).replace(/-/g, "");
@@ -1601,7 +1607,7 @@ async function createOrder(env, input) {
 function parseCatalogProduct(row) {
   const sku = String(row[0] || "").trim();
   const rawPrice = row[2], price = Number(rawPrice);
-  const priceValid = rawPrice != null && String(rawPrice).trim() !== "" && Number.isFinite(price) && price >= 0;
+  const priceValid = rawPrice != null && String(rawPrice).trim() !== "" && Number.isSafeInteger(price) && price >= 0;
   const rawStock = row[3];
   const stockBlank = rawStock == null || String(rawStock).trim() === "";
   const parsedStock = stockBlank ? null : Number(rawStock);
