@@ -42,7 +42,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/pickup") {
       return handlePickupVerificationPage(request, env);
     }
-    if (request.method === "GET" && url.pathname === "/admin") {
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/admin")) {
       return new Response(ADMIN_DASHBOARD_HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'self' https://cdn.jsdelivr.net; img-src 'self' https: blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
     }
     if (request.method === "POST" && url.pathname === "/api/admin/login") return handleAdminLogin(request, env);
@@ -529,7 +529,7 @@ async function handleTelegramCallback(env, query) {
     }
     if (action === "dashboard") {
       const accessToken = await createDashboardAccessToken(env, chatId);
-      const link = "https://seiton-order-bot.midzpribadi.workers.dev/admin#access=" + encodeURIComponent(accessToken);
+      const link = "https://admin.seiton.biz.id/#access=" + encodeURIComponent(accessToken);
       await updateTelegramMessage(env, message, {
         text: "📈 Dashboard admin siap dibuka. Tautan akses berlaku selama 4 jam. Jangan teruskan tautan ini kepada orang lain.",
         clearMedia: true,
