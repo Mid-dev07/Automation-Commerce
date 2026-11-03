@@ -122,7 +122,6 @@ async function createOrderD1(db, input) {
   const createdAt = nowJakarta();
   const createdMs = Date.now();
   const id = orderId();
-  const dedupe = idempotencyKey(input);
   const results = await db.batch([
     db.prepare(`INSERT OR IGNORE INTO orders (
       order_id,idempotency_key,created_at,created_ms,channel,customer_id,customer_name,
@@ -244,7 +243,6 @@ async function requestVerificationD1(db, id, customerId) {
   if (!["MENUNGGU_PEMBAYARAN","DITOLAK"].includes(String(o.status).toUpperCase())) {
     throw new Error("Status pesanan tidak mengizinkan permintaan verifikasi pembayaran.");
   }
-  const at = nowJakarta();
   if (String(o.payment_confirmation_status).toUpperCase() === "MENUNGGU_VERIFIKASI") return o;
   const at = nowJakarta();
   const results = await db.batch([
@@ -261,10 +259,9 @@ async function requestVerificationD1(db, id, customerId) {
 async function savePaymentProofD1(db,id,customerId,fileId,fileType) {
   await requireReady(db);
   const at=nowJakarta();
-  const at=nowJakarta();
   const results=await db.batch([
     db.prepare("UPDATE orders SET payment_proof_file_id=?,payment_proof_type=?,updated_at=? WHERE order_id=? AND customer_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')").bind(fileId,fileType,at,id,String(customerId)),
-    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_PROOF_UPLOADED','','MENUNGGU_VERIFIKASI',?,?,?,?,? FROM orders WHERE order_id=? AND payment_proof_file_id=? AND updated_at=?").bind(clean(customerId,128),"proof:"+fileId,JSON.stringify({file_type:fileType}),at,id,fileId,at)
+    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_PROOF_UPLOADED','','MENUNGGU_VERIFIKASI',?,?,?,? FROM orders WHERE order_id=? AND payment_proof_file_id=? AND updated_at=?").bind(clean(customerId,128),"proof:"+fileId,JSON.stringify({file_type:fileType}),at,id,fileId,at)
   ]);
   checkChanges(results[0],"Permintaan pembayaran tidak sedang menunggu verifikasi.");
   return getOrderD1(db,id);
@@ -330,7 +327,9 @@ async function setOrderStatusD1(db,id,status,actor="admin") {
         AND EXISTS(SELECT 1 FROM inventory_movements WHERE order_id=? AND movement_type='RELEASE')`).bind(at,id,id));
   }
   stmts.push(db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
-    VALUES(?,'STATUS_CHANGED',?,?,?,?,?,?)`).bind(id,o.status,status,clean(actor,128),"status:"+crypto.randomUUID(),"{}",at));
+    SELECT order_id,'STATUS_CHANGED',?,?,?,?,?,? FROM orders
+    WHERE order_id=? AND status=? AND updated_at=?`)
+    .bind(o.status,status,clean(actor,128),"status:"+crypto.randomUUID(),"{}",at,id,status,at));
   const results=await db.batch(stmts);
   checkChanges(results[0],"Status pesanan berubah di proses lain. Muat ulang data terlebih dahulu.");
   return getOrderD1(db,id);
