@@ -206,41 +206,53 @@ async function promptAdminProduct(env, chatId, mode, sku = "") {
 async function handleAdminProductForm(env, chatId, input, prompt) {
   const parts = String(input || "").split("|").map(v => v.trim());
   if (parts.length !== 7) throw new Error("Format produk harus berisi tepat 7 kolom dipisahkan tanda |");
-  const [sku, name, priceText, stockText, activeText, imageUrl, description] = parts;
+  const [sku, name, price, stock, activeText, photoUrl, description] = parts;
+  if (!["TRUE","FALSE","YA","TIDAK","1","0","AKTIF","NONAKTIF"].includes(activeText.toUpperCase())) throw new Error("Status aktif harus TRUE atau FALSE.");
+  if (photoUrl && (!/^https:\/\//i.test(photoUrl) || photoUrl.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS.");
+  const result = await saveCatalogProduct(env, {
+    sku, name, price, stock,
+    active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()),
+    photo_url: photoUrl, description
+  }, prompt.includes(" — EDIT — ") ? prompt.split(" — EDIT — ").pop().trim() : "");
+  await sendTelegram(env, chatId, "✅ Produk " + sku + (result === "updated" ? " berhasil diperbarui." : " berhasil ditambahkan."), adminMenuKeyboard());
+}
+
+async function saveCatalogProduct(env, product, originalSku = "") {
+  const sku = String(product.sku || "").trim();
+  const name = String(product.name || "").trim();
+  const priceText = product.price == null ? "" : String(product.price).trim();
+  const stockText = product.stock == null ? "" : String(product.stock).trim();
+  const price = Number(priceText), stock = Number(stockText);
+  const photo = String(product.photo_url || "").trim();
+  const description = String(product.description || "").trim();
+
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU hanya boleh berisi huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
   if (!name || name.length > 100) throw new Error("Nama produk wajib diisi (maksimal 100 karakter).");
-  if (description.length > 500) throw new Error("Deskripsi maksimal 500 karakter.");
-  const price = Number(priceText); const stock = Number(stockText);
-  if (!Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) throw new Error("Harga dan stok harus berupa angka valid.");
-  if (!["TRUE","FALSE","YA","TIDAK","1","0","AKTIF","NONAKTIF"].includes(activeText.toUpperCase())) throw new Error("Status aktif harus TRUE atau FALSE.");
-  if (imageUrl && (!/^https:\/\//i.test(imageUrl) || imageUrl.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS yang bisa diakses publik.");
-  const active = !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase());
-  const token = await getGoogleAccessToken(env);
-  const rows = await readSheet(env, "Katalog_Produk!A2:G");
-  const existingIndex = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
-  const isEdit = prompt.includes(" — EDIT — ");
-  if (isEdit) {
-    const originalSku = prompt.split(" — EDIT — ").pop().trim();
-    if (sku.toUpperCase() !== originalSku.toUpperCase()) throw new Error("SKU tidak boleh diubah saat mengedit produk.");
-    if (existingIndex < 0) throw new Error("Produk yang akan diedit tidak ditemukan.");
-    const rowNumber = existingIndex + 2;
-    const range = encodeURIComponent("Katalog_Produk!A" + rowNumber + ":G" + rowNumber);
-    const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + "?valueInputOption=USER_ENTERED", {
-      method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-      body: JSON.stringify({ values: [[sku, name, price, stock, active, imageUrl, description]] })
-    });
-    if (!response.ok) throw new Error("Gagal memperbarui produk: " + (await response.text()).slice(0,300));
-    await sendTelegram(env, chatId, "✅ Produk " + sku + " berhasil diperbarui.", adminMenuKeyboard()); return;
+  if (priceText === "" || !Number.isFinite(price) || price < 0 || !Number.isSafeInteger(stock) || stock < 0) {
+    throw new Error("Harga harus valid dan stok harus bilangan bulat nol atau lebih.");
   }
-  if (existingIndex >= 0) throw new Error("SKU sudah digunakan. Gunakan SKU lain atau pilih Atur Produk.");
-  const range = encodeURIComponent("Katalog_Produk!A:G");
-  const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + ":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS", {
-    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ values: [[sku, name, price, stock, active, imageUrl, description]] })
-  });
-  if (!response.ok) throw new Error("Gagal menambahkan produk: " + (await response.text()).slice(0,300));
-  await sendTelegram(env, chatId, "✅ Produk " + sku + " berhasil ditambahkan ke katalog.", adminMenuKeyboard());
+  if (typeof product.active !== "boolean") throw new Error("Status aktif harus boolean.");
+  if (photo && (!/^https:\/\//i.test(photo) || photo.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS.");
+  if (description.length > 500) throw new Error("Deskripsi maksimal 500 karakter.");
+
+  const rows = await readSheet(env, "Katalog_Produk!A2:G");
+  const matches = rows.map((r, i) => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase() ? i : -1).filter(i => i >= 0);
+  if (matches.length > 1) throw new Error("SKU duplikat ditemukan. Perbaiki katalog sebelum menyimpan.");
+  const index = matches[0] ?? -1;
+  const editing = Boolean(originalSku);
+  if (editing && sku.toUpperCase() !== originalSku.toUpperCase()) throw new Error("SKU tidak boleh diubah saat mengedit produk.");
+  if (editing && index < 0) throw new Error("Produk yang akan diedit tidak ditemukan.");
+  if (!editing && index >= 0) throw new Error("SKU sudah digunakan. Gunakan SKU lain atau pilih Atur Produk.");
+
+  const values = [[sku, name, price, stock, product.active, photo, description]];
+  if (editing) {
+    await updateSheetRange(env, "Katalog_Produk!A" + (index + 2) + ":G" + (index + 2), values);
+    return "updated";
+  }
+  await appendSheetRows(env, "Katalog_Produk!A:G", values);
+  return "created";
 }
+
 async function deleteCatalogProduct(env, sku) {
   const normalizedSku = String(sku || "").trim().toUpperCase();
   if (!normalizedSku) throw new Error("SKU produk tidak valid.");
@@ -669,9 +681,14 @@ async function handleTelegramCallback(env, query) {
     if (!admin) throw new Error("Menu ini khusus admin.");
     const rowNumber = Number(data.slice("payapprove:".length));
     const approved = await approvePaymentAndIssueTicket(env, rowNumber);
-    await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode);
+    let receiptSent = true;
+    try { await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode); }
+    catch(error) {
+      receiptSent = false;
+      console.error(JSON.stringify({level:"error",event:"telegram_receipt_delivery",order_id:approved.row[0],message:error.message}));
+    }
     await updateTelegramMessage(env, message, {
-      text: "✅ Pembayaran " + approved.row[0] + " berhasil disetujui. Resi dan QR pengambilan sudah dikirim ke pelanggan.",
+      text: "✅ Pembayaran " + approved.row[0] + " berhasil disetujui. " + (receiptSent ? "Resi dan QR pengambilan sudah dikirim." : "Resi tersimpan, tetapi QR gagal dikirim. Pelanggan dapat meminta resi ulang lewat Pesanan Saya."),
       replyMarkup: { inline_keyboard: [
         [{ text: "📦 Lihat Antrean Pengambilan", callback_data: "adm:pickup" }],
         [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
@@ -755,35 +772,17 @@ async function handleTelegramCallback(env, query) {
   }
 
   if (data.startsWith("su:")) {
-    if (!admin) {
-      await updateTelegramMessage(env, message, { text: "⛔ Menu ini khusus admin.", replyMarkup: null });
-      return;
-    }
+    if (!admin) throw new Error("Menu ini khusus admin.");
     const parts = data.split(":"); const rowNum = Number(parts[1]); const status = parts[2];
-    const allowed = ["MENUNGGU_PEMBAYARAN","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
+    const allowed = ["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
     if (!Number.isInteger(rowNum) || rowNum < 2 || !allowed.includes(status)) throw new Error("Pembaruan status tidak valid");
-    if (["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI"].includes(status)) {
-      const orderValues = await readSheet(env, "Pesanan!A" + rowNum + ":N" + rowNum);
-      const orderRow = orderValues[0];
-      if (!orderRow) throw new Error("Pesanan tidak ditemukan.");
-      const method = String(orderRow[11] || "").toUpperCase();
-      if (["QRIS", "TRANSFER"].includes(method) && String(orderRow[13] || "") !== "DISETUJUI") {
-        throw new Error("Pembayaran QRIS/Transfer harus disetujui melalui menu 💳 Konfirmasi Pembayaran agar resi QR terbit otomatis.");
-      }
-    }
-    const token = await getGoogleAccessToken(env); const range = encodeURIComponent("Pesanan!M" + rowNum);
-    const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + "?valueInputOption=USER_ENTERED", {
-      method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-      body: JSON.stringify({ values: [[status]] })
-    });
-    if (!response.ok) throw new Error("Pembaruan status gagal (" + response.status + "): " + (await response.text()).slice(0,300));
+    await setOrderStatus(env, rowNum, status);
     await updateTelegramMessage(env, message, {
       text: "✅ Status pesanan berhasil diperbarui menjadi " + status + ".",
       replyMarkup: adminMenuKeyboard()
     });
     return;
   }
-
   await updateTelegramMessage(env, message, {
     text: admin ? adminMenuText() : customerMenuText(),
     replyMarkup: admin ? adminMenuKeyboard() : customerMenuKeyboard()
@@ -792,7 +791,7 @@ async function handleTelegramCallback(env, query) {
 
 async function showCustomerCatalogPage(env, message, page = 0) {
   const rows = await readSheet(env, "Katalog_Produk!A2:G");
-  const products = rows.filter(r => r[0] && !["FALSE","0","NONAKTIF","NO"].includes(String(r[4] ?? "TRUE").toUpperCase()));
+  const products = rows.filter(r => r[0] && parseCatalogProduct(r).active);
   if (!products.length) {
     await updateTelegramMessage(env, message, { text: "Katalog belum memiliki produk aktif.", replyMarkup: customerMenuKeyboard() });
     return;
@@ -801,7 +800,8 @@ async function showCustomerCatalogPage(env, message, page = 0) {
   const current = Math.max(0, Math.min(pageCount - 1, Number.isInteger(page) ? page : 0));
   const p = products[current];
   const sku = String(p[0]).trim();
-  const stock = p[3] === "" || p[3] == null ? "Tidak dibatasi" : p[3];
+  const parsedProduct = parseCatalogProduct(p);
+  const stock = !parsedProduct.stockValid ? "DATA STOK TIDAK VALID" : parsedProduct.stock === null ? "Tidak dibatasi" : parsedProduct.stock;
   const caption = [
     "🛍️ Katalog Produk (" + (current + 1) + "/" + pageCount + ")",
     String(p[1] || sku),
@@ -814,7 +814,7 @@ async function showCustomerCatalogPage(env, message, page = 0) {
   if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "cat:page:" + (current - 1) });
   if (current < pageCount - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "cat:page:" + (current + 1) });
   const keyboard = { inline_keyboard: [
-    [{ text: "🛒 Pilih Produk Ini", callback_data: "buy:" + sku }],
+    ...(parsedProduct.priceValid && parsedProduct.stockValid && parsedProduct.active ? [[{ text: "🛒 Pilih Produk Ini", callback_data: "buy:" + sku }]] : []),
     ...(nav.length ? [nav] : []),
     [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
   ] };
@@ -878,8 +878,8 @@ function orderRowsToObjects(rows) {
     shipping: Number(r[9] || 0),
     total: Number(r[10] || 0),
     payment_method: String(r[11] || ""),
-    status: String(r[12] || "").toUpperCase(),
-    payment_confirmation_status: String(r[13] || "").toUpperCase(),
+    status: String(r[12] || "").trim().toUpperCase(),
+    payment_confirmation_status: String(r[13] || "").trim().toUpperCase(),
     payment_proof_file_id: String(r[14] || ""),
     payment_proof_type: String(r[15] || ""),
     payment_requested_at: String(r[16] || ""),
@@ -889,16 +889,17 @@ function orderRowsToObjects(rows) {
   }));
 }
 function productRowsToObjects(rows) {
-  return rows.filter(r => r[0]).map(r => ({
-    sku: String(r[0] || ""),
-    name: String(r[1] || ""),
-    price: Number(r[2] || 0),
-    stock: r[3] === "" || r[3] == null ? null : Number(r[3]),
-    active: !["FALSE", "0", "NONAKTIF", "NO"].includes(String(r[4] ?? "TRUE").toUpperCase()),
-    photo_url: String(r[5] || ""),
-    description: String(r[6] || "")
-  }));
+  return rows.filter(r => r[0]).map(r => {
+    const p = parseCatalogProduct(r);
+    return {
+      sku: p.sku, name: p.name, price: p.price, price_valid: p.priceValid,
+      stock: p.stock, stock_valid: p.stockValid,
+      active: p.active && p.priceValid && p.stockValid,
+      photo_url: p.photoUrl, description: p.description
+    };
+  });
 }
+
 function localDateKey(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Tidak diketahui";
@@ -989,8 +990,13 @@ async function handleAdminPaymentAction(request, env) {
       const method=String(found.row[11]||"").toUpperCase();
       if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi melalui menu ini.");
       const approved=await approvePaymentAndIssueTicket(env,found.rowNumber);
-      await sendPickupReceipt(env,String(approved.row[3]),approved.row,String(approved.row[0]),approved.receiptCode);
-      return json({ok:true,status:"DIBAYAR",receipt_code:approved.receiptCode});
+      let receiptSent = true;
+      try { await sendPickupReceipt(env,String(approved.row[3]),approved.row,String(approved.row[0]),approved.receiptCode); }
+      catch(error) {
+        receiptSent = false;
+        console.error(JSON.stringify({level:"error",event:"dashboard_receipt_delivery",order_id:approved.row[0],message:error.message}));
+      }
+      return json({ok:true,status:"DIBAYAR",receipt_code:approved.receiptCode,receipt_sent:receiptSent});
     }
     if (body.action==="reject") {
       const rejected=await rejectPaymentRequest(env,found.rowNumber);
@@ -1005,47 +1011,48 @@ async function handleAdminProductMutation(request, env) {
   let body; try { body=await request.json(); } catch { return json({ok:false,error:"Data produk tidak valid."},400); }
   try {
     await ensureCatalogHeaders(env);
-    if (body.action==="delete") {
-      const result=await deleteCatalogProduct(env,body.sku);
+    if (body.action === "delete") {
+      const result = await deleteCatalogProduct(env, body.sku);
       return json({ok:true,deleted:result.sku});
     }
-    if (body.action!=="save" || !body.product) return json({ok:false,error:"Aksi produk tidak dikenal."},400);
-    const p=body.product,sku=String(p.sku||"").trim(),name=String(p.name||"").trim();
-    const price=Number(p.price),stock=Number(p.stock),photo=String(p.photo_url||"").trim(),description=String(p.description||"").trim();
-    if(!/^[A-Za-z0-9._-]{1,40}$/.test(sku))throw new Error("SKU hanya boleh berisi huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
-    if(!name||name.length>100)throw new Error("Nama produk wajib diisi (maksimal 100 karakter).");
-    if(!Number.isFinite(price)||price<0||!Number.isInteger(stock)||stock<0)throw new Error("Harga dan stok harus berupa angka valid.");
-    if(photo&&(!/^https:\/\//i.test(photo)||photo.length>1000))throw new Error("URL foto harus berupa tautan HTTPS.");
-    if(description.length>500)throw new Error("Deskripsi maksimal 500 karakter.");
-    const rows=await readSheet(env,"Katalog_Produk!A2:G");
-    const index=rows.findIndex(r=>String(r[0]||"").trim().toUpperCase()===sku.toUpperCase());
-    const active=p.active!==false;
-    const values=[[sku,name,price,stock,active,photo,description]];
-    if(index>=0)await updateSheetRange(env,"Katalog_Produk!A"+(index+2)+":G"+(index+2),values);
-    else {
-      const token=await getGoogleAccessToken(env),range=encodeURIComponent("Katalog_Produk!A:G");
-      const response=await fetch(SHEETS_BASE+"/"+env.GOOGLE_SHEETS_ID+"/values/"+range+":append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS",{
-        method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({values})
-      });
-      if(!response.ok)throw new Error("Gagal menambahkan produk: "+(await response.text()).slice(0,300));
-    }
-    return json({ok:true,sku:sku,action:index>=0?"updated":"created"});
+    if (body.action !== "save" || !body.product) return json({ok:false,error:"Aksi produk tidak dikenal."},400);
+    const p = body.product;
+    const active = p.active === true || String(p.active).toLowerCase() === "true";
+    const result = await saveCatalogProduct(env, { ...p, active });
+    return json({ok:true,sku:String(p.sku).trim(),action:result});
   } catch(error) { return json({ok:false,error:error.message},400); }
 }
+
+async function setOrderStatus(env, rowNumber, status) {
+  await ensurePaymentWorkflowHeaders(env);
+  if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error("Nomor baris pesanan tidak valid.");
+  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
+  const row = values[0];
+  if (!row || !row[0]) throw new Error("Pesanan tidak ditemukan.");
+  const current = String(row[12] || "").trim().toUpperCase();
+  const method = String(row[11] || "").trim().toUpperCase();
+  if (status === "DIBATALKAN" && PAID_ORDER_STATUSES.includes(current)) {
+    throw new Error("Pesanan yang sudah dibayar tidak dapat dibatalkan dari panel ini. Refund perlu dicatat terpisah.");
+  }
+  if (["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI"].includes(status) &&
+      ["QRIS", "TRANSFER", "TRANSFER_BANK"].includes(method) &&
+      String(row[13] || "").trim().toUpperCase() !== "DISETUJUI") {
+    throw new Error("Pembayaran QRIS/transfer harus disetujui melalui menu Verifikasi Pembayaran agar resi diterbitkan.");
+  }
+  await updateSheetRange(env, "Pesanan!M" + rowNumber + ":M" + rowNumber, [[status]]);
+  return row;
+}
+
 async function handleAdminOrderStatus(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
   let body; try { body=await request.json(); } catch { return json({ok:false,error:"Data status tidak valid."},400); }
   const found=await findOrderById(env,body.order_id);
   if(!found)return json({ok:false,error:"Pesanan tidak ditemukan."},404);
-  const status=String(body.status||"").toUpperCase();
+  const status=String(body.status||"").trim().toUpperCase();
   const allowed=["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
   if(!allowed.includes(status))return json({ok:false,error:"Status pesanan tidak dikenal."},400);
-  const method=String(found.row[11]||"").toUpperCase();
-  if(["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)&&["DIBAYAR","DIPROSES","DIKIRIM","SELESAI"].includes(status)&&String(found.row[13]||"")!=="DISETUJUI"&&!PAID_ORDER_STATUSES.includes(String(found.row[12]||"").toUpperCase())) {
-    return json({ok:false,error:"Verifikasi QRIS/transfer harus dilakukan melalui menu Verifikasi Pembayaran agar resi digital diterbitkan."},400);
-  }
-  try { await updateSheetRange(env,"Pesanan!M"+found.rowNumber+":M"+found.rowNumber,[[status]]); return json({ok:true,status}); }
-  catch(error){return json({ok:false,error:error.message},502);}
+  try { await setOrderStatus(env,found.rowNumber,status); return json({ok:true,status}); }
+  catch(error){return json({ok:false,error:error.message},400);}
 }
 async function handleAdminPaymentProof(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
@@ -1074,7 +1081,7 @@ async function handleAdminDashboardData(request, env) {
 }
 function csvCell(value) {
   let text = value == null ? "" : String(value);
-  if (/^[=+\-@]/.test(text) && !/^-?\d+(\.\d+)?$/.test(text)) text = "'" + text;
+  if (/^[\s\u0000-\u001f]*[=+\-@]/.test(text) && !/^-?\d+(\.\d+)?$/.test(text)) text = "'" + text;
   return '"' + text.replace(/"/g, '""') + '"';
 }
 function csvText(rows) {
@@ -1208,8 +1215,9 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
   if (!found) throw new Error("Pesanan tidak ditemukan.");
   const r = found.row;
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
-  const method = String(r[11] || "").toUpperCase();
+  const method = String(r[11] || "").trim().toUpperCase();
   if (method === "COD") throw new Error("Pesanan COD dibayar saat pengambilan dan tidak memakai verifikasi pembayaran online.");
+  if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Metode pembayaran tidak didukung untuk verifikasi online.");
   if (PAID_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase()) && String(r[18] || "")) {
     await sendPickupReceipt(env, String(r[3]), r, orderId, String(r[18]));
     await updateTelegramMessage(env, message, { text: "✅ Pembayaran pesanan ini sudah diverifikasi. Resi pengambilan telah dikirim kembali.", replyMarkup: customerMenuKeyboard(), clearMedia: true });
@@ -1261,9 +1269,15 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran tidak sedang menunggu verifikasi.");
   let fileId = "", fileType = "";
   if (Array.isArray(message.photo) && message.photo.length) {
-    fileId = String(message.photo[message.photo.length - 1].file_id || "");
+    const photo = message.photo[message.photo.length - 1];
+    if (Number(photo.file_size || 0) > 10 * 1024 * 1024) throw new Error("Ukuran bukti pembayaran maksimal 10 MB.");
+    fileId = String(photo.file_id || "");
     fileType = "PHOTO";
   } else if (message.document?.file_id) {
+    const mime = String(message.document.mime_type || "").toLowerCase();
+    const allowedMime = ["application/pdf","image/jpeg","image/png","image/webp"];
+    if (mime && !allowedMime.includes(mime)) throw new Error("Bukti dokumen harus berupa PDF, JPG, PNG, atau WebP.");
+    if (Number(message.document.file_size || 0) > 10 * 1024 * 1024) throw new Error("Ukuran bukti pembayaran maksimal 10 MB.");
     fileId = String(message.document.file_id);
     fileType = "DOCUMENT";
   } else {
@@ -1343,7 +1357,7 @@ async function approvePaymentAndIssueTicket(env, rowNumber) {
   if (String(r[11] || "").toUpperCase() === "COD") throw new Error("Pesanan COD tidak menggunakan verifikasi pembayaran online.");
   if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan sudah dibatalkan.");
   const now = new Date().toISOString();
-  const receiptCode = "SEI-" + new Date().toISOString().slice(0,10).replace(/-/g,"") + "-" + crypto.randomUUID().slice(0,6).toUpperCase();
+  const receiptCode = "SEI-" + localDateKey(now).replace(/-/g,"") + "-" + crypto.randomUUID().slice(0,6).toUpperCase();
   await updateSheetRange(env, "Pesanan!M" + rowNumber + ":T" + rowNumber, [[
     "DIBAYAR", "DISETUJUI", r[14] || "", r[15] || "", r[16] || now, now, receiptCode, "BELUM_DIAMBIL"
   ]]);
@@ -1471,7 +1485,7 @@ async function showPickupOrderDetail(env, message, rowNumber) {
   await ensurePaymentWorkflowHeaders(env);
   const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
   const r = values[0];
-  if (!r || !r[0] || String(r[13] || "") !== "DISETUJUI" || !r[18]) throw new Error("Resi pengambilan tidak ditemukan atau belum disetujui.");
+  if (!r || !r[0] || String(r[13] || "").trim().toUpperCase() !== "DISETUJUI" || !r[18] || !PAID_ORDER_STATUSES.includes(String(r[12] || "").trim().toUpperCase())) throw new Error("Resi pengambilan tidak ditemukan, dibatalkan, atau belum disetujui.");
   const ticketUrl = await createPickupTicketUrl(env, String(r[0]), String(r[18]));
   const picked = String(r[19] || "") === "DIAMBIL";
   const buttons = picked ? [] : [[{ text: "✅ Tandai Sudah Diambil", callback_data: "pickupdone:" + rowNumber }]];
@@ -1496,8 +1510,8 @@ async function markOrderPickedUp(env, rowNumber) {
   await ensurePaymentWorkflowHeaders(env);
   const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
   const r = values[0];
-  if (!r || !r[0] || String(r[13] || "") !== "DISETUJUI" || !r[18]) throw new Error("Pesanan tidak memiliki resi pembayaran yang valid.");
-  if (String(r[19] || "") === "DIAMBIL") throw new Error("Pesanan ini sudah ditandai diambil.");
+  if (!r || !r[0] || String(r[13] || "").trim().toUpperCase() !== "DISETUJUI" || !r[18] || !PAID_ORDER_STATUSES.includes(String(r[12] || "").trim().toUpperCase())) throw new Error("Pesanan tidak memiliki resi pembayaran valid atau sudah dibatalkan.");
+  if (String(r[19] || "").trim().toUpperCase() === "DIAMBIL") throw new Error("Pesanan ini sudah ditandai diambil.");
   await updateSheetRange(env, "Pesanan!M" + rowNumber + ":T" + rowNumber, [[
     "SELESAI", "DISETUJUI", r[14] || "", r[15] || "", r[16] || "", r[17] || "", r[18], "DIAMBIL"
   ]]);
