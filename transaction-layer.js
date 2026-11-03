@@ -369,8 +369,22 @@ export async function bootstrapTransactions(db,catalogRows,orderRows) {
   if (!db) throw new Error("Binding D1 DB belum tersedia.");
   const state=await db.prepare("SELECT value FROM app_meta WHERE key='transaction_store_state'").first();
   if(state?.value==="READY")return {alreadyReady:true,catalog:0,orders:0};
-  await db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES('transaction_store_state','IMPORTING',?)
-    ON CONFLICT(key) DO UPDATE SET value='IMPORTING',updated_at=excluded.updated_at`).bind(nowJakarta()).run();
+  const previous=String(state?.value||"");
+  const leaseAt=previous.startsWith("IMPORTING:")?Number(previous.slice(10)):0;
+  if(leaseAt && Date.now()-leaseAt<30*60*1000) {
+    throw new Error("Migrasi D1 sedang berjalan. Jangan jalankan perintah dua kali; coba lagi setelah proses sebelumnya selesai.");
+  }
+  const importing="IMPORTING:"+Date.now();
+  const claim=state
+    ? await db.prepare("UPDATE app_meta SET value=?,updated_at=? WHERE key='transaction_store_state' AND value=?")
+        .bind(importing,nowJakarta(),previous).run()
+    : await db.prepare("INSERT OR IGNORE INTO app_meta(key,value,updated_at) VALUES('transaction_store_state',?,?)")
+        .bind(importing,nowJakarta()).run();
+  if(Number(claim.meta?.changes)!==1) {
+    const latest=await db.prepare("SELECT value FROM app_meta WHERE key='transaction_store_state'").first();
+    if(latest?.value==="READY")return {alreadyReady:true,catalog:0,orders:0};
+    throw new Error("Migrasi D1 sedang dikerjakan oleh proses lain.");
+  }
 
   const productStatements=[];
   const seen=new Set();
@@ -427,8 +441,9 @@ export async function bootstrapTransactions(db,catalogRows,orderRows) {
   await db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES('legacy_import_v1',?,?)
     ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`)
     .bind(JSON.stringify({catalog:catalogImported,orders:ordersImported}),nowJakarta()).run();
-  await db.prepare(`INSERT INTO app_meta(key,value,updated_at) VALUES('transaction_store_state','READY',?)
-    ON CONFLICT(key) DO UPDATE SET value='READY',updated_at=excluded.updated_at`).bind(nowJakarta()).run();
+  const finished=await db.prepare("UPDATE app_meta SET value='READY',updated_at=? WHERE key='transaction_store_state' AND value=?")
+    .bind(nowJakarta(),importing).run();
+  if(Number(finished.meta?.changes)!==1)throw new Error("Migrasi D1 kehilangan kepemilikan lock. Periksa status sebelum mencoba ulang.");
   return {alreadyReady:false,catalog:catalogImported,orders:ordersImported};
 }
 
