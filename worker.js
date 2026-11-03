@@ -645,7 +645,7 @@ async function handleTelegramCallback(env, query) {
     await ensurePaymentWorkflowHeaders(env);
     const found = await findOrderById(env, orderId);
     if (!found || String(found.row[3] || "") !== userId) throw new Error("Resi tidak ditemukan untuk akun Telegram ini.");
-    if (String(found.row[13] || "") !== "DISETUJUI" || !found.row[18]) throw new Error("Pembayaran belum disetujui admin.");
+    if (String(found.row[13] || "") !== "DISETUJUI" || !found.row[18] || !PAID_ORDER_STATUSES.includes(String(found.row[12] || "").toUpperCase())) throw new Error("Pembayaran belum disetujui admin atau pesanan sudah dibatalkan.");
     await sendPickupReceipt(env, userId, found.row, orderId, String(found.row[18]));
     await updateTelegramMessage(env, message, { text: "🎟️ Resi pengambilan dikirim kembali.", replyMarkup: customerMenuKeyboard(), clearMedia: true });
     return;
@@ -1226,6 +1226,8 @@ async function approvePaymentAndIssueTicket(env, rowNumber) {
   const r = values[0];
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
+  if (String(r[11] || "").toUpperCase() === "COD") throw new Error("Pesanan COD tidak menggunakan verifikasi pembayaran online.");
+  if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan sudah dibatalkan.");
   const now = new Date().toISOString();
   const receiptCode = "SEI-" + new Date().toISOString().slice(0,10).replace(/-/g,"") + "-" + crypto.randomUUID().slice(0,6).toUpperCase();
   await updateSheetRange(env, "Pesanan!M" + rowNumber + ":T" + rowNumber, [[
