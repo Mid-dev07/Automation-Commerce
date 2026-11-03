@@ -327,13 +327,14 @@ async function saveCatalogProduct(env, product, originalSku = "") {
   const name = String(product.name || "").trim();
   const priceText = product.price == null ? "" : String(product.price).trim();
   const stockText = product.stock == null ? "" : String(product.stock).trim();
-  const price = Number(priceText), stock = Number(stockText);
+  const price = Number(priceText), stock = stockText === "" ? null : Number(stockText);
   const photo = String(product.photo_url || "").trim();
   const description = String(product.description || "").trim();
 
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU hanya boleh berisi huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
   if (!name || name.length > 100) throw new Error("Nama produk wajib diisi (maksimal 100 karakter).");
-  if (priceText === "" || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(stock) || stock < 0) {
+  if (priceText === "" || !Number.isSafeInteger(price) || price < 0 ||
+      (stock !== null && (!Number.isSafeInteger(stock) || stock < 0))) {
     throw new Error("Harga harus valid dan stok harus bilangan bulat nol atau lebih.");
   }
   if (typeof product.active !== "boolean") throw new Error("Status aktif harus boolean.");
