@@ -136,7 +136,10 @@ export default {
       return handleAdminDashboardExport(request, env);
     }
     if (request.method === "GET" && url.pathname === "/health") {
-      return json({ ok: true, service: "seiton-order-bot", time: new Date().toISOString() });
+      const tx = await transactionReadiness(env);
+      return json({ ok: true, service: "seiton-order-bot",
+        transaction_store: tx.ready ? "READY" : tx.configured ? "MIGRATION_REQUIRED" : "LEGACY",
+        time: new Date().toISOString() });
     }
     if (request.method === "POST" && url.pathname === "/telegram") {
       return handleTelegram(request, env, ctx);
@@ -183,6 +186,23 @@ async function handleTelegram(request, env, ctx) {
     if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
       try { await handleAdminProductForm(env, chatId, text, message.reply_to_message.text); }
       catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
+      return;
+    }
+    if (text === "/migrasi_d1") {
+      if (!isAdmin(chatId,env)) return sendTelegram(env,chatId,"⛔ Perintah ini khusus admin.");
+      if (!env.DB || !env.ORDER_COORDINATOR) return sendTelegram(env,chatId,"⚠️ Binding D1/ORDER_COORDINATOR belum tersedia. Migrasi belum dapat dijalankan.");
+      const state = await transactionReadiness(env);
+      if (state.ready) return sendTelegram(env,chatId,"✅ Lapisan transaksi D1 sudah aktif. Tidak ada migrasi ulang yang diperlukan.");
+      await ensurePaymentWorkflowHeaders(env);
+      const [catalogRows,orderRows] = await Promise.all([
+        readSheet(env,"Katalog_Produk!A2:G"),
+        readSheet(env,"Pesanan!A2:T")
+      ]);
+      const result = await bootstrapTransactions(env.DB,catalogRows,orderRows);
+      await sendTelegram(env,chatId,
+        "✅ Migrasi transaksi D1 selesai.\nProduk diimpor: "+result.catalog+
+        "\nOrder historis diimpor: "+result.orders+
+        "\n\nOrder lama tidak mengurangi stok ulang. Checkout baru kini memakai D1 dan reservasi stok atomik.");
       return;
     }
     if (text.startsWith("/laporan")) {
