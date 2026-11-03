@@ -39,6 +39,9 @@ const HEADERS = [
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/pickup") {
+      return handlePickupVerificationPage(request, env);
+    }
     if (request.method === "GET" && url.pathname === "/admin") {
       return new Response(ADMIN_DASHBOARD_HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
     }
@@ -96,6 +99,10 @@ async function handleTelegram(request, env, ctx) {
   const customerId = String(message.from.id);
   const customerName = [message.from.first_name, message.from.last_name].filter(Boolean).join(" ");
   const work = (async () => {
+    if (message.reply_to_message?.text?.startsWith("🧾 BUKTI PEMBAYARAN SEITON")) {
+      await handlePaymentProofUpload(env, message, chatId, customerId);
+      return;
+    }
     if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
       try { await handleAdminProductForm(env, chatId, text, message.reply_to_message.text); }
       catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
@@ -124,7 +131,7 @@ async function handleTelegram(request, env, ctx) {
     const result = await createOrder(env, {
       ...orderInput, channel: "telegram", customerId, customerName
     });
-    await sendTelegram(env, chatId, orderConfirmation(result, env));
+    await sendTelegram(env, chatId, orderConfirmation(result, env), orderConfirmationKeyboard(result));
   })();
   ctx.waitUntil(work.catch(async error => {
     console.error(JSON.stringify({ level: "error", event: "telegram_processing", message: error.message }));
@@ -152,6 +159,8 @@ function adminMenuKeyboard() {
     [{ text: "📊 Laporan Penjualan", callback_data: "adm:report" }],
     [{ text: "📈 Dashboard Interaktif", callback_data: "adm:dashboard" }],
     [{ text: "📥 Unduh Laporan", callback_data: "adm:exports" }],
+    [{ text: "💳 Konfirmasi Pembayaran", callback_data: "adm:paymentchecks" }],
+    [{ text: "📦 Validasi Pengambilan", callback_data: "adm:pickup" }],
     [{ text: "📋 Pesanan Terbaru", callback_data: "adm:recent" }],
     [{ text: "🔄 Perbarui Status Pesanan", callback_data: "adm:statuslist" }],
     [{ text: "📦 Lihat Katalog", callback_data: "adm:catalog" }],
@@ -454,7 +463,7 @@ async function handleTelegramCallback(env, query) {
       channel: "telegram", customerId: userId, customerName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" ") });
     await updateTelegramMessage(env, message, {
       text: orderConfirmation(result, env),
-      replyMarkup: customerMenuKeyboard()
+      replyMarkup: orderConfirmationKeyboard(result)
     });
     return;
   }
@@ -912,6 +921,358 @@ async function sendTelegramDocument(env, chatId, csv, filename, caption = "") {
   form.set("document", new Blob([csv], { type: "text/csv;charset=utf-8" }), filename);
   const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendDocument", { method: "POST", body: form });
   if (!response.ok) throw new Error("Telegram sendDocument gagal (" + response.status + "): " + (await response.text()).slice(0,300));
+}
+
+
+const PAYMENT_WORKFLOW_HEADERS = [
+  "payment_confirmation_status", "payment_proof_file_id", "payment_proof_type",
+  "payment_requested_at", "payment_confirmed_at", "receipt_code", "pickup_status"
+];
+async function ensurePaymentWorkflowHeaders(env) {
+  const current = await readSheet(env, "Pesanan!N1:T1");
+  const values = current[0] || [];
+  if (PAYMENT_WORKFLOW_HEADERS.every((name,i) => String(values[i] || "") === name)) return;
+  if (values.some(v => String(v || "").trim())) {
+    throw new Error("Kolom N:T pada tab Pesanan sudah terisi dengan struktur berbeda. Perlu pemeriksaan sebelum mengubah header.");
+  }
+  const token = await getGoogleAccessToken(env);
+  const range = encodeURIComponent("Pesanan!N1:T1");
+  const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + "?valueInputOption=RAW", {
+    method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ values: [PAYMENT_WORKFLOW_HEADERS] })
+  });
+  if (!response.ok) throw new Error("Gagal menyiapkan kolom verifikasi pembayaran: " + (await response.text()).slice(0,300));
+}
+async function updateSheetRange(env, range, values) {
+  const token = await getGoogleAccessToken(env);
+  const encoded = encodeURIComponent(range);
+  const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + encoded + "?valueInputOption=RAW", {
+    method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ values })
+  });
+  if (!response.ok) throw new Error("Google Sheets update gagal (" + response.status + "): " + (await response.text()).slice(0,350));
+  return response.json();
+}
+async function findOrderById(env, orderId) {
+  const rows = await readSheet(env, "Pesanan!A2:T");
+  const index = rows.findIndex(r => String(r[0] || "").trim() === String(orderId || "").trim());
+  return index < 0 ? null : { rowNumber: index + 2, row: rows[index] };
+}
+function orderConfirmationKeyboard(order) {
+  const buttons = [];
+  if (String(order.paymentMethod || "").toUpperCase() !== "COD") {
+    buttons.push([{ text: "💳 Saya Sudah Bayar — Minta Verifikasi", callback_data: "pc:req:" + order.orderId }]);
+  }
+  buttons.push([{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]);
+  return { inline_keyboard: buttons };
+}
+function paymentProofPrompt(orderId) {
+  return [
+    "🧾 BUKTI PEMBAYARAN SEITON",
+    "ORDER_ID=" + orderId,
+    "",
+    "Balas pesan ini dengan foto atau dokumen bukti transfer/QRIS.",
+    "Admin akan mencocokkan pembayaran sebelum menerbitkan resi pengambilan."
+  ].join("\n");
+}
+async function requestPaymentVerification(env, message, chatId, userId, orderId) {
+  await ensurePaymentWorkflowHeaders(env);
+  const found = await findOrderById(env, orderId);
+  if (!found) throw new Error("Pesanan tidak ditemukan.");
+  const r = found.row;
+  if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
+  const method = String(r[11] || "").toUpperCase();
+  if (method === "COD") throw new Error("Pesanan COD dibayar saat pengambilan dan tidak memakai verifikasi pembayaran online.");
+  if (PAID_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase()) && String(r[18] || "")) {
+    await sendPickupReceipt(env, String(r[3]), r, orderId, String(r[18]));
+    await updateTelegramMessage(env, message, { text: "✅ Pembayaran pesanan ini sudah diverifikasi. Resi pengambilan telah dikirim kembali.", replyMarkup: customerMenuKeyboard(), clearMedia: true });
+    return;
+  }
+  if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan ini sudah dibatalkan.");
+  if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
+    await updateTelegramMessage(env, message, {
+      text: "⏳ Permintaan verifikasi untuk " + orderId + " sudah tercatat. Kirim foto atau dokumen bukti pembayaran dengan membalas pesan instruksi bot.",
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
+    });
+    await sendTelegram(env, chatId, paymentProofPrompt(orderId), { force_reply: true, input_field_placeholder: "Lampirkan foto/dokumen bukti pembayaran" });
+    return;
+  }
+  if (!["MENUNGGU_PEMBAYARAN", "DITOLAK"].includes(String(r[12] || "").toUpperCase())) {
+    throw new Error("Status pesanan tidak mengizinkan permintaan verifikasi pembayaran.");
+  }
+  const requestedAt = new Date().toISOString();
+  await updateSheetRange(env, "Pesanan!N" + found.rowNumber + ":T" + found.rowNumber,
+    [["MENUNGGU_VERIFIKASI", "", "", requestedAt, "", "", ""]]);
+  await updateTelegramMessage(env, message, {
+    text: "✅ Permintaan verifikasi pembayaran untuk " + orderId + " telah dikirim ke admin.\n\nSilakan lampirkan bukti transfer/QRIS dengan membalas pesan instruksi bot. Resi pengambilan akan dikirim setelah admin menyetujui pembayaran.",
+    replyMarkup: customerMenuKeyboard(),
+    clearMedia: true
+  });
+  await sendTelegram(env, chatId, paymentProofPrompt(orderId), { force_reply: true, input_field_placeholder: "Lampirkan foto/dokumen bukti pembayaran" });
+  const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
+  for (const adminId of admins) {
+    try {
+      await sendTelegram(env, adminId,
+        "🔔 Permintaan verifikasi pembayaran baru\nPesanan: " + orderId + "\nPelanggan: " + String(r[4] || "-") + "\nTotal: " + rupiah(r[10]),
+        { inline_keyboard: [[{ text: "Periksa Permintaan", callback_data: "payview:" + found.rowNumber }]] });
+    } catch (error) {
+      console.warn(JSON.stringify({ level: "warn", event: "payment_admin_notify", message: error.message }));
+    }
+  }
+}
+async function handlePaymentProofUpload(env, message, chatId, userId) {
+  await ensurePaymentWorkflowHeaders(env);
+  const prompt = String(message.reply_to_message?.text || "");
+  const match = prompt.match(/ORDER_ID=([A-Za-z0-9_-]{1,60})/);
+  if (!match) throw new Error("Instruksi bukti pembayaran tidak valid. Ajukan verifikasi ulang dari menu Pesanan Saya.");
+  const orderId = match[1];
+  const found = await findOrderById(env, orderId);
+  if (!found) throw new Error("Pesanan tidak ditemukan.");
+  const r = found.row;
+  if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
+  if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran tidak sedang menunggu verifikasi.");
+  let fileId = "", fileType = "";
+  if (Array.isArray(message.photo) && message.photo.length) {
+    fileId = String(message.photo[message.photo.length - 1].file_id || "");
+    fileType = "PHOTO";
+  } else if (message.document?.file_id) {
+    fileId = String(message.document.file_id);
+    fileType = "DOCUMENT";
+  } else {
+    await sendTelegram(env, chatId, "Mohon kirim bukti sebagai foto atau dokumen dengan membalas pesan instruksi sebelumnya.");
+    return;
+  }
+  await updateSheetRange(env, "Pesanan!O" + found.rowNumber + ":P" + found.rowNumber, [[fileId, fileType]]);
+  await sendTelegram(env, chatId, "✅ Bukti pembayaran untuk " + orderId + " berhasil diterima. Admin akan memeriksanya.");
+  const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
+  for (const adminId of admins) {
+    try {
+      await sendTelegram(env, adminId,
+        "📎 Bukti pembayaran diunggah\nPesanan: " + orderId + "\nPelanggan: " + String(r[4] || "-"),
+        { inline_keyboard: [[{ text: "Lihat Bukti & Verifikasi", callback_data: "payview:" + found.rowNumber }]] });
+    } catch (error) {
+      console.warn(JSON.stringify({ level: "warn", event: "payment_proof_notify", message: error.message }));
+    }
+  }
+}
+async function showPaymentRequestsPage(env, message, page = 0) {
+  await ensurePaymentWorkflowHeaders(env);
+  const rows = await readSheet(env, "Pesanan!A2:T");
+  const pending = rows.map((r,i) => ({ r, rowNumber:i+2 }))
+    .filter(x => String(x.r[13] || "") === "MENUNGGU_VERIFIKASI")
+    .reverse();
+  const pageSize = 8;
+  const pages = Math.max(1, Math.ceil(pending.length / pageSize));
+  const current = Math.max(0, Math.min(pages - 1, Number.isInteger(page) ? page : 0));
+  const subset = pending.slice(current * pageSize, current * pageSize + pageSize);
+  const lines = subset.map(x => String(x.r[0]) + " · " + String(x.r[4] || "Pelanggan") + " · " + rupiah(x.r[10]) + " · " + (x.r[14] ? "Bukti tersedia" : "Belum ada bukti"));
+  const keyboard = subset.map(x => [{ text: String(x.r[0]) + (x.r[14] ? " 📎" : " ⏳"), callback_data: "payview:" + x.rowNumber }]);
+  const nav = [];
+  if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "paylist:" + (current - 1) });
+  if (current < pages - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "paylist:" + (current + 1) });
+  if (nav.length) keyboard.push(nav);
+  keyboard.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
+  await updateTelegramMessage(env, message, {
+    text: pending.length ? "💳 PERMINTAAN VERIFIKASI PEMBAYARAN\nHalaman " + (current + 1) + "/" + pages + "\n\n" + lines.join("\n") : "✅ Tidak ada permintaan verifikasi pembayaran yang menunggu.",
+    replyMarkup: { inline_keyboard: keyboard },
+    clearMedia: true
+  });
+}
+async function showPaymentRequestDetail(env, message, rowNumber) {
+  await ensurePaymentWorkflowHeaders(env);
+  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
+  const r = values[0];
+  if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
+  if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan ini sudah diproses atau tidak lagi menunggu verifikasi.");
+  const text = [
+    "🔎 VERIFIKASI PEMBAYARAN",
+    "Pesanan: " + r[0],
+    "Pelanggan: " + (r[4] || "-") + " (" + (r[3] || "-") + ")",
+    "Produk: " + (r[5] || "-"),
+    "Jumlah: " + (r[6] || 0),
+    "Total: " + rupiah(r[10]),
+    "Metode: " + (r[11] || "-"),
+    "Bukti: " + (r[14] ? (r[15] === "PHOTO" ? "Foto tersedia" : "Dokumen tersedia") : "Tidak diunggah — admin wajib cocokkan mutasi secara manual")
+  ].join("\n");
+  const keyboard = { inline_keyboard: [
+    [{ text: "✅ Setujui Pembayaran", callback_data: "payapprove:" + rowNumber }],
+    [{ text: "❌ Tolak / Minta Ulang", callback_data: "payreject:" + rowNumber }],
+    [{ text: "⬅️ Daftar Verifikasi", callback_data: "adm:paymentchecks" }]
+  ] };
+  if (r[14] && r[15] === "PHOTO") {
+    await updateTelegramMessage(env, message, { text, photo: String(r[14]), replyMarkup: keyboard });
+  } else {
+    await updateTelegramMessage(env, message, { text, replyMarkup: keyboard, clearMedia: true });
+    if (r[14] && r[15] === "DOCUMENT") await sendTelegramDocumentById(env, message.chat.id, String(r[14]), "Bukti pembayaran " + r[0]);
+  }
+}
+async function approvePaymentAndIssueTicket(env, rowNumber) {
+  await ensurePaymentWorkflowHeaders(env);
+  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
+  const r = values[0];
+  if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
+  if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
+  const now = new Date().toISOString();
+  const receiptCode = "SEI-" + new Date().toISOString().slice(0,10).replace(/-/g,"") + "-" + crypto.randomUUID().slice(0,6).toUpperCase();
+  await updateSheetRange(env, "Pesanan!M" + rowNumber + ":T" + rowNumber, [[
+    "DIBAYAR", "DISETUJUI", r[14] || "", r[15] || "", r[16] || now, now, receiptCode, "BELUM_DIAMBIL"
+  ]]);
+  const ticketUrl = await createPickupTicketUrl(env, String(r[0]), receiptCode);
+  return { row:r, receiptCode, ticketUrl };
+}
+async function rejectPaymentRequest(env, rowNumber) {
+  await ensurePaymentWorkflowHeaders(env);
+  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
+  const r = values[0];
+  if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
+  if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
+  await updateSheetRange(env, "Pesanan!N" + rowNumber + ":N" + rowNumber, [["DITOLAK"]]);
+  return r;
+}
+async function createPickupTicketToken(env, orderId, receiptCode) {
+  const payload = base64url(JSON.stringify({ order: orderId, code: receiptCode, v: 1 }));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("SEITON_PICKUP_TICKET_V1." + payload));
+  return payload + "." + base64urlBytes(new Uint8Array(sig));
+}
+async function verifyPickupTicketToken(env, token) {
+  if (!env.TELEGRAM_WEBHOOK_SECRET) return null;
+  const parts = String(token || "").split(".");
+  if (parts.length !== 2) return null;
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("SEITON_PICKUP_TICKET_V1." + parts[0]));
+  if (!constantTimeEqual(base64urlBytes(new Uint8Array(sig)), parts[1])) return null;
+  try {
+    const encoded = parts[0].replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(atob(encoded + "=".repeat((4 - encoded.length % 4) % 4)));
+    return payload.v === 1 && payload.order && payload.code ? payload : null;
+  } catch { return null; }
+}
+async function createPickupTicketUrl(env, orderId, receiptCode) {
+  const token = await createPickupTicketToken(env, orderId, receiptCode);
+  return "https://seiton-order-bot.midzpribadi.workers.dev/pickup?ticket=" + encodeURIComponent(token);
+}
+function escapeHtml(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
+}
+async function handlePickupVerificationPage(request, env) {
+  const ticket = await verifyPickupTicketToken(env, new URL(request.url).searchParams.get("ticket"));
+  let state = "INVALID", details = null;
+  if (ticket) {
+    const found = await findOrderById(env, ticket.order);
+    if (found && String(found.row[18] || "") === ticket.code && String(found.row[13] || "") === "DISETUJUI" && PAID_ORDER_STATUSES.includes(String(found.row[12] || "").toUpperCase())) {
+      details = found.row;
+      state = String(found.row[19] || "") === "DIAMBIL" ? "USED" : "VALID";
+    }
+  }
+  const isValid = state === "VALID";
+  const title = state === "VALID" ? "PEMBAYARAN TERVERIFIKASI" : state === "USED" ? "PESANAN SUDAH DIAMBIL" : "TIKET TIDAK VALID";
+  const color = state === "VALID" ? "#087f5b" : state === "USED" ? "#9a6700" : "#b42318";
+  const body = details ? [
+    "<div class='row'><span>ID Pesanan</span><b>" + escapeHtml(details[0]) + "</b></div>",
+    "<div class='row'><span>Produk</span><b>" + escapeHtml(details[5]) + "</b></div>",
+    "<div class='row'><span>Jumlah</span><b>" + escapeHtml(details[6]) + "</b></div>",
+    "<div class='row'><span>Total</span><b>" + escapeHtml(rupiah(details[10])) + "</b></div>",
+    "<div class='row'><span>Kode Resi</span><b>" + escapeHtml(details[18]) + "</b></div>",
+    "<div class='row'><span>Status Pengambilan</span><b>" + (state === "USED" ? "SUDAH DIAMBIL" : "BELUM DIAMBIL") + "</b></div>"
+  ].join("") : "<p>Kode tiket tidak ditemukan atau pembayaran belum disetujui.</p>";
+  const html = "<!doctype html><html lang='id'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Resi Seiton.id</title><style>body{margin:0;background:#f2f5f8;font:16px system-ui;color:#1b2735;display:grid;min-height:100vh;place-items:center}.ticket{background:white;border:1px solid #dce3ea;border-radius:18px;padding:28px;max-width:460px;width:calc(100% - 40px);box-shadow:0 12px 40px #10203018}.brand{font-size:13px;color:#64748b;font-weight:700;letter-spacing:.1em}.state{font-weight:800;color:" + color + ";font-size:21px;margin:18px 0}.row{display:flex;justify-content:space-between;gap:18px;border-top:1px dashed #d9e0e8;padding:12px 0}.row span{color:#64748b}.row b{text-align:right;max-width:60%;overflow-wrap:anywhere}.note{font-size:12px;color:#64748b;margin-top:16px}</style><main class='ticket'><div class='brand'>SEITON.ID · TIKET PENGAMBILAN</div><div class='state'>" + title + "</div>" + body + "<p class='note'>Tunjukkan halaman ini kepada petugas saat mengambil pesanan. Tiket tidak membuktikan pembayaran bank di luar status verifikasi Seiton.id.</p></main></html>";
+  return new Response(html, { status: 200, headers: { "Content-Type":"text/html; charset=utf-8", "Cache-Control":"no-store", "X-Content-Type-Options":"nosniff", "Referrer-Policy":"no-referrer" } });
+}
+function pickupQrImageUrl(ticketUrl) {
+  return "https://quickchart.io/qr?size=420&margin=2&ecLevel=H&text=" + encodeURIComponent(ticketUrl);
+}
+function pickupReceiptCaption(row, receiptCode) {
+  return [
+    "✅ BUKTI PEMBAYARAN TERVERIFIKASI · SEITON.ID",
+    "ID Pesanan: " + row[0],
+    "Pelanggan: " + (row[4] || "-"),
+    "Produk: " + (row[5] || "-"),
+    "Jumlah: " + (row[6] || 0),
+    "Total: " + rupiah(row[10]),
+    "Metode: " + (row[11] || "-"),
+    "Kode Resi: " + receiptCode,
+    "",
+    "Tunjukkan QR ini kepada petugas saat pengambilan."
+  ].join("\n");
+}
+async function sendPickupReceipt(env, customerId, row, orderId, receiptCode) {
+  const ticketUrl = await createPickupTicketUrl(env, orderId, receiptCode);
+  const caption = pickupReceiptCaption(row, receiptCode);
+  try {
+    await sendTelegramPhoto(env, customerId, pickupQrImageUrl(ticketUrl), caption, {
+      inline_keyboard: [[{ text: "🔎 Periksa Status Resi", url: ticketUrl }]]
+    });
+  } catch (error) {
+    console.error(JSON.stringify({ level: "error", event: "pickup_qr_send", message: error.message }));
+    await sendTelegram(env, customerId, caption + "\n\nLink verifikasi: " + ticketUrl);
+  }
+}
+async function sendTelegramDocumentById(env, chatId, fileId, caption = "") {
+  const payload = { chat_id: chatId, document: fileId };
+  if (caption) payload.caption = String(caption).slice(0, 1024);
+  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendDocument", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+  });
+  if (!response.ok) throw new Error("Telegram sendDocument bukti gagal (" + response.status + "): " + (await response.text()).slice(0,300));
+}
+async function showPickupQueuePage(env, message, page = 0) {
+  await ensurePaymentWorkflowHeaders(env);
+  const rows = await readSheet(env, "Pesanan!A2:T");
+  const queue = rows.map((r,i) => ({ r, rowNumber:i+2 }))
+    .filter(x => String(x.r[13] || "") === "DISETUJUI" && String(x.r[18] || "") && String(x.r[19] || "") !== "DIAMBIL" && PAID_ORDER_STATUSES.includes(String(x.r[12] || "").toUpperCase()))
+    .reverse();
+  const pageSize = 8; const pages = Math.max(1, Math.ceil(queue.length / pageSize));
+  const current = Math.max(0, Math.min(pages - 1, Number.isInteger(page) ? page : 0));
+  const subset = queue.slice(current * pageSize, current * pageSize + pageSize);
+  const buttons = subset.map(x => [{ text: String(x.r[0]) + " · " + String(x.r[4] || "Pelanggan"), callback_data: "pickupview:" + x.rowNumber }]);
+  const nav = [];
+  if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "picklist:" + (current - 1) });
+  if (current < pages - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "picklist:" + (current + 1) });
+  if (nav.length) buttons.push(nav);
+  buttons.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
+  await updateTelegramMessage(env, message, {
+    text: queue.length ? "📦 PESANAN SUDAH DIBAYAR — BELUM DIAMBIL\nHalaman " + (current + 1) + "/" + pages + "\nTotal antrean: " + queue.length : "✅ Tidak ada pesanan lunas yang menunggu pengambilan.",
+    replyMarkup: { inline_keyboard: buttons },
+    clearMedia: true
+  });
+}
+async function showPickupOrderDetail(env, message, rowNumber) {
+  await ensurePaymentWorkflowHeaders(env);
+  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
+  const r = values[0];
+  if (!r || !r[0] || String(r[13] || "") !== "DISETUJUI" || !r[18]) throw new Error("Resi pengambilan tidak ditemukan atau belum disetujui.");
+  const ticketUrl = await createPickupTicketUrl(env, String(r[0]), String(r[18]));
+  const picked = String(r[19] || "") === "DIAMBIL";
+  const buttons = picked ? [] : [[{ text: "✅ Tandai Sudah Diambil", callback_data: "pickupdone:" + rowNumber }]];
+  buttons.push([{ text: "🔗 Buka Verifikasi QR", url: ticketUrl }]);
+  buttons.push([{ text: "⬅️ Antrean Pengambilan", callback_data: "adm:pickup" }]);
+  await updateTelegramMessage(env, message, {
+    text: [
+      "📦 DETAIL PENGAMBILAN",
+      "Pesanan: " + r[0],
+      "Pelanggan: " + (r[4] || "-") + " (" + (r[3] || "-") + ")",
+      "Produk: " + (r[5] || "-"),
+      "Jumlah: " + r[6],
+      "Total: " + rupiah(r[10]),
+      "Kode Resi: " + r[18],
+      "Status: " + (picked ? "SUDAH DIAMBIL" : "BELUM DIAMBIL")
+    ].join("\n"),
+    replyMarkup: { inline_keyboard: buttons },
+    clearMedia: true
+  });
+}
+async function markOrderPickedUp(env, rowNumber) {
+  await ensurePaymentWorkflowHeaders(env);
+  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
+  const r = values[0];
+  if (!r || !r[0] || String(r[13] || "") !== "DISETUJUI" || !r[18]) throw new Error("Pesanan tidak memiliki resi pembayaran yang valid.");
+  if (String(r[19] || "") === "DIAMBIL") throw new Error("Pesanan ini sudah ditandai diambil.");
+  await updateSheetRange(env, "Pesanan!M" + rowNumber + ":T" + rowNumber, [[
+    "SELESAI", "DISETUJUI", r[14] || "", r[15] || "", r[16] || "", r[17] || "", r[18], "DIAMBIL"
+  ]]);
+  return r;
 }
 
 function verifyWhatsApp(request, env) {
