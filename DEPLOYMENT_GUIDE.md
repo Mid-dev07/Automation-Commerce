@@ -6,6 +6,17 @@
 
 Panduan ini menyiapkan bot pemesanan Telegram + WhatsApp yang berjalan di Cloudflare Workers, menyimpan transaksi ke Google Sheets, dan membangun dashboard analitik langsung di spreadsheet. Tidak ada frontend web yang disertakan.
 
+
+## Status deployment Seiton.id (3 November 2026)
+
+- Worker `seiton-order-bot` sudah diunggah ke Cloudflare dan subdomain `workers.dev` telah diaktifkan.
+- URL publik: https://seiton-order-bot.midzpribadi.workers.dev
+- Health check terverifikasi HTTP 200 dengan JSON `{"ok":true,"service":"seiton-order-bot",...}`.
+- Spreadsheet yang dikonfigurasi: https://docs.google.com/spreadsheets/d/137aLgWekyqy0cbdsPkVIgszm6oMKAKeZ-coK5knMwic/edit
+- `wrangler.toml` tersedia di repository untuk deployment berikutnya.
+- **Belum siap menerima pesanan:** belum ada Cloudflare secrets yang terpasang. Tambahkan seluruh secrets yang diperlukan pada bagian 5.4 sebelum mendaftarkan webhook Telegram/WhatsApp.
+- Dashboard Apps Script belum dijalankan; ikuti bagian 4 setelah source `setupDashboard.gs` dimasukkan ke editor Apps Script.
+
 ## 1. Arsitektur dan batasan penting
 
 ```text
@@ -129,18 +140,17 @@ Buat `wrangler.toml`:
 ```toml
 name = "seiton-order-bot"
 main = "worker.js"
-compatibility_date = "2026-11-02"
+compatibility_date = "2026-11-03"
+workers_dev = true
+
+[vars]
+GOOGLE_SHEETS_ID = "GANTI_SPREADSHEET_ID"
 
 [observability]
 enabled = true
 
-[[kv_namespaces]]
-binding = "TOKEN_KV"
-id = "GANTI_DENGAN_KV_NAMESPACE_ID"
-
-[[kv_namespaces]]
-binding = "ORDERS_KV"
-id = "GANTI_DENGAN_KV_NAMESPACE_ID"
+# KV optional. Add [[kv_namespaces]] only after creating namespaces
+# and replacing each id with the real namespace ID.
 ```
 
 Buat namespace KV jika ingin cache token Google dan deduplikasi singkat:
@@ -212,14 +222,14 @@ Untuk keamanan, gunakan secret untuk `ADMIN_CHAT_ID` bila Anda tidak ingin ID ad
 npx wrangler deploy
 ```
 
-Simpan URL Worker yang muncul, misalnya:
+Simpan URL Worker yang muncul. Deploy Seiton.id saat ini menggunakan:
 
-`https://seiton-order-bot.<subdomain>.workers.dev`
+`https://seiton-order-bot.midzpribadi.workers.dev`
 
 Health check:
 
 ```bash
-curl https://seiton-order-bot.<subdomain>.workers.dev/health
+curl https://seiton-order-bot.midzpribadi.workers.dev/health
 ```
 
 Harus mengembalikan JSON `{"ok":true,...}`.
@@ -262,7 +272,7 @@ Telegram mengirim `X-Telegram-Bot-Api-Secret-Token`, yang diverifikasi Worker bi
 2. Siapkan WhatsApp Business Account, nomor, Phone Number ID, dan access token.
 3. Pada konfigurasi Webhooks, gunakan callback URL:
 
-   `https://seiton-order-bot.<subdomain>.workers.dev/whatsapp`
+   `https://seiton-order-bot.midzpribadi.workers.dev/whatsapp`
 
 4. Isi Verify Token dengan nilai yang sama persis dengan `WHATSAPP_VERIFY_TOKEN`.
 5. Pilih object `whatsapp_business_account`, lalu subscribe field `messages`.
