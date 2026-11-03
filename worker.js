@@ -76,7 +76,8 @@ async function handleTelegram(request, env, ctx) {
   if (update.callback_query) {
     ctx.waitUntil(handleTelegramCallback(env, update.callback_query).catch(async error => {
       console.error(JSON.stringify({ level: "error", event: "telegram_callback", message: error.message }));
-      try { await answerTelegramCallback(env, update.callback_query.id, "Terjadi kendala. Silakan coba lagi."); } catch {}
+      const callbackChatId = String(update.callback_query.message?.chat?.id || update.callback_query.from?.id || "");
+      try { await sendTelegram(env, callbackChatId, "⚠️ Aksi gagal: " + String(error.message || "Kesalahan tidak diketahui").slice(0, 700)); } catch {}
     }));
     return json({ ok: true });
   }
