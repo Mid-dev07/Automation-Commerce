@@ -83,7 +83,7 @@ test("catalog parser distinguishes unlimited stock from malformed stock", () => 
 });
 
 test("CSV cells neutralize formula prefixes, including whitespace-prefixed formulas", () => {
-  assert.equal(csvCell("=HYPERLINK(\"https://bad.example\")"), "\"'=HYPERLINK(\"\"https://bad.example\"")\"");
+  assert.equal(csvCell('=HYPERLINK("https://bad.example")'), '"\'=HYPERLINK(""https://bad.example"")"');
   assert.equal(csvCell("  =1+1"), "\"'  =1+1\"");
   assert.equal(csvCell("@SUM(A1:A2)"), "\"'@SUM(A1:A2)\"");
   assert.equal(csvCell("-25000"), "\"-25000\"");
