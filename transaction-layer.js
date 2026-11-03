@@ -105,9 +105,10 @@ async function createOrderD1(db, input) {
   if (!Number.isInteger(qty) || qty < 1 || qty > 1000) throw new Error("Jumlah pesanan tidak valid.");
   const method = clean(input.paymentMethod, 20).toUpperCase();
   if (!["QRIS", "TRANSFER", "COD"].includes(method)) throw new Error("Metode pembayaran tidak valid.");
-  const product = await db.prepare(
-    "SELECT sku, name, price, stock, active FROM catalog_products WHERE sku = ? COLLATE NOCASE"
-  ).bind(sku).first();
+  const dedupe = idempotencyKey(input);
+  const prior = await db.prepare("SELECT * FROM orders WHERE idempotency_key = ?").bind(dedupe).first();
+  if (prior) return { ...prior, duplicate: true, created: false, stock_reserved: Boolean(prior.stock_reserved) };
+  const product = await db.prepare("SELECT sku, name, price, stock, active FROM catalog_products WHERE sku = ? COLLATE NOCASE").bind(sku).first();
   if (!product || !product.active) throw new Error("Produk tidak ditemukan atau sedang nonaktif.");
   const price = asSafeMoney(product.price, "Harga produk");
   if (price > Math.floor(SAFE_INTEGER / qty)) throw new Error("Subtotal pesanan melebihi batas angka aman.");
@@ -122,12 +123,6 @@ async function createOrderD1(db, input) {
   const createdMs = Date.now();
   const id = orderId();
   const dedupe = idempotencyKey(input);
-  const args = [
-    id, dedupe, createdAt, createdMs, clean(input.channel || "telegram", 24),
-    clean(input.customerId, 128), clean(input.customerName || "Pelanggan", 100),
-    qty, qty, shipping, qty, shipping, method, "MENUNGGU_PEMBAYARAN",
-    sku, qty
-  ];
   const results = await db.batch([
     db.prepare(`INSERT OR IGNORE INTO orders (
       order_id,idempotency_key,created_at,created_ms,channel,customer_id,customer_name,
@@ -200,7 +195,7 @@ async function saveProductD1(db, product, originalSku = "") {
   await requireReady(db);
   const sku = clean(product.sku,40), name = clean(product.name,100);
   const price = asSafeMoney(product.price,"Harga");
-  const stock = product.stock == null || product.stock === "" ? null : asSafeMoney(product.stock,"Stok");
+  const stock = asSafeMoney(product.stock ?? "","Stok");
   const photo = clean(product.photo_url,1000), description = clean(product.description,500);
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU produk tidak valid.");
   if (!name) throw new Error("Nama produk wajib diisi.");
@@ -250,27 +245,28 @@ async function requestVerificationD1(db, id, customerId) {
     throw new Error("Status pesanan tidak mengizinkan permintaan verifikasi pembayaran.");
   }
   const at = nowJakarta();
-  const result = await db.prepare(`UPDATE orders SET payment_confirmation_status='MENUNGGU_VERIFIKASI',
-    payment_proof_file_id='',payment_proof_type='',payment_requested_at=?,updated_at=?
-    WHERE order_id=? AND status=? AND payment_confirmation_status IN ('','DITOLAK','MENUNGGU_VERIFIKASI')`)
-    .bind(at,at,id,o.status).run();
-  if (Number(result.meta?.changes) !== 1) {
+  if (String(o.payment_confirmation_status).toUpperCase() === "MENUNGGU_VERIFIKASI") return o;
+  const at = nowJakarta();
+  const results = await db.batch([
+    db.prepare("UPDATE orders SET payment_confirmation_status='MENUNGGU_VERIFIKASI',payment_proof_file_id='',payment_proof_type='',payment_requested_at=?,updated_at=? WHERE order_id=? AND status=? AND payment_confirmation_status IN ('','DITOLAK')").bind(at,at,id,o.status),
+    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_REQUESTED',?,?,?,?,'{}',? FROM orders WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND updated_at=?").bind(o.payment_confirmation_status||"","MENUNGGU_VERIFIKASI",clean(customerId,128),"request:"+at,at,id,at)
+  ]);
+  if (Number(results[0].meta?.changes) !== 1) {
     const latest = await getOrderD1(db,id);
     if (latest?.payment_confirmation_status === "MENUNGGU_VERIFIKASI") return latest;
     throw new Error("Permintaan verifikasi sudah berubah. Muat ulang pesanan.");
   }
-  await recordOrderEvent(db,id,"PAYMENT_REQUESTED",o.payment_confirmation_status,"MENUNGGU_VERIFIKASI",customerId,"request:"+at,at);
   return getOrderD1(db,id);
 }
 async function savePaymentProofD1(db,id,customerId,fileId,fileType) {
   await requireReady(db);
   const at=nowJakarta();
-  const result=await db.prepare(`UPDATE orders SET payment_proof_file_id=?,payment_proof_type=?,updated_at=?
-    WHERE order_id=? AND customer_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI'
-      AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')`)
-    .bind(fileId,fileType,at,id,String(customerId)).run();
-  if(Number(result.meta?.changes)!==1) throw new Error("Permintaan pembayaran tidak sedang menunggu verifikasi.");
-  await recordOrderEvent(db,id,"PAYMENT_PROOF_UPLOADED","","MENUNGGU_VERIFIKASI",customerId,"proof:"+fileId,at,{file_type:fileType});
+  const at=nowJakarta();
+  const results=await db.batch([
+    db.prepare("UPDATE orders SET payment_proof_file_id=?,payment_proof_type=?,updated_at=? WHERE order_id=? AND customer_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')").bind(fileId,fileType,at,id,String(customerId)),
+    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_PROOF_UPLOADED','','MENUNGGU_VERIFIKASI',?,?,?,?,? FROM orders WHERE order_id=? AND payment_proof_file_id=? AND updated_at=?").bind(clean(customerId,128),"proof:"+fileId,JSON.stringify({file_type:fileType}),at,id,fileId,at)
+  ]);
+  checkChanges(results[0],"Permintaan pembayaran tidak sedang menunggu verifikasi.");
   return getOrderD1(db,id);
 }
 async function approvePaymentD1(db,id,actor="admin") {
