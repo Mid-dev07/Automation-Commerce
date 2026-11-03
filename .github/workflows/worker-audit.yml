@@ -20,5 +20,7 @@ jobs:
           package-manager-cache: false
       - name: Check Worker syntax
         run: node --check worker.js
+      - name: Check transactional module syntax
+        run: node --check transaction-layer.js
       - name: Run regression tests
-        run: node --test tests/worker-contract.test.cjs
+        run: node --test tests/*.test.cjs
