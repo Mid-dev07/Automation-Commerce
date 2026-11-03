@@ -499,6 +499,15 @@ async function handleTelegramCallback(env, query) {
       await updateTelegramMessage(env, message, { text: await buildAdminReport(env), replyMarkup: adminMenuKeyboard(), clearMedia: true });
       return;
     }
+    if (action === "paymentchecks" || action.startsWith("paymentchecks:")) {
+      const page = action.startsWith("paymentchecks:") ? Number(action.slice("paymentchecks:".length)) : 0;
+      await showPaymentRequestsPage(env, message, page);
+      return;
+    }
+    if (action === "pickup") {
+      await showPickupQueuePage(env, message, 0);
+      return;
+    }
     if (action === "dashboard") {
       const accessToken = await createDashboardAccessToken(env, chatId);
       const link = "https://seiton-order-bot.midzpribadi.workers.dev/admin#access=" + encodeURIComponent(accessToken);
@@ -609,6 +618,87 @@ async function handleTelegramCallback(env, query) {
       await sendTelegramDocument(env, chatId, reports[type].csv, reports[type].filename, reports[type].caption);
     }
     await updateTelegramMessage(env, message, { text: "✅ Laporan selesai dikirim.", replyMarkup: adminMenuKeyboard() });
+    return;
+  }
+
+  if (data.startsWith("pc:req:")) {
+    await requestPaymentVerification(env, message, chatId, userId, data.slice("pc:req:".length));
+    return;
+  }
+
+  if (data.startsWith("ticket:")) {
+    const orderId = data.slice("ticket:".length);
+    await ensurePaymentWorkflowHeaders(env);
+    const found = await findOrderById(env, orderId);
+    if (!found || String(found.row[3] || "") !== userId) throw new Error("Resi tidak ditemukan untuk akun Telegram ini.");
+    if (String(found.row[13] || "") !== "DISETUJUI" || !found.row[18]) throw new Error("Pembayaran belum disetujui admin.");
+    await sendPickupReceipt(env, userId, found.row, orderId, String(found.row[18]));
+    await updateTelegramMessage(env, message, { text: "🎟️ Resi pengambilan dikirim kembali.", replyMarkup: customerMenuKeyboard(), clearMedia: true });
+    return;
+  }
+
+  if (data.startsWith("paylist:")) {
+    if (!admin) throw new Error("Menu ini khusus admin.");
+    await showPaymentRequestsPage(env, message, Number(data.slice("paylist:".length)));
+    return;
+  }
+  if (data.startsWith("picklist:")) {
+    if (!admin) throw new Error("Menu ini khusus admin.");
+    await showPickupQueuePage(env, message, Number(data.slice("picklist:".length)));
+    return;
+  }
+  if (data.startsWith("payview:")) {
+    if (!admin) throw new Error("Menu ini khusus admin.");
+    await showPaymentRequestDetail(env, message, Number(data.slice("payview:".length)));
+    return;
+  }
+  if (data.startsWith("payapprove:")) {
+    if (!admin) throw new Error("Menu ini khusus admin.");
+    const rowNumber = Number(data.slice("payapprove:".length));
+    const approved = await approvePaymentAndIssueTicket(env, rowNumber);
+    await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode);
+    await updateTelegramMessage(env, message, {
+      text: "✅ Pembayaran " + approved.row[0] + " berhasil disetujui. Resi dan QR pengambilan sudah dikirim ke pelanggan.",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "📦 Lihat Antrean Pengambilan", callback_data: "adm:pickup" }],
+        [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+      ] },
+      clearMedia: true
+    });
+    return;
+  }
+  if (data.startsWith("payreject:")) {
+    if (!admin) throw new Error("Menu ini khusus admin.");
+    const rowNumber = Number(data.slice("payreject:".length));
+    const rejected = await rejectPaymentRequest(env, rowNumber);
+    await sendTelegram(env, String(rejected[3]), "⚠️ Permintaan verifikasi pembayaran untuk " + rejected[0] + " belum dapat disetujui. Periksa kembali nominal/bukti pembayaran dan ajukan ulang setelah benar.", {
+      inline_keyboard: [[{ text: "🔁 Ajukan Verifikasi Ulang", callback_data: "pc:req:" + rejected[0] }]]
+    });
+    await updateTelegramMessage(env, message, {
+      text: "❌ Permintaan pembayaran " + rejected[0] + " ditolak. Pelanggan sudah diberi tahu agar dapat mengajukan ulang.",
+      replyMarkup: adminMenuKeyboard(),
+      clearMedia: true
+    });
+    return;
+  }
+  if (data.startsWith("pickupview:")) {
+    if (!admin) throw new Error("Menu ini khusus admin.");
+    await showPickupOrderDetail(env, message, Number(data.slice("pickupview:".length)));
+    return;
+  }
+  if (data.startsWith("pickupdone:")) {
+    if (!admin) throw new Error("Menu ini khusus admin.");
+    const rowNumber = Number(data.slice("pickupdone:".length));
+    const order = await markOrderPickedUp(env, rowNumber);
+    try { await sendTelegram(env, String(order[3]), "✅ Pengambilan pesanan " + order[0] + " telah dicatat. Terima kasih sudah berbelanja di Seiton.id!"); } catch {}
+    await updateTelegramMessage(env, message, {
+      text: "✅ Pesanan " + order[0] + " berhasil ditandai SUDAH DIAMBIL.",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "📦 Antrean Pengambilan", callback_data: "adm:pickup" }],
+        [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+      ] },
+      clearMedia: true
+    });
     return;
   }
 
