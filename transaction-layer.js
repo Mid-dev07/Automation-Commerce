@@ -272,6 +272,9 @@ async function approvePaymentD1(db,id,actor="admin") {
   if(!o)throw new Error("Pesanan tidak ditemukan.");
   if(!ONLINE_METHODS.has(String(o.payment_method).toUpperCase()))throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi.");
   if(CANCELLED_STATUSES.has(String(o.status).toUpperCase()))throw new Error("Pesanan sudah dibatalkan.");
+  if (String(o.payment_confirmation_status).toUpperCase() === "DISETUJUI" && o.receipt_code) {
+    return { ...o, alreadyApproved: true };
+  }
   const at=nowJakarta(), code="SEI-"+dateStamp(at)+"-"+crypto.randomUUID().slice(0,6).toUpperCase();
   const results=await db.batch([
     db.prepare(`UPDATE orders SET status='DIBAYAR',payment_confirmation_status='DISETUJUI',
@@ -355,7 +358,7 @@ async function markPickedUpD1(db,id,actor="admin") {
     db.prepare(`UPDATE orders SET status='SELESAI',pickup_status='DIAMBIL',updated_at=?
       WHERE order_id=? AND payment_confirmation_status='DISETUJUI'
         AND receipt_code IS NOT NULL AND receipt_code<>''
-        AND status IN ('DIBAYAR','DIPROSES','DIKIRIM','PAID','COMPLETED')
+        AND status IN ('DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED')
         AND pickup_status<>'DIAMBIL'`).bind(at,id),
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'PICKED_UP',status,'SELESAI',?,?, '{}',? FROM orders
