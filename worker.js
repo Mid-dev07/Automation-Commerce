@@ -1734,9 +1734,6 @@ function parseOrderText(text) {
 }
 
 async function createOrder(env, input) {
-  if (!env.GOOGLE_SHEETS_ID || !env.GOOGLE_SERVICE_ACCOUNT_KEY) {
-    throw new Error("Google Sheets credentials are not configured");
-  }
   const transactionState = await transactionReadiness(env);
   if (transactionState.configured && !transactionState.ready) {
     throw new Error("Lapisan transaksi D1 belum siap. Admin perlu menjalankan /migrasi_d1 sebelum pesanan baru diterima.");
@@ -1746,10 +1743,17 @@ async function createOrder(env, input) {
     if (!Number.isSafeInteger(shipping) || shipping < 0) throw new Error("DEFAULT_SHIPPING harus berupa bilangan Rupiah nol atau lebih.");
     const order = await createOrderTransactional(env,{...input,shipping});
     if (!order.duplicate) {
-      const stored = await findOrderTransactional(env,order.orderId);
-      await mirrorTransactionalOrder(env,stored);
+      try {
+        const stored = await findOrderTransactional(env,order.orderId);
+        await mirrorTransactionalOrder(env,stored);
+      } catch (error) {
+        console.warn(JSON.stringify({level:"warn",event:"order_sheet_mirror_read",order_id:order.orderId,message:error.message}));
+      }
     }
     return order;
+  }
+  if (!env.GOOGLE_SHEETS_ID || !env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+    throw new Error("Google Sheets credentials are not configured");
   }
   const idempotencyKey = input.idempotencyKey
     ? `update:${String(input.channel)}:${String(input.idempotencyKey).slice(0,128)}`
