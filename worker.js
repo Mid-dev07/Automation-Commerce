@@ -63,6 +63,13 @@ async function handleTelegram(request, env, ctx) {
   }
   let update;
   try { update = await request.json(); } catch { return json({ ok: false }, 400); }
+  if (update.callback_query) {
+    ctx.waitUntil(handleTelegramCallback(env, update.callback_query).catch(async error => {
+      console.error(JSON.stringify({ level: "error", event: "telegram_callback", message: error.message }));
+      try { await answerTelegramCallback(env, update.callback_query.id, "Terjadi kendala. Silakan coba lagi."); } catch {}
+    }));
+    return json({ ok: true });
+  }
   const message = update.message || update.edited_message;
   if (!message || !message.chat || !message.from) return json({ ok: true });
 
@@ -78,7 +85,8 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/start") || text.startsWith("/help")) {
-      await sendTelegram(env, chatId, helpText());
+      const admin = isAdmin(chatId, env);
+      await sendTelegram(env, chatId, admin ? adminMenuText() : customerMenuText(), admin ? adminMenuKeyboard() : customerMenuKeyboard());
       return;
     }
     const orderInput = parseOrderText(text);
@@ -100,6 +108,161 @@ async function handleTelegram(request, env, ctx) {
     await sendTelegram(env, chatId, "⚠️ Pesanan belum dapat diproses. Silakan coba kembali atau hubungi admin.");
   }));
   return json({ ok: true });
+}
+
+
+function customerMenuText() {
+  return "🛍️ SELAMAT DATANG DI SEITON.ID\nPilih menu di bawah ini. Anda tidak perlu mengetik format pesanan.";
+}
+function adminMenuText() {
+  return "🛠️ PANEL ADMIN SEITON.ID\nPilih tindakan yang ingin dilakukan.";
+}
+function customerMenuKeyboard() {
+  return { inline_keyboard: [
+    [{ text: "🛍️ Belanja Produk", callback_data: "nav:catalog" }],
+    [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
+    [{ text: "💬 Bantuan", callback_data: "nav:help" }]
+  ] };
+}
+function adminMenuKeyboard() {
+  return { inline_keyboard: [
+    [{ text: "📊 Laporan Penjualan", callback_data: "adm:report" }],
+    [{ text: "📋 Pesanan Terbaru", callback_data: "adm:recent" }],
+    [{ text: "🔄 Perbarui Status Pesanan", callback_data: "adm:statuslist" }],
+    [{ text: "📦 Lihat Katalog", callback_data: "adm:catalog" }],
+    [{ text: "🛍️ Tampilan Pelanggan", callback_data: "nav:home" }]
+  ] };
+}
+async function answerTelegramCallback(env, callbackId, message = "") {
+  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/answerCallbackQuery", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackId, text: message, show_alert: false })
+  });
+  if (!response.ok) throw new Error("Telegram answerCallbackQuery gagal (" + response.status + ")");
+}
+async function handleTelegramCallback(env, query) {
+  const chatId = String(query.message?.chat?.id || query.from?.id || "");
+  const userId = String(query.from?.id || "");
+  const data = String(query.data || "");
+  const admin = isAdmin(chatId, env);
+  await answerTelegramCallback(env, query.id);
+  if (data === "nav:home" || data === "adm:home") {
+    const a = data === "adm:home" && admin;
+    await sendTelegram(env, chatId, a ? adminMenuText() : customerMenuText(), a ? adminMenuKeyboard() : customerMenuKeyboard()); return;
+  }
+  if (data === "nav:catalog") {
+    const rows = await readSheet(env, "Katalog_Produk!A2:E");
+    const products = rows.filter(r => r[0] && !["FALSE","0","NONAKTIF","NO"].includes(String(r[4] ?? "TRUE").toUpperCase()));
+    const buttons = products.slice(0, 30).map(r => [{ text: String(r[1] || r[0]).slice(0,35) + " — " + rupiah(r[2]), callback_data: "buy:" + String(r[0]).trim() }]);
+    buttons.push([{ text: "🏠 Menu Utama", callback_data: "nav:home" }]);
+    await sendTelegram(env, chatId, products.length ? "Pilih produk yang ingin dibeli:" : "Katalog belum memiliki produk aktif.", { inline_keyboard: buttons }); return;
+  }
+  if (data.startsWith("buy:")) {
+    const sku = data.slice(4);
+    const rows = await readSheet(env, "Katalog_Produk!A2:E");
+    const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
+    if (!p || ["FALSE","0","NONAKTIF","NO"].includes(String(p[4] ?? "TRUE").toUpperCase())) throw new Error("Produk tidak tersedia");
+    const stock = p[3] === "" || p[3] == null ? null : Number(p[3]);
+    const buttons = [1,2,3,5].filter(q => stock === null || (Number.isFinite(stock) && stock >= q))
+      .map(q => ({ text: q + " pcs", callback_data: "qty:" + sku + ":" + q }));
+    await sendTelegram(env, chatId, "Produk: " + (p[1] || sku) + "\nHarga: " + rupiah(p[2]) + "\nStok: " + (stock === null ? "Tidak dibatasi" : stock) + "\n\nPilih jumlah:", {
+      inline_keyboard: [buttons, [{ text: "⬅️ Kembali ke katalog", callback_data: "nav:catalog" }]]
+    }); return;
+  }
+  if (data.startsWith("qty:")) {
+    const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 1000) throw new Error("Jumlah tidak valid");
+    await sendTelegram(env, chatId, "Jumlah dipilih: " + qty + "\nPilih metode pembayaran:", { inline_keyboard: [
+      [{ text: "QRIS", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }],
+      [{ text: "Transfer Bank", callback_data: "pay:" + sku + ":" + qty + ":TRANSFER" }],
+      [{ text: "COD", callback_data: "pay:" + sku + ":" + qty + ":COD" }],
+      [{ text: "⬅️ Kembali", callback_data: "buy:" + sku }]
+    ] }); return;
+  }
+  if (data.startsWith("pay:")) {
+    const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
+    if (!["QRIS","TRANSFER","COD"].includes(method)) throw new Error("Metode pembayaran tidak valid");
+    const rows = await readSheet(env, "Katalog_Produk!A2:E");
+    const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
+    if (!p) throw new Error("Produk tidak ditemukan");
+    await sendTelegram(env, chatId, "Konfirmasi pesanan\n\nProduk: " + (p[1] || sku) + "\nJumlah: " + qty + "\nHarga satuan: " + rupiah(p[2]) + "\nTotal: " + rupiah(Number(p[2]) * qty) + "\nPembayaran: " + method + "\n\nLanjutkan membuat pesanan?", { inline_keyboard: [
+      [{ text: "✅ Ya, buat pesanan", callback_data: "ok:" + sku + ":" + qty + ":" + method }],
+      [{ text: "⬅️ Ubah jumlah", callback_data: "buy:" + sku }],
+      [{ text: "🏠 Batal", callback_data: "nav:home" }]
+    ] }); return;
+  }
+  if (data.startsWith("ok:")) {
+    const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
+    const result = await createOrder(env, { sku: sku.toUpperCase(), quantity: qty, paymentMethod: method,
+      channel: "telegram", customerId: userId, customerName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" ") });
+    await sendTelegram(env, chatId, orderConfirmation(result, env), customerMenuKeyboard()); return;
+  }
+  if (data === "nav:orders") {
+    const rows = await readSheet(env, "Pesanan!A2:M");
+    const mine = rows.filter(r => String(r[3] || "") === userId).slice(-5).reverse();
+    const lines = mine.map(r => String(r[0]) + " | " + String(r[5]) + " | " + String(r[6]) + " pcs | " + rupiah(r[10]) + " | " + String(r[12]));
+    await sendTelegram(env, chatId, mine.length ? "Lima pesanan terakhir:\n\n" + lines.join("\n") : "Belum ada pesanan atas akun Telegram ini.", customerMenuKeyboard()); return;
+  }
+  if (data === "nav:help") {
+    await sendTelegram(env, chatId, "Bantuan Seiton.id\nPilih Belanja Produk untuk membuat pesanan melalui tombol. Untuk bantuan admin, silakan hubungi admin toko.", customerMenuKeyboard()); return;
+  }
+  if (data.startsWith("adm:")) {
+    if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
+    const action = data.slice(4);
+    if (action === "report") { await sendTelegram(env, chatId, await buildAdminReport(env), adminMenuKeyboard()); return; }
+    if (action === "catalog") {
+      const rows = await readSheet(env, "Katalog_Produk!A2:E");
+      const lines = rows.filter(r => r[0]).slice(0,30).map(r => String(r[0]) + " — " + String(r[1]) + " | " + rupiah(r[2]) + " | Stok: " + String(r[3]) + " | " + String(r[4] ?? "TRUE"));
+      await sendTelegram(env, chatId, lines.length ? "Katalog Produk:\n\n" + lines.join("\n") : "Katalog masih kosong.", adminMenuKeyboard()); return;
+    }
+    if (action === "recent" || action === "statuslist") {
+      const rows = await readSheet(env, "Pesanan!A2:M");
+      const recent = rows.map((r,i) => ({ r, row:i+2 })).filter(x => x.r[0]).slice(-10).reverse();
+      if (!recent.length) { await sendTelegram(env, chatId, "Belum ada pesanan.", adminMenuKeyboard()); return; }
+      const buttons = recent.map(x => [{ text: String(x.r[0]).slice(0,22) + " · " + String(x.r[12] || "BARU").slice(0,18),
+        callback_data: (action === "statuslist" ? "st:" : "detail:") + x.row }]);
+      buttons.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
+      const summary = recent.map(x => String(x.r[0]) + " | " + String(x.r[5]) + " | " + rupiah(x.r[10]) + " | " + String(x.r[12])).join("\n");
+      await sendTelegram(env, chatId, action === "statuslist" ? "Pilih pesanan yang statusnya ingin diperbarui:" : "10 pesanan terbaru:\n\n" + summary, { inline_keyboard: buttons }); return;
+    }
+  }
+  if (data.startsWith("detail:")) {
+    if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
+    const rowNum = Number(data.split(":")[1]);
+    const rows = await readSheet(env, "Pesanan!A" + rowNum + ":M" + rowNum); const r = rows[0];
+    if (!r) throw new Error("Pesanan tidak ditemukan");
+    await sendTelegram(env, chatId, "Detail Pesanan\nID: " + r[0] + "\nPelanggan: " + r[4] + " (" + r[3] + ")\nProduk: " + r[5] + "\nJumlah: " + r[6] + "\nTotal: " + rupiah(r[10]) + "\nPembayaran: " + r[11] + "\nStatus: " + r[12], { inline_keyboard: [
+      [{ text: "🔄 Perbarui Status", callback_data: "st:" + rowNum }],
+      [{ text: "⬅️ Pesanan Terbaru", callback_data: "adm:recent" }]
+    ] }); return;
+  }
+  if (data.startsWith("st:")) {
+    if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
+    const rowNum = Number(data.split(":")[1]);
+    await sendTelegram(env, chatId, "Pilih status baru:", { inline_keyboard: [
+      [{ text: "Menunggu Pembayaran", callback_data: "su:" + rowNum + ":MENUNGGU_PEMBAYARAN" }],
+      [{ text: "Dibayar", callback_data: "su:" + rowNum + ":DIBAYAR" }],
+      [{ text: "Diproses", callback_data: "su:" + rowNum + ":DIPROSES" }],
+      [{ text: "Dikirim", callback_data: "su:" + rowNum + ":DIKIRIM" }],
+      [{ text: "Selesai", callback_data: "su:" + rowNum + ":SELESAI" }],
+      [{ text: "Dibatalkan", callback_data: "su:" + rowNum + ":DIBATALKAN" }],
+      [{ text: "⬅️ Kembali", callback_data: "detail:" + rowNum }]
+    ] }); return;
+  }
+  if (data.startsWith("su:")) {
+    if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
+    const parts = data.split(":"); const rowNum = Number(parts[1]); const status = parts[2];
+    const allowed = ["MENUNGGU_PEMBAYARAN","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
+    if (!Number.isInteger(rowNum) || rowNum < 2 || !allowed.includes(status)) throw new Error("Pembaruan status tidak valid");
+    const token = await getGoogleAccessToken(env); const range = encodeURIComponent("Pesanan!M" + rowNum);
+    const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + "?valueInputOption=USER_ENTERED", {
+      method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [[status]] })
+    });
+    if (!response.ok) throw new Error("Pembaruan status gagal (" + response.status + "): " + (await response.text()).slice(0,300));
+    await sendTelegram(env, chatId, "✅ Status pesanan berhasil diperbarui menjadi " + status + ".", adminMenuKeyboard()); return;
+  }
+  await sendTelegram(env, chatId, admin ? adminMenuText() : customerMenuText(), admin ? adminMenuKeyboard() : customerMenuKeyboard());
 }
 
 function verifyWhatsApp(request, env) {
@@ -434,14 +597,14 @@ function helpText() {
   ].join("\n");
 }
 
-async function sendTelegram(env, chatId, text) {
+async function sendTelegram(env, chatId, text, replyMarkup = null) {
   if (!env.TELEGRAM_TOKEN) throw new Error("TELEGRAM_TOKEN belum diatur");
-  const response = await fetch(`${TELEGRAM_API}/bot${env.TELEGRAM_TOKEN}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "Markdown", disable_web_page_preview: true })
+  const payload = { chat_id: chatId, text, disable_web_page_preview: true };
+  if (replyMarkup) payload.reply_markup = replyMarkup;
+  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendMessage", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
   });
-  if (!response.ok) throw new Error(`Telegram sendMessage gagal (${response.status})`);
+  if (!response.ok) throw new Error("Telegram sendMessage gagal (" + response.status + "): " + (await response.text()).slice(0,300));
 }
 
 async function sendWhatsApp(env, to, text) {
