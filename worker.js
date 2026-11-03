@@ -79,7 +79,8 @@ async function handleTelegram(request, env, ctx) {
   const customerName = [message.from.first_name, message.from.last_name].filter(Boolean).join(" ");
   const work = (async () => {
     if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
-      await handleAdminProductForm(env, chatId, text, message.reply_to_message.text);
+      try { await handleAdminProductForm(env, chatId, text, message.reply_to_message.text); }
+      catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
       return;
     }
     if (text.startsWith("/laporan")) {
@@ -143,6 +144,18 @@ function adminCatalogKeyboard() {
     [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
     [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
   ] };
+}
+async function ensureCatalogHeaders(env) {
+  const headers = await readSheet(env, "Katalog_Produk!A1:G1");
+  if (!headers[0]?.[5] || !headers[0]?.[6]) {
+    const token = await getGoogleAccessToken(env);
+    const range = encodeURIComponent("Katalog_Produk!F1:G1");
+    const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + "?valueInputOption=RAW", {
+      method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: JSON.stringify({ values: [["foto_url", "deskripsi"]] })
+    });
+    if (!response.ok) throw new Error("Tidak dapat menyiapkan kolom foto dan deskripsi katalog.");
+  }
 }
 async function promptAdminProduct(env, chatId, mode, sku = "") {
   const intro = mode === "ADD" ? "📝 FORM PRODUK SEITON — ADD" : "📝 FORM PRODUK SEITON — EDIT — " + sku;
@@ -307,8 +320,9 @@ async function handleTelegramCallback(env, query) {
     if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
     const action = data.slice(4);
     if (action === "report") { await sendTelegram(env, chatId, await buildAdminReport(env), adminMenuKeyboard()); return; }
-    if (action === "addproduct") { await promptAdminProduct(env, chatId, "ADD"); return; }
+    if (action === "addproduct") { await ensureCatalogHeaders(env); await promptAdminProduct(env, chatId, "ADD"); return; }
     if (action === "catalog") {
+      await ensureCatalogHeaders(env);
       const rows = await readSheet(env, "Katalog_Produk!A2:G");
       const products = rows.map((r,i) => ({ r, row:i+2 })).filter(x => x.r[0]).slice(0,30);
       if (!products.length) { await sendTelegram(env, chatId, "Katalog masih kosong.", adminCatalogKeyboard()); return; }
