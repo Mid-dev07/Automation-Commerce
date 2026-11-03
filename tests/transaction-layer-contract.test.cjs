@@ -63,6 +63,23 @@ test("payment, status and pickup callbacks accept stable order IDs", () => {
   assert.match(worker, /resolveOrderReference\(env,reference\)/);
 });
 
+test("catalog blank stock remains unlimited and paid approval retry-safe", () => {
+  assert.match(layer, /product\.stock == null \|\| product\.stock === "" \? null/);
+  assert.match(worker, /stockText === "" \? null : Number\(stockText\)/);
+  assert.match(layer, /alreadyApproved: true/);
+  assert.match(layer, /status IN \('DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED'\)/);
+  assert.match(layer, /Pesanan yang sudah dibatalkan tidak dapat dibuka kembali/);
+});
+
+test("Wrangler declares the SQLite DO class and D1 production binding", () => {
+  const config = fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8");
+  assert.match(config, /"binding": "DB"/);
+  assert.match(config, /"database_name": "seiton-transactions-prod"/);
+  assert.match(config, /"name": "ORDER_COORDINATOR"/);
+  assert.match(config, /"type": "durable-object"/);
+  assert.match(config, /"storage": "sqlite"/);
+});
+
 test("Google Sheets is only a best-effort mirror after transactional checkout", () => {
   assert.match(worker, /const order = await createOrderTransactional\(env,\{\.\.\.input,shipping\}\)/);
   assert.match(worker, /event:"order_sheet_mirror"/);
