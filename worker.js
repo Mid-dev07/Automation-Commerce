@@ -1,3 +1,12 @@
+import {
+  bootstrapTransactions, createOrderTransactional, transactionReadiness,
+  findOrderTransactional, findOrderByLegacyRow, listOrdersTransactional,
+  listProductsTransactional, findProductTransactional, saveProductTransactional,
+  deleteProductTransactional, setLegacyRowTransactional, updateProofTransactional,
+  requestVerificationTransactional, approvePaymentTransactional, rejectPaymentTransactional,
+  setOrderStatusTransactional, markPickedUpTransactional, listDashboardDataTransactional,
+  orderToSheetRow
+} from "./transaction-layer.js";
 /**
  * ============================================================================
  * SEITON.ID - HIGH-PERFORMANCE BOT & INTERACTIVE DASHBOARD ENGINE
@@ -34,6 +43,77 @@ const HEADERS = [
   "product", "quantity", "unit_price", "subtotal", "shipping", "total",
   "payment_method", "status"
 ];
+
+
+async function readCatalogRows(env, range = "Katalog_Produk!A2:G") {
+  const state = await transactionReadiness(env);
+  if (state.ready) {
+    const products = await listProductsTransactional(env, true);
+    return products.map(p => [
+      p.sku, p.name, p.price, p.stock == null ? "" : p.stock,
+      p.active ? "TRUE" : "FALSE", p.photo_url || "", p.description || ""
+    ]);
+  }
+  return readSheet(env, range);
+}
+async function resolveOrderReference(env, reference) {
+  const ref = String(reference ?? "").trim();
+  if (!ref) return null;
+  const state = await transactionReadiness(env);
+  if (state.ready) {
+    const order = /^\d+$/.test(ref)
+      ? await findOrderByLegacyRow(env, Number(ref))
+      : await findOrderTransactional(env, ref);
+    return order ? {
+      order,
+      rowNumber: order.legacy_sheet_row == null ? null : Number(order.legacy_sheet_row),
+      row: orderToSheetRow(order)
+    } : null;
+  }
+  if (/^\d+$/.test(ref)) {
+    const rowNumber = Number(ref);
+    if (!Number.isInteger(rowNumber) || rowNumber < 2) return null;
+    const rows = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
+    return rows[0]?.[0] ? { rowNumber, row: rows[0], order: null } : null;
+  }
+  const rows = await readSheet(env, "Pesanan!A2:T");
+  const index = rows.findIndex(r => String(r[0] || "").trim() === ref);
+  return index < 0 ? null : { rowNumber: index + 2, row: rows[index], order: null };
+}
+async function mirrorTransactionalOrder(env, order) {
+  if (!order) return null;
+  const row = orderToSheetRow(order);
+  let rowNumber = order.legacy_sheet_row == null ? null : Number(order.legacy_sheet_row);
+  try {
+    if (rowNumber && rowNumber >= 2) {
+      await updateSheetRange(env, "Pesanan!A" + rowNumber + ":T" + rowNumber, [row]);
+      return rowNumber;
+    }
+    const result = await appendSheetRows(env, "Pesanan!A:T", [row]);
+    const updatedRange = String(result?.updates?.updatedRange || "");
+    const match = updatedRange.match(/!A(\d+):/);
+    if (match) {
+      rowNumber = Number(match[1]);
+      await setLegacyRowTransactional(env, order.order_id, rowNumber);
+    }
+    return rowNumber;
+  } catch (error) {
+    console.warn(JSON.stringify({level:"warn",event:"order_sheet_mirror",order_id:order.order_id,message:error.message}));
+    return null;
+  }
+}
+async function mirrorTransactionalProduct(env, product) {
+  try {
+    const rows = await readSheet(env, "Katalog_Produk!A2:G");
+    const index = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === String(product.sku).toUpperCase());
+    const values = [[product.sku,product.name,product.price,product.stock == null ? "" : product.stock,
+      Boolean(product.active),product.photo_url || "",product.description || ""]];
+    if (index >= 0) await updateSheetRange(env,"Katalog_Produk!A"+(index+2)+":G"+(index+2),values);
+    else await appendSheetRows(env,"Katalog_Produk!A:G",values);
+  } catch(error) {
+    console.warn(JSON.stringify({level:"warn",event:"catalog_sheet_mirror",sku:product.sku,message:error.message}));
+  }
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -192,7 +272,7 @@ async function promptAdminProduct(env, chatId, mode, sku = "") {
   const intro = mode === "ADD" ? "📝 FORM PRODUK SEITON — ADD" : "📝 FORM PRODUK SEITON — EDIT — " + sku;
   let current = "";
   if (mode === "EDIT") {
-    const rows = await readSheet(env, "Katalog_Produk!A2:G");
+    const rows = await readCatalogRows(env);
     const product = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!product) throw new Error("Produk tidak ditemukan.");
     current = "DATA SAAT INI:\n" + [product[0] || "", product[1] || "", product[2] ?? 0, product[3] ?? 0, product[4] ?? "TRUE", product[5] || "", product[6] || ""].join(" | ") + "\n\n";
@@ -457,7 +537,7 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("pay:")) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
     if (!["QRIS","TRANSFER","COD"].includes(method)) throw new Error("Metode pembayaran tidak valid");
-    const rows = await readSheet(env, "Katalog_Produk!A2:E");
+    const rows = await readCatalogRows(env, "Katalog_Produk!A2:E");
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!p) throw new Error("Produk tidak ditemukan");
     await updateTelegramMessage(env, message, {
@@ -1550,6 +1630,20 @@ async function createOrder(env, input) {
   if (!env.GOOGLE_SHEETS_ID || !env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     throw new Error("Google Sheets credentials are not configured");
   }
+  const transactionState = await transactionReadiness(env);
+  if (transactionState.configured && !transactionState.ready) {
+    throw new Error("Lapisan transaksi D1 belum siap. Admin perlu menjalankan /migrasi_d1 sebelum pesanan baru diterima.");
+  }
+  if (transactionState.ready) {
+    const shipping = env.DEFAULT_SHIPPING == null || env.DEFAULT_SHIPPING === "" ? 0 : Number(env.DEFAULT_SHIPPING);
+    if (!Number.isSafeInteger(shipping) || shipping < 0) throw new Error("DEFAULT_SHIPPING harus berupa bilangan Rupiah nol atau lebih.");
+    const order = await createOrderTransactional(env,{...input,shipping});
+    if (!order.duplicate) {
+      const stored = await findOrderTransactional(env,order.orderId);
+      await mirrorTransactionalOrder(env,stored);
+    }
+    return order;
+  }
   const idempotencyKey = input.idempotencyKey
     ? `update:${String(input.channel)}:${String(input.idempotencyKey).slice(0,128)}`
     : "";
@@ -1624,7 +1718,15 @@ function parseCatalogProduct(row) {
 async function findProduct(env, sku) {
   const normalized = String(sku || "").trim().toUpperCase();
   if (!normalized) throw new Error("SKU produk tidak valid.");
-  const rows = await readSheet(env, "Katalog_Produk!A2:G");
+  const state = await transactionReadiness(env);
+  if (state.ready) {
+    const p = await findProductTransactional(env,normalized);
+    if (!p) return null;
+    return {sku:p.sku,name:p.name,price:Number(p.price),priceValid:true,
+      stock:p.stock == null ? null : Number(p.stock),stockValid:true,active:Boolean(p.active),
+      photoUrl:p.photo_url || "",description:p.description || ""};
+  }
+  const rows = await readCatalogRows(env);
   const matches = rows.filter(row => String(row[0] || "").trim().toUpperCase() === normalized);
   if (!matches.length) return null;
   if (matches.length > 1) throw new Error("SKU duplikat ditemukan pada katalog. Hubungi admin.");
