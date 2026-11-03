@@ -4,7 +4,7 @@
 > Official website: https://seiton.biz.id  
 > Source files: `worker.js`, `setupDashboard.gs`, `DEPLOYMENT_GUIDE.md`
 
-Panduan ini menyiapkan bot pemesanan Telegram + WhatsApp yang berjalan di Cloudflare Workers, menyimpan transaksi ke Google Sheets, dan membangun dashboard analitik langsung di spreadsheet. Tidak ada frontend web yang disertakan.
+Panduan ini menyiapkan bot pemesanan **Telegram-first** di Cloudflare Workers, menyimpan transaksi ke Google Sheets, dan membangun dashboard analitik langsung di spreadsheet. Integrasi WhatsApp ditunda dan bersifat opsional; tidak diperlukan NIB, akun Meta Business, atau kredensial WhatsApp untuk menjalankan versi Telegram. Tidak ada frontend web yang disertakan.
 
 
 ## Status deployment Seiton.id (3 November 2026)
@@ -14,16 +14,17 @@ Panduan ini menyiapkan bot pemesanan Telegram + WhatsApp yang berjalan di Cloudf
 - Health check terverifikasi HTTP 200 dengan JSON `{"ok":true,"service":"seiton-order-bot",...}`.
 - Spreadsheet yang dikonfigurasi: https://docs.google.com/spreadsheets/d/137aLgWekyqy0cbdsPkVIgszm6oMKAKeZ-coK5knMwic/edit
 - `wrangler.toml` tersedia di repository untuk deployment berikutnya.
-- **Belum siap menerima pesanan:** belum ada Cloudflare secrets yang terpasang. Tambahkan seluruh secrets yang diperlukan pada bagian 5.4 sebelum mendaftarkan webhook Telegram/WhatsApp.
+- **Belum siap menerima pesanan:** belum ada Cloudflare secrets yang terpasang. Untuk tahap Telegram, cukup pasang `TELEGRAM_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `ADMIN_CHAT_ID`, dan `GOOGLE_SERVICE_ACCOUNT_KEY`; WhatsApp tidak diperlukan.
 - Dashboard Apps Script belum dijalankan; ikuti bagian 4 setelah source `setupDashboard.gs` dimasukkan ke editor Apps Script.
 
 ## 1. Arsitektur dan batasan penting
 
 ```text
-Telegram ──Webhook──┐
-                   ├── Cloudflare Worker ── Google Sheets API
-WhatsApp ─Webhook──┘          │
-                              └── KV (opsional: cache token & dedupe singkat)
+Telegram ──Webhook── Cloudflare Worker ── Google Sheets API
+                                  │
+                                  └── KV (opsional: cache token & dedupe singkat)
+
+WhatsApp: ditunda / integrasi opsional di tahap berikutnya
 
 Google Apps Script ─────────────── Dashboard / QUERY / SUMIFS / SPARKLINE
 ```
@@ -33,7 +34,7 @@ Google Apps Script ─────────────── Dashboard / QUE
 - Bot menerima format `beli SKU jumlah METODE`, contoh `beli SEI-001 2 QRIS`.
 - Status awal order adalah `MENUNGGU_PEMBAYARAN`. Omset laporan dihitung dari status `DIBAYAR`, `SELESAI`, `PAID`, atau `COMPLETED`.
 - Perubahan status pembayaran harus dilakukan admin pada kolom `status` sheet `Pesanan`, atau melalui integrasi payment gateway yang telah diverifikasi.
-- WhatsApp Cloud API membutuhkan akses Graph API yang aktif. Gateway pihak ketiga dapat digunakan hanya jika payload dan endpoint-nya disesuaikan.
+- WhatsApp sengaja tidak menjadi prasyarat atau kanal aktif pada tahap awal. Hindari gateway WhatsApp tidak resmi berbasis QR/session karena risiko putus koneksi, perubahan protokol, dan pembatasan akun. Evaluasi integrasi resmi atau BSP kemudian, sesuai persyaratan onboarding dan biaya.
 - Tidak ada klaim SLA latensi di bawah 15 ms: respons bergantung pada Google OAuth/Sheets dan jaringan eksternal. Jalur webhook merespons cepat, sedangkan proses transaksi berjalan via `ctx.waitUntil`.
 - Kuota gratis Cloudflare, Google Sheets API, Telegram, dan WhatsApp dapat berubah. 100.000 request/hari tidak dijamin gratis atau otomatis aman tanpa pengujian kuota, rate limit, dan kapasitas provider.
 - Google Sheets bukan database transaksional. Untuk flash sale/konkurensi tinggi, gunakan Cloudflare Queues + database transaksional (mis. D1) sebagai sumber kebenaran, lalu ekspor/rekap ke Sheets.
@@ -44,7 +45,6 @@ Google Apps Script ─────────────── Dashboard / QUE
 - Node.js LTS dan npm.
 - Akun Google dengan Google Sheets dan Apps Script.
 - Telegram bot dari BotFather.
-- Meta Developer App dengan WhatsApp Cloud API, atau gateway kompatibel.
 - GitHub repository (opsional untuk deployment berkelanjutan).
 
 ## 3. Menyiapkan Google Sheets
@@ -178,16 +178,12 @@ Gunakan `wrangler secret put` untuk seluruh token/private key. Jangan menaruh ni
 |---|---|---|
 | `TELEGRAM_TOKEN` | Secret | Token bot dari BotFather |
 | `TELEGRAM_WEBHOOK_SECRET` | Secret, disarankan | Secret token header webhook Telegram |
-| `ADMIN_CHAT_ID` | Variable/Secret | Telegram chat ID admin; beberapa ID dipisahkan koma. Untuk admin WhatsApp, masukkan nomor format internasional tanpa `+` pada daftar yang sama |
+| `ADMIN_CHAT_ID` | Secret/Variable | Numeric Telegram chat ID admin |
 | `GOOGLE_SHEETS_ID` | Variable | ID spreadsheet |
 | `GOOGLE_SERVICE_ACCOUNT_KEY` | Secret | Seluruh JSON key service account satu baris |
 | `LINK_QRIS_IMAGE` | Variable | URL gambar QRIS (HTTPS) |
 | `TARGET_OMSET_HARIAN` | Variable | Target omset harian dalam Rupiah, angka tanpa pemisah |
 | `DEFAULT_SHIPPING` | Variable opsional | Ongkir flat per order, angka Rupiah |
-| `WHATSAPP_VERIFY_TOKEN` | Secret | Token verifikasi webhook buatan sendiri |
-| `WHATSAPP_ACCESS_TOKEN` | Secret | Meta WhatsApp Cloud API access token |
-| `WHATSAPP_PHONE_NUMBER_ID` | Variable | Phone Number ID dari Meta |
-| `WHATSAPP_APP_SECRET` | Secret wajib untuk POST WhatsApp | App Secret Meta; digunakan memvalidasi X-Hub-Signature-256 |
 
 Set secret satu per satu:
 
@@ -196,9 +192,6 @@ npx wrangler secret put TELEGRAM_TOKEN
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
 npx wrangler secret put ADMIN_CHAT_ID
 npx wrangler secret put GOOGLE_SERVICE_ACCOUNT_KEY
-npx wrangler secret put WHATSAPP_VERIFY_TOKEN
-npx wrangler secret put WHATSAPP_ACCESS_TOKEN
-npx wrangler secret put WHATSAPP_APP_SECRET
 ```
 
 Atur variable non-rahasia melalui Cloudflare Dashboard → Workers & Pages → Worker → Settings → Variables, atau bagian `[vars]` Wrangler:
@@ -209,7 +202,6 @@ GOOGLE_SHEETS_ID = "GANTI_SPREADSHEET_ID"
 LINK_QRIS_IMAGE = "https://domain-anda.example/qris.png"
 TARGET_OMSET_HARIAN = "1000000"
 DEFAULT_SHIPPING = "12000"
-WHATSAPP_PHONE_NUMBER_ID = "GANTI_PHONE_NUMBER_ID"
 ```
 
 Untuk keamanan, gunakan secret untuk `ADMIN_CHAT_ID` bila Anda tidak ingin ID admin tampil di repository.
@@ -266,20 +258,9 @@ curl "https://api.telegram.org/bot<TELEGRAM_TOKEN>/getWebhookInfo"
 
 Telegram mengirim `X-Telegram-Bot-Api-Secret-Token`, yang diverifikasi Worker bila `TELEGRAM_WEBHOOK_SECRET` diisi.
 
-## 8. Pendaftaran webhook WhatsApp Cloud API
+## 8. WhatsApp ditunda
 
-1. Buat aplikasi di https://developers.facebook.com/ dan tambahkan produk WhatsApp.
-2. Siapkan WhatsApp Business Account, nomor, Phone Number ID, dan access token.
-3. Pada konfigurasi Webhooks, gunakan callback URL:
-
-   `https://seiton-order-bot.midzpribadi.workers.dev/whatsapp`
-
-4. Isi Verify Token dengan nilai yang sama persis dengan `WHATSAPP_VERIFY_TOKEN`.
-5. Pilih object `whatsapp_business_account`, lalu subscribe field `messages`.
-6. Simpan konfigurasi dan lakukan verifikasi callback.
-7. Pastikan token WhatsApp mempunyai izin dan masa berlaku yang sesuai. Token sementara dari panel pengujian tidak cocok untuk produksi permanen.
-
-**Keamanan webhook:** GET memvalidasi challenge dan POST memverifikasi `X-Hub-Signature-256` dengan HMAC-SHA256 memakai `WHATSAPP_APP_SECRET`. POST WhatsApp akan ditolak jika secret belum dikonfigurasi atau signature tidak valid. Gunakan App Secret dari aplikasi Meta yang benar.
+Integrasi WhatsApp tidak perlu disiapkan untuk menjalankan versi saat ini. Jangan membuat Meta Developer App, memasukkan token WhatsApp, atau mendaftarkan webhook WhatsApp pada tahap ini. Kode integrasi WhatsApp yang masih ada di source dipertahankan untuk kemungkinan pengembangan berikutnya, tetapi tidak digunakan dalam alur operasional Telegram.
 
 ## 9. Format interaksi bot
 
@@ -299,13 +280,13 @@ beli SEI-003 3 COD
 
 Metode yang diterima: `QRIS`, `TRANSFER`, `COD`.
 
-Perintah admin:
+Perintah admin Telegram:
 
 ```text
 /laporan
 ```
 
-Bot membatasi laporan ke ID pada `ADMIN_CHAT_ID`. Untuk Telegram gunakan numeric chat ID. Untuk WhatsApp gunakan nomor internasional tanpa tanda `+` yang sama dengan `messages[].from`.
+Bot membatasi laporan ke numeric Telegram chat ID yang tercantum pada `ADMIN_CHAT_ID`.
 
 Laporan menampilkan omset terbayar, jumlah order terbayar, omset dan order hari ini, produk terlaris, ringkasan metode pembayaran, serta progress bar target harian. Status order yang belum dibayar tidak dihitung sebagai omset.
 
@@ -319,7 +300,7 @@ Laporan menampilkan omset terbayar, jumlah order terbayar, omset dan order hari 
 - [ ] Katalog berisi SKU aktif dengan harga numerik.
 - [ ] Secrets Cloudflare sudah diset.
 - [ ] `/health` mengembalikan status OK.
-- [ ] Webhook Telegram/WhatsApp sudah terdaftar.
+- [ ] Webhook Telegram sudah terdaftar.
 
 ### 10.2 Simulasi pembelian
 
@@ -332,7 +313,7 @@ beli SEI-001 2 QRIS
 Periksa:
 - [ ] Bot mengirim ID order dan rincian harga.
 - [ ] Baris baru masuk ke tab `Pesanan`.
-- [ ] Channel tercatat `telegram` atau `whatsapp`.
+- [ ] Channel tercatat `telegram`.
 - [ ] Status awal `MENUNGGU_PEMBAYARAN`.
 - [ ] Total sama dengan (harga × jumlah) + ongkir.
 
@@ -355,7 +336,7 @@ Uji juga SKU yang tidak ada, SKU nonaktif, stok kurang, jumlah 0, dan metode pem
 
 ## 11. Operasional, keamanan, dan scale
 
-1. **Webhook signature:** lengkapi verifikasi signature WhatsApp sebelum menerima order produksi.
+1. **Webhook Telegram:** gunakan `TELEGRAM_WEBHOOK_SECRET` dan jangan membagikan token bot.
 2. **Idempotensi:** contoh menggunakan KV untuk dedupe retry 30 detik berdasarkan kombinasi pelanggan/SKU/jumlah/metode. Dua pembelian identik dalam rentang ini dapat dianggap duplikat; sesuaikan strategi dengan UX. Untuk jaminan kuat, gunakan order nonce/checkout ID unik dan penyimpanan transaksional.
 3. **Stok:** kode membaca stok, tetapi tidak mengurangi stok. Google Sheets tidak mendukung transaksi atomik untuk reservasi stok bersamaan.
 4. **Status pembayaran:** jangan mengubah status menjadi `DIBAYAR` hanya karena pelanggan mengirim bukti chat. Verifikasi callback payment gateway bertanda tangan.
@@ -375,7 +356,6 @@ Uji juga SKU yang tidak ada, SKU nonaktif, stok kurang, jumlah 0, dan metode pem
 | Google Sheets 404 | Spreadsheet ID dan nama tab benar |
 | Produk tidak ditemukan | SKU katalog sama persis, kolom A terisi |
 | Telegram webhook 401 | Secret header Telegram sama dengan `TELEGRAM_WEBHOOK_SECRET` |
-| WhatsApp verify gagal | Verify Token harus identik dan method GET harus diteruskan |
 | Laporan kosong | Status transaksi harus `DIBAYAR`/`SELESAI`/`PAID`/`COMPLETED` |
 | Formula error | Periksa locale spreadsheet dan pemisah formula |
 
@@ -384,7 +364,6 @@ Uji juga SKU yang tidak ada, SKU nonaktif, stok kurang, jumlah 0, dan metode pem
 - [ ] Hak akses spreadsheet hanya untuk pemilik/admin dan service account.
 - [ ] Service account JSON tidak berada di Git.
 - [ ] Semua secret disimpan di Cloudflare Secrets.
-- [ ] Validasi signature WhatsApp POST sudah diterapkan.
 - [ ] Callback pembayaran sudah diverifikasi secara kriptografis jika digunakan.
 - [ ] Rate limiting, logging, dan alert sudah dikonfigurasi.
 - [ ] Stok dan idempotensi sudah ditangani dengan penyimpanan transaksional jika diperlukan.
