@@ -58,7 +58,7 @@ function setupDashboard() {
   createKpiCard_(dashboard, "A5:C5", "A6:C8", "TOTAL OMSET", '=IFERROR(SUMIFS(Pesanan!K:K,Pesanan!M:M,"DIBAYAR")+SUMIFS(Pesanan!K:K,Pesanan!M:M,"SELESAI")+SUMIFS(Pesanan!K:K,Pesanan!M:M,"PAID")+SUMIFS(Pesanan!K:K,Pesanan!M:M,"COMPLETED"),0)', '"Rp" #,##0');
   createKpiCard_(dashboard, "D5:F5", "D6:F8", "JUMLAH PESANAN", '=COUNTIF(Pesanan!A2:A,"<>")', '#,##0');
   createKpiCard_(dashboard, "G5:I5", "G6:I8", "AVERAGE PAID ORDER VALUE", '=IFERROR((SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"DIBAYAR")+SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"SELESAI")+SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"PAID")+SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"COMPLETED"))/(COUNTIF(Pesanan!M2:M,"DIBAYAR")+COUNTIF(Pesanan!M2:M,"SELESAI")+COUNTIF(Pesanan!M2:M,"PAID")+COUNTIF(Pesanan!M2:M,"COMPLETED")),0)', '"Rp" #,##0');
-  createKpiCard_(dashboard, "J5:L5", "J6:L8", "OMSET HARI INI", '=SUMIFS(Pesanan!K$2:K,Pesanan!B$2:B,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"DIBAYAR")+SUMIFS(Pesanan!K$2:K,Pesanan!B$2:B,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"SELESAI")+SUMIFS(Pesanan!K$2:K,Pesanan!B$2:B,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"PAID")+SUMIFS(Pesanan!K$2:K,Pesanan!B$2:B,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"COMPLETED")', '"Rp" #,##0');
+  createKpiCard_(dashboard, "J5:L5", "J6:L8", "OMSET HARI INI", '=SUMIFS(Pesanan!K$2:K,Pesanan!U$2:U,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"DIBAYAR")+SUMIFS(Pesanan!K$2:K,Pesanan!U$2:U,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"SELESAI")+SUMIFS(Pesanan!K$2:K,Pesanan!U$2:U,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"PAID")+SUMIFS(Pesanan!K$2:K,Pesanan!U$2:U,TEXT(TODAY(),"yyyy-mm-dd")&"*",Pesanan!M$2:M,"COMPLETED")', '"Rp" #,##0');
 
   dashboard.getRange("A10:F10").merge().setValue("REVENUE MOMENTUM  /  14 HARI")
     .setBackground(SEITON_THEME.slate2).setFontColor(SEITON_THEME.white).setFontWeight("bold");
@@ -66,7 +66,7 @@ function setupDashboard() {
   dashboard.getRange("A12").setFormula('=SEQUENCE(14,1,TODAY()-13,1)');
   const dailyFormulas = Array.from({length: 14}, (_, i) => {
     const row = 12 + i;
-    const criteria = `Pesanan!B$2:B,TEXT(A${row},"yyyy-mm-dd")&"*",Pesanan!M$2:M,`;
+    const criteria = `Pesanan!U$2:U,TEXT(A${row},"yyyy-mm-dd")&"*",Pesanan!M$2:M,`;
     return [`=IFERROR(SUMIFS(Pesanan!K$2:K,${criteria}"DIBAYAR")+SUMIFS(Pesanan!K$2:K,${criteria}"SELESAI")+SUMIFS(Pesanan!K$2:K,${criteria}"PAID")+SUMIFS(Pesanan!K$2:K,${criteria}"COMPLETED"),0)`];
   });
   dashboard.getRange("B12:B25").setFormulas(dailyFormulas);
@@ -162,6 +162,8 @@ function ensureSourceSheets_(ss) {
     }
   }
 
+  ensureBusinessDateColumn_(orders);
+
   let catalog = ss.getSheetByName("Katalog_Produk");
   if (!catalog) catalog = ss.insertSheet("Katalog_Produk");
   if (catalog.getLastRow() === 0) {
@@ -175,6 +177,25 @@ function ensureSourceSheets_(ss) {
       throw new Error("Header Katalog_Produk!A:E tidak sesuai. Dashboard dibatalkan agar data katalog tidak salah dibaca.");
     }
   }
+}
+
+function ensureBusinessDateColumn_(orders) {
+  const headerCell = orders.getRange("U1");
+  const header = String(headerCell.getDisplayValue() || "").trim();
+  if (header && header !== "business_date") {
+    throw new Error("Kolom Pesanan!U sudah digunakan. Kosongkan atau beri header business_date sebelum membuat dashboard.");
+  }
+  if (!header) {
+    const lastRow = orders.getLastRow();
+    if (lastRow > 1) {
+      const used = orders.getRange(2, 21, lastRow - 1, 1).getDisplayValues().some(row => row[0] !== "");
+      if (used) throw new Error("Kolom Pesanan!U berisi data lain. Dashboard tidak akan menimpanya.");
+    }
+    headerCell.setValue("business_date");
+  }
+  const formula = '=ARRAYFORMULA(IF(B2:B="",,IF(ISNUMBER(B2:B),TEXT(B2:B,"yyyy-mm-dd"),IF(RIGHT(B2:B,1)="Z",TEXT(DATEVALUE(LEFT(B2:B,10))+TIME(VALUE(MID(B2:B,12,2)),VALUE(MID(B2:B,15,2)),VALUE(MID(B2:B,18,2)))+7/24,"yyyy-mm-dd"),TEXT(DATEVALUE(LEFT(B2:B,10)),"yyyy-mm-dd")))))';
+  if (orders.getRange("U2").getFormula() !== formula) orders.getRange("U2").setFormula(formula);
+  orders.hideColumns(21);
 }
 
 function getOrCreateSheet_(ss, name) {
