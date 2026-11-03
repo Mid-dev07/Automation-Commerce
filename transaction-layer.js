@@ -293,11 +293,16 @@ async function rejectPaymentD1(db,id,actor="admin") {
   const o=await getOrderD1(db,id);
   if(!o)throw new Error("Pesanan tidak ditemukan.");
   const at=nowJakarta();
-  const result=await db.prepare(`UPDATE orders SET payment_confirmation_status='DITOLAK',updated_at=?
-    WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI'
-      AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')`).bind(at,id).run();
-  checkChanges(result,"Permintaan pembayaran sudah diproses.");
-  await recordOrderEvent(db,id,"PAYMENT_REJECTED","MENUNGGU_VERIFIKASI","DITOLAK",actor,"reject:"+at,at);
+  const results=await db.batch([
+    db.prepare(\`UPDATE orders SET payment_confirmation_status='DITOLAK',updated_at=?
+      WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI'
+        AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')\`).bind(at,id),
+    db.prepare(\`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
+      SELECT order_id,'PAYMENT_REJECTED','MENUNGGU_VERIFIKASI','DITOLAK',?,?, '{}',?
+      FROM orders WHERE order_id=? AND payment_confirmation_status='DITOLAK' AND updated_at=?\`)
+      .bind(clean(actor,128),"reject:"+at,at,id,at)
+  ]);
+  checkChanges(results[0],"Permintaan pembayaran sudah diproses.");
   return getOrderD1(db,id);
 }
 async function setOrderStatusD1(db,id,status,actor="admin") {
