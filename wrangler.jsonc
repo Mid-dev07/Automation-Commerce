@@ -19,10 +19,10 @@
       }
     ]
   },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["OrderCoordinator"]
+  "exports": {
+    "OrderCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
     }
-  ]
+  }
 }
