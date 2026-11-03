@@ -194,7 +194,7 @@ async function saveProductD1(db, product, originalSku = "") {
   await requireReady(db);
   const sku = clean(product.sku,40), name = clean(product.name,100);
   const price = asSafeMoney(product.price,"Harga");
-  const stock = asSafeMoney(product.stock ?? "","Stok");
+  const stock = product.stock == null || product.stock === "" ? null : asSafeMoney(product.stock,"Stok");
   const photo = clean(product.photo_url,1000), description = clean(product.description,500);
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU produk tidak valid.");
   if (!name) throw new Error("Nama produk wajib diisi.");
@@ -310,6 +310,15 @@ async function setOrderStatusD1(db,id,status,actor="admin") {
   const o=await getOrderD1(db,id);
   if(!o)throw new Error("Pesanan tidak ditemukan.");
   const current=String(o.status).toUpperCase();
+  if (CANCELLED_STATUSES.has(current)) {
+    throw new Error("Pesanan yang sudah dibatalkan tidak dapat dibuka kembali. Buat pesanan baru.");
+  }
+  const progress = ["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DITOLAK","DIBAYAR","DIPROSES","DIKIRIM","SELESAI"];
+  const currentRank = progress.indexOf(current);
+  const nextRank = progress.indexOf(String(status).toUpperCase());
+  if (currentRank >= 3 && nextRank >= 0 && nextRank < currentRank) {
+    throw new Error("Status pesanan yang sudah dibayar tidak boleh dimundurkan.");
+  }
   if(status==="DIBATALKAN" && PAID_STATUSES.has(current)) {
     throw new Error("Pesanan yang sudah dibayar tidak dapat dibatalkan. Refund perlu dicatat terpisah.");
   }
