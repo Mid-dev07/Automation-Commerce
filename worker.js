@@ -104,7 +104,8 @@ async function mirrorTransactionalOrder(env, order) {
 }
 async function mirrorTransactionalProduct(env, product) {
   try {
-    const rows = await readSheet(env, "Katalog_Produk!A2:G");
+    const range = "Katalog_Produk!A2:G";
+    const rows = await readSheet(env, range);
     const index = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === String(product.sku).toUpperCase());
     const values = [[product.sku,product.name,product.price,product.stock == null ? "" : product.stock,
       Boolean(product.active),product.photo_url || "",product.description || ""]];
@@ -525,7 +526,7 @@ async function handleTelegramCallback(env, query) {
 
   if (data.startsWith("buy:")) {
     const sku = data.slice(4);
-    const rows = await readSheet(env, "Katalog_Produk!A2:G");
+    const rows = await readCatalogRows(env);
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!p || ["FALSE","0","NONAKTIF","NO"].includes(String(p[4] ?? "TRUE").toUpperCase())) throw new Error("Produk tidak tersedia");
     const stock = p[3] === "" || p[3] == null ? null : Number(p[3]);
