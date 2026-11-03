@@ -319,7 +319,16 @@ async function saveCatalogProduct(env, product, originalSku = "") {
   if (photo && (!/^https:\/\//i.test(photo) || photo.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS.");
   if (description.length > 500) throw new Error("Deskripsi maksimal 500 karakter.");
 
-  const rows = await readSheet(env, "Katalog_Produk!A2:G");
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1 terlebih dahulu.");
+  if (state.ready) {
+    const result = await saveProductTransactional(env,{sku,name,price,stock,active:product.active,photo_url:photo,description},originalSku);
+    const stored = await findProductTransactional(env,sku);
+    await mirrorTransactionalProduct(env,stored);
+    return result;
+  }
+
+  const rows = await readCatalogRows(env);
   const matches = rows.map((r, i) => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase() ? i : -1).filter(i => i >= 0);
   if (matches.length > 1) throw new Error("SKU duplikat ditemukan. Perbaiki katalog sebelum menyimpan.");
   const index = matches[0] ?? -1;
@@ -340,36 +349,33 @@ async function saveCatalogProduct(env, product, originalSku = "") {
 async function deleteCatalogProduct(env, sku) {
   const normalizedSku = String(sku || "").trim().toUpperCase();
   if (!normalizedSku) throw new Error("SKU produk tidak valid.");
-  const rows = await readSheet(env, "Katalog_Produk!A2:G");
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1 terlebih dahulu.");
+  if (state.ready) {
+    const result = await deleteProductTransactional(env,normalizedSku);
+    const stored = await findProductTransactional(env,normalizedSku);
+    await mirrorTransactionalProduct(env,stored);
+    return result;
+  }
+  const rows = await readCatalogRows(env);
   const index = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === normalizedSku);
   if (index < 0) throw new Error("Produk tidak ditemukan. Muat ulang katalog admin lalu coba kembali.");
-
-  // Google Sheets API requires OAuth authorization for spreadsheet metadata too.
   const token = await getGoogleAccessToken(env);
   const meta = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "?fields=sheets.properties", {
     headers: { Authorization: "Bearer " + token }
   });
-  if (!meta.ok) {
-    const detail = (await meta.text()).slice(0, 400);
-    throw new Error("Tidak dapat membaca metadata spreadsheet (" + meta.status + "): " + detail);
-  }
+  if (!meta.ok) throw new Error("Tidak dapat membaca metadata spreadsheet (" + meta.status + "): " + (await meta.text()).slice(0,400));
   const metadata = await meta.json();
   const sheet = (metadata.sheets || []).find(x => x.properties?.title === "Katalog_Produk");
   if (!sheet || sheet.properties?.sheetId == null) throw new Error("Tab Katalog_Produk tidak ditemukan atau sheetId tidak tersedia.");
-
-  // A2 is row index 1 in the zero-based GridRange used by batchUpdate.
   const rowIndex = index + 1;
   const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + ":batchUpdate", {
-    method: "POST",
-    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ requests: [{ deleteDimension: { range: {
       sheetId: sheet.properties.sheetId, dimension: "ROWS", startIndex: rowIndex, endIndex: rowIndex + 1
     } } }] })
   });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0, 400);
-    throw new Error("Gagal menghapus produk (" + response.status + "): " + detail);
-  }
+  if (!response.ok) throw new Error("Gagal menghapus produk (" + response.status + "): " + (await response.text()).slice(0,400));
   return { sku: normalizedSku, row: index + 2 };
 }
 async function sendTelegramPhoto(env, chatId, photo, caption, replyMarkup = null) {
@@ -990,10 +996,12 @@ function localDateKey(value) {
   return new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
 }
 async function loadAdminDashboardData(env) {
+  const state = await transactionReadiness(env);
+  if (state.ready) return listDashboardDataTransactional(env);
   await ensurePaymentWorkflowHeaders(env);
   const [orderRows, productRows] = await Promise.all([
     readSheet(env, "Pesanan!A2:T"),
-    readSheet(env, "Katalog_Produk!A2:G")
+    readCatalogRows(env)
   ]);
   return {
     generated_at: new Date().toISOString(),
@@ -1272,9 +1280,17 @@ async function updateSheetRange(env, range, values) {
   return response.json();
 }
 async function findOrderById(env, orderId) {
+  const state = await transactionReadiness(env);
+  if (state.ready) {
+    const order = await findOrderTransactional(env,String(orderId || "").trim());
+    return order ? {
+      rowNumber: order.legacy_sheet_row == null ? null : Number(order.legacy_sheet_row),
+      row: orderToSheetRow(order), order
+    } : null;
+  }
   const rows = await readSheet(env, "Pesanan!A2:T");
   const index = rows.findIndex(r => String(r[0] || "").trim() === String(orderId || "").trim());
-  return index < 0 ? null : { rowNumber: index + 2, row: rows[index] };
+  return index < 0 ? null : { rowNumber: index + 2, row: rows[index], order: null };
 }
 function orderConfirmationKeyboard(order) {
   const buttons = [];
