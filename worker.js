@@ -24,6 +24,7 @@
  * checkout should move order creation to a Queue + durable transactional store.
  */
 
+const ADMIN_DASHBOARD_HTML = "<!doctype html>\n<html lang=\"id\">\n<head>\n<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Seiton.id · Dashboard Admin</title>\n<script src=\"https://cdn.jsdelivr.net/npm/chart.js\"></script>\n<style>\n:root{color-scheme:dark;--bg:#0b1220;--panel:#131e30;--panel2:#18263b;--line:#26374f;--text:#eef4ff;--muted:#9db0c9;--accent:#68a7ff;--good:#47d7a0;--warn:#f5c56b;--bad:#ff7b85}\n*{box-sizing:border-box}body{margin:0;background:linear-gradient(150deg,#0b1220,#101d31 60%,#0b1220);color:var(--text);font:14px Inter,system-ui,Segoe UI,sans-serif}\n.wrap{max-width:1440px;margin:auto;padding:26px}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}\n.brand h1{font-size:24px;margin:0 0 5px}.brand p{margin:0;color:var(--muted)}.actions{display:flex;gap:9px;align-items:center;flex-wrap:wrap}\nbutton,select{background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--text);padding:10px 13px;font:inherit}button{cursor:pointer}button.primary{background:#235a9e;border-color:#367ccc}button:hover{filter:brightness(1.15)}\n.status{font-size:12px;color:var(--muted);margin-top:7px}.grid{display:grid;gap:14px}.metrics{grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:14px}\n.card{background:linear-gradient(160deg,#17243a,#111c2c);border:1px solid var(--line);border-radius:16px;padding:17px;min-width:0;box-shadow:0 12px 30px #0002}\n.metric-label{color:var(--muted);font-size:12px}.metric-value{font-size:25px;font-weight:750;margin-top:9px;letter-spacing:-.5px}.metric-note{color:var(--muted);font-size:11px;margin-top:7px}\n.charts{grid-template-columns:1.5fr 1fr 1.1fr;margin-bottom:14px}.chart-card h2,.section-head h2{font-size:15px;margin:0 0 14px}.chart-box{height:270px;position:relative}\n.lower{grid-template-columns:1.8fr 1fr}.section-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:13px;gap:12px}\n.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:720px}th,td{text-align:left;padding:11px 9px;border-bottom:1px solid var(--line);font-size:12px;white-space:nowrap}th{color:var(--muted);font-weight:600}td.amount{text-align:right;font-variant-numeric:tabular-nums}\n.pill{padding:4px 8px;border-radius:99px;background:#243852;color:#c8ddf7;font-size:10px}.pill.good{background:#153e39;color:#81e7c0}.pill.warn{background:#4a3a1c;color:#f8d78b}.pill.bad{background:#4a2630;color:#ffabb2}\n.list{display:grid;gap:10px}.list-row{display:flex;justify-content:space-between;gap:12px;padding-bottom:9px;border-bottom:1px solid var(--line)}.list-row span:first-child{color:var(--muted)}\n.note{margin-top:14px;color:var(--muted);font-size:11px;line-height:1.6}.error{display:none;background:#4a2630;border:1px solid #713844;padding:13px;border-radius:10px;margin-bottom:14px;color:#ffced2}\n@media(max-width:1100px){.metrics{grid-template-columns:repeat(3,1fr)}.charts{grid-template-columns:1fr 1fr}.charts .chart-card:first-child{grid-column:span 2}.lower{grid-template-columns:1fr}}\n@media(max-width:650px){.wrap{padding:15px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric-value{font-size:20px}.charts{grid-template-columns:1fr}.charts .chart-card:first-child{grid-column:auto}.chart-box{height:235px}.brand h1{font-size:21px}}\n</style>\n</head>\n<body>\n<div class=\"wrap\">\n <header class=\"top\">\n  <div class=\"brand\"><h1>Seiton.id · Admin Analytics</h1><p>Ringkasan penjualan dan operasional toko</p><div class=\"status\" id=\"refreshStatus\">Menyiapkan dashboard…</div></div>\n  <div class=\"actions\"><select id=\"period\"><option value=\"7\">7 hari</option><option value=\"30\" selected>30 hari</option><option value=\"90\">90 hari</option><option value=\"365\">12 bulan</option><option value=\"all\">Semua data</option></select><button id=\"refreshBtn\">↻ Perbarui</button><button class=\"primary\" id=\"exportAll\">⬇ Unduh Paket CSV</button></div>\n </header>\n <div class=\"error\" id=\"errorBox\"></div>\n <section class=\"grid metrics\">\n  <div class=\"card\"><div class=\"metric-label\">Total pesanan</div><div class=\"metric-value\" id=\"mOrders\">—</div><div class=\"metric-note\">Dalam periode terpilih</div></div>\n  <div class=\"card\"><div class=\"metric-label\">Penerimaan terkonfirmasi</div><div class=\"metric-value\" id=\"mRevenue\">—</div><div class=\"metric-note\">Status dibayar, diproses, dikirim, selesai</div></div>\n  <div class=\"card\"><div class=\"metric-label\">Belum tertagih</div><div class=\"metric-value\" id=\"mOutstanding\">—</div><div class=\"metric-note\">Pesanan belum dibayar</div></div>\n  <div class=\"card\"><div class=\"metric-label\">Pesanan menunggu</div><div class=\"metric-value\" id=\"mPending\">—</div><div class=\"metric-note\">Menunggu pembayaran</div></div>\n  <div class=\"card\"><div class=\"metric-label\">Produk aktif</div><div class=\"metric-value\" id=\"mProducts\">—</div><div class=\"metric-note\" id=\"mStock\">—</div></div>\n </section>\n <section class=\"grid charts\">\n  <div class=\"card chart-card\"><h2>Tren penerimaan harian</h2><div class=\"chart-box\"><canvas id=\"revenueChart\"></canvas></div></div>\n  <div class=\"card chart-card\"><h2>Status pesanan</h2><div class=\"chart-box\"><canvas id=\"statusChart\"></canvas></div></div>\n  <div class=\"card chart-card\"><h2>Produk terlaris</h2><div class=\"chart-box\"><canvas id=\"productChart\"></canvas></div></div>\n </section>\n <section class=\"grid lower\">\n  <div class=\"card\"><div class=\"section-head\"><h2>Pesanan terbaru</h2><button data-export=\"orders\">Unduh CSV</button></div><div class=\"table-wrap\"><table><thead><tr><th>ID</th><th>Tanggal</th><th>Pelanggan</th><th>Produk</th><th>Total</th><th>Status</th></tr></thead><tbody id=\"ordersBody\"><tr><td colspan=\"6\">Memuat data…</td></tr></tbody></table></div></div>\n  <div class=\"card\"><div class=\"section-head\"><h2>Operasional produk</h2><button data-export=\"inventory\">Stok CSV</button></div><div class=\"list\" id=\"productSummary\"></div><div class=\"note\">Nilai stok dihitung dari harga jual × stok, bukan harga modal.</div></div>\n </section>\n <p class=\"note\">Sumber: Google Sheets. Data diperbarui otomatis setiap 30 detik selama dashboard terbuka. Angka penerimaan dihitung dari status yang dianggap telah dibayar. Laba bersih belum tersedia karena harga pokok/modal produk belum tercatat. Tautan dashboard memiliki masa berlaku akses terbatas.</p>\n</div>\n<script>\n(function(){\n const params=new URLSearchParams(location.search);\n let access=params.get('access')||sessionStorage.getItem('seitonAdminAccess')||'';\n if(access){sessionStorage.setItem('seitonAdminAccess',access);history.replaceState({},'',location.pathname);}\n const $=id=>document.getElementById(id);\n const paid=['DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED'];\n const cancelled=['DIBATALKAN','CANCELLED','CANCELED'];\n const money=n=>new Intl.NumberFormat('id-ID',{style:'currency',currency:'IDR',maximumFractionDigits:0}).format(Number(n)||0);\n const num=n=>new Intl.NumberFormat('id-ID').format(Number(n)||0);\n const esc=s=>String(s??'').replace(/[&<>\"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]));\n const day=d=>{const x=new Date(d);return Number.isNaN(x.getTime())?'Tidak diketahui':new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Jakarta',year:'numeric',month:'2-digit',day:'2-digit'}).format(x);};\n const fmtDate=d=>{const x=new Date(d);return Number.isNaN(x.getTime())?'-':x.toLocaleString('id-ID',{timeZone:'Asia/Jakarta'});};\n let raw=null,charts={};\n async function api(url){const r=await fetch(url,{headers:{Authorization:'Bearer '+access}});if(r.status===401)throw new Error('Akses dashboard berakhir. Buka kembali Dashboard Interaktif dari menu admin Telegram.');if(!r.ok)throw new Error('Gagal membaca data ('+r.status+').');return r;}\n function periodOrders(){\n  let list=raw.orders||[],p=$('period').value;\n  if(p==='all')return list;\n  let cutoff=Date.now()-Number(p)*86400000;\n  return list.filter(o=>{let d=new Date(o.created_at).getTime();return Number.isFinite(d)&&d>=cutoff;});\n }\n function setChart(id,type,data,options){\n  if(charts[id]){charts[id].destroy();}\n  charts[id]=new Chart($(id),{type:type,data:data,options:Object.assign({responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#c8d6e9',boxWidth:10,font:{size:10}}}},scales:type==='doughnut'?{}:{x:{ticks:{color:'#9db0c9'},grid:{color:'#26374f'}},y:{ticks:{color:'#9db0c9'},grid:{color:'#26374f'}}}},options||{})});\n }\n function render(){\n  if(!raw)return;\n  const orders=periodOrders(),products=raw.products||[];\n  const confirmed=orders.filter(o=>paid.includes(o.status)),pending=orders.filter(o=>!paid.includes(o.status)&&!cancelled.includes(o.status));\n  const revenue=confirmed.reduce((s,o)=>s+o.total,0),outstanding=pending.reduce((s,o)=>s+o.total,0);\n  const active=products.filter(p=>p.active),stockCount=active.reduce((s,p)=>s+(p.stock==null?0:Math.max(0,p.stock)),0);\n  $('mOrders').textContent=num(orders.length);$('mRevenue').textContent=money(revenue);$('mOutstanding').textContent=money(outstanding);$('mPending').textContent=num(pending.length);$('mProducts').textContent=num(active.length);$('mStock').textContent=num(stockCount)+' unit stok tercatat';\n  const daily={};confirmed.forEach(o=>{let k=day(o.created_at);daily[k]=(daily[k]||0)+o.total;});\n  const labels=Object.keys(daily).sort();\n  setChart('revenueChart','line',{labels:labels,datasets:[{label:'Penerimaan',data:labels.map(k=>daily[k]),borderColor:'#68a7ff',backgroundColor:'#68a7ff22',fill:true,tension:.32,pointRadius:3}]},{plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#9db0c9',maxTicksLimit:8},grid:{color:'#26374f'}},y:{ticks:{color:'#9db0c9',callback:v=>new Intl.NumberFormat('id-ID',{notation:'compact'}).format(v)},grid:{color:'#26374f'}}}});\n  const statusMap={};orders.forEach(o=>{statusMap[o.status||'TANPA STATUS']=(statusMap[o.status||'TANPA STATUS']||0)+1;});\n  setChart('statusChart','doughnut',{labels:Object.keys(statusMap),datasets:[{data:Object.values(statusMap),backgroundColor:['#68a7ff','#47d7a0','#f5c56b','#ff7b85','#a78bfa','#55c5cf','#e79cc5'],borderColor:'#131e30',borderWidth:3}]},{plugins:{legend:{position:'bottom',labels:{color:'#c8d6e9',boxWidth:9,font:{size:9}}}}});\n  const top={};confirmed.forEach(o=>{let name=String(o.product||'').split(' - ').slice(1).join(' - ')||o.product;top[name]=(top[name]||0)+o.quantity;});\n  const tops=Object.entries(top).sort((a,b)=>b[1]-a[1]).slice(0,7);\n  setChart('productChart','bar',{labels:tops.map(x=>x[0]),datasets:[{label:'Unit terjual',data:tops.map(x=>x[1]),backgroundColor:'#47d7a0',borderRadius:5}]},{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#9db0c9'},grid:{color:'#26374f'}},y:{ticks:{color:'#c8d6e9'},grid:{display:false}}}});\n  const recent=[...orders].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,15);\n  $('ordersBody').innerHTML=recent.length?recent.map(o=>'<tr><td>'+esc(o.order_id)+'</td><td>'+esc(fmtDate(o.created_at))+'</td><td>'+esc(o.customer_name)+'</td><td>'+esc(o.product)+'</td><td class=\"amount\">'+esc(money(o.total))+'</td><td><span class=\"pill '+(paid.includes(o.status)?'good':cancelled.includes(o.status)?'bad':'warn')+'\">'+esc(o.status)+'</span></td></tr>').join(''):'<tr><td colspan=\"6\">Belum ada pesanan.</td></tr>';\n  $('productSummary').innerHTML='<div class=\"list-row\"><span>Total SKU</span><b>'+num(products.length)+'</b></div><div class=\"list-row\"><span>Produk aktif</span><b>'+num(active.length)+'</b></div><div class=\"list-row\"><span>Stok rendah (≤ 5)</span><b>'+num(active.filter(p=>p.stock!=null&&p.stock<=5).length)+'</b></div><div class=\"list-row\"><span>Produk nonaktif</span><b>'+num(products.length-active.length)+'</b></div><div class=\"list-row\"><span>Estimasi nilai stok</span><b>'+money(active.reduce((s,p)=>s+(p.stock==null?0:p.price*p.stock),0))+'</b></div>';\n  $('refreshStatus').textContent='Terakhir diperbarui: '+new Date(raw.generated_at).toLocaleString('id-ID')+' · refresh otomatis 30 detik';\n }\n async function refresh(){\n  if(!access){$('errorBox').style.display='block';$('errorBox').textContent='Tautan akses belum tersedia. Buka menu admin Telegram → Dashboard Interaktif untuk mendapatkan tautan baru.';return;}\n  try{$('errorBox').style.display='none';const r=await api('/api/admin/data');const j=await r.json();if(!j.ok)throw new Error(j.error||'Tidak dapat memuat data');raw=j;render();}\n  catch(e){$('errorBox').style.display='block';$('errorBox').textContent=e.message;}\n }\n async function download(type){\n  try{const r=await api('/api/admin/export?type='+encodeURIComponent(type));const blob=await r.blob();const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='Seiton_'+type+'.csv';a.click();URL.revokeObjectURL(url);}\n  catch(e){$('errorBox').style.display='block';$('errorBox').textContent=e.message;}\n }\n $('refreshBtn').addEventListener('click',refresh);$('period').addEventListener('change',render);$('exportAll').addEventListener('click',()=>['orders','finance','daily','inventory'].forEach((t,i)=>setTimeout(()=>download(t),i*350)));\n document.querySelectorAll('[data-export]').forEach(b=>b.addEventListener('click',()=>download(b.dataset.export)));\n refresh();setInterval(refresh,30000);\n})();\n</script>\n</body></html>";
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const TELEGRAM_API = "https://api.telegram.org";
@@ -38,6 +39,15 @@ const HEADERS = [
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/admin") {
+      return new Response(ADMIN_DASHBOARD_HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" } });
+    }
+    if (request.method === "GET" && url.pathname === "/api/admin/data") {
+      return handleAdminDashboardData(request, env);
+    }
+    if (request.method === "GET" && url.pathname === "/api/admin/export") {
+      return handleAdminDashboardExport(request, env);
+    }
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ ok: true, service: "seiton-order-bot", time: new Date().toISOString() });
     }
@@ -132,6 +142,8 @@ function customerMenuKeyboard() {
 function adminMenuKeyboard() {
   return { inline_keyboard: [
     [{ text: "📊 Laporan Penjualan", callback_data: "adm:report" }],
+    [{ text: "📈 Dashboard Interaktif", callback_data: "adm:dashboard" }],
+    [{ text: "📥 Unduh Laporan", callback_data: "adm:exports" }],
     [{ text: "📋 Pesanan Terbaru", callback_data: "adm:recent" }],
     [{ text: "🔄 Perbarui Status Pesanan", callback_data: "adm:statuslist" }],
     [{ text: "📦 Lihat Katalog", callback_data: "adm:catalog" }],
@@ -328,6 +340,27 @@ async function handleTelegramCallback(env, query) {
     if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
     const action = data.slice(4);
     if (action === "report") { await sendTelegram(env, chatId, await buildAdminReport(env), adminMenuKeyboard()); return; }
+    if (action === "dashboard") {
+      const accessToken = await createDashboardAccessToken(env, chatId);
+      const link = "https://seiton-order-bot.midzpribadi.workers.dev/admin?access=" + encodeURIComponent(accessToken);
+      await sendTelegram(env, chatId, "📈 Dashboard admin siap dibuka. Tautan akses berlaku selama 4 jam dan hanya untuk akun admin ini.", {
+        inline_keyboard: [[{ text: "Buka Dashboard Interaktif", url: link }], [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]]
+      });
+      return;
+    }
+    if (action === "exports") {
+      await sendTelegram(env, chatId, "📥 Pilih jenis laporan yang ingin diunduh. Semua file berformat CSV dan bisa dibuka di Excel atau Google Sheets.", {
+        inline_keyboard: [
+          [{ text: "📋 Data Pesanan", callback_data: "exp:orders" }],
+          [{ text: "💰 Buku Kas / Keuangan", callback_data: "exp:finance" }],
+          [{ text: "📅 Ringkasan Harian", callback_data: "exp:daily" }],
+          [{ text: "📦 Stok & Katalog Produk", callback_data: "exp:inventory" }],
+          [{ text: "🗂️ Paket Lengkap (4 file)", callback_data: "exp:all" }],
+          [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+        ]
+      });
+      return;
+    }
     if (action === "addproduct") { await ensureCatalogHeaders(env); await promptAdminProduct(env, chatId, "ADD"); return; }
     if (action === "catalog") {
       await ensureCatalogHeaders(env);
@@ -375,6 +408,20 @@ async function handleTelegramCallback(env, query) {
     await deleteCatalogProduct(env, data.slice("prod:delok:".length));
     await sendTelegram(env, chatId, "✅ Produk berhasil dihapus dari katalog.", adminMenuKeyboard()); return;
   }
+  if (data.startsWith("exp:")) {
+    if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
+    const kind = data.slice(4);
+    const allowed = ["orders", "finance", "daily", "inventory", "all"];
+    if (!allowed.includes(kind)) throw new Error("Jenis laporan tidak dikenal.");
+    await sendTelegram(env, chatId, "⏳ Sedang menyiapkan file laporan dari Google Sheets...");
+    const reports = await buildReportExports(env);
+    const types = kind === "all" ? ["orders", "finance", "daily", "inventory"] : [kind];
+    for (const type of types) {
+      await sendTelegramDocument(env, chatId, reports[type].csv, reports[type].filename, reports[type].caption);
+    }
+    await sendTelegram(env, chatId, "✅ Laporan selesai dikirim.", adminMenuKeyboard());
+    return;
+  }
   if (data.startsWith("detail:")) {
     if (!admin) return sendTelegram(env, chatId, "⛔ Menu ini khusus admin.");
     const rowNum = Number(data.split(":")[1]);
@@ -412,6 +459,179 @@ async function handleTelegramCallback(env, query) {
     await sendTelegram(env, chatId, "✅ Status pesanan berhasil diperbarui menjadi " + status + ".", adminMenuKeyboard()); return;
   }
   await sendTelegram(env, chatId, admin ? adminMenuText() : customerMenuText(), admin ? adminMenuKeyboard() : customerMenuKeyboard());
+}
+
+
+const PAID_ORDER_STATUSES = ["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI", "PAID", "COMPLETED"];
+const CANCELLED_ORDER_STATUSES = ["DIBATALKAN", "CANCELLED", "CANCELED"];
+function orderRowsToObjects(rows) {
+  return rows.filter(r => r[0]).map(r => ({
+    order_id: String(r[0] || ""),
+    created_at: String(r[1] || ""),
+    channel: String(r[2] || ""),
+    customer_id: String(r[3] || ""),
+    customer_name: String(r[4] || ""),
+    product: String(r[5] || ""),
+    quantity: Number(r[6] || 0),
+    unit_price: Number(r[7] || 0),
+    subtotal: Number(r[8] || 0),
+    shipping: Number(r[9] || 0),
+    total: Number(r[10] || 0),
+    payment_method: String(r[11] || ""),
+    status: String(r[12] || "").toUpperCase()
+  }));
+}
+function productRowsToObjects(rows) {
+  return rows.filter(r => r[0]).map(r => ({
+    sku: String(r[0] || ""),
+    name: String(r[1] || ""),
+    price: Number(r[2] || 0),
+    stock: r[3] === "" || r[3] == null ? null : Number(r[3]),
+    active: !["FALSE", "0", "NONAKTIF", "NO"].includes(String(r[4] ?? "TRUE").toUpperCase()),
+    photo_url: String(r[5] || ""),
+    description: String(r[6] || "")
+  }));
+}
+function localDateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Tidak diketahui";
+  return new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+async function loadAdminDashboardData(env) {
+  const [orderRows, productRows] = await Promise.all([
+    readSheet(env, "Pesanan!A2:M"),
+    readSheet(env, "Katalog_Produk!A2:G")
+  ]);
+  return {
+    generated_at: new Date().toISOString(),
+    orders: orderRowsToObjects(orderRows),
+    products: productRowsToObjects(productRows)
+  };
+}
+async function createDashboardAccessToken(env, chatId) {
+  if (!env.TELEGRAM_WEBHOOK_SECRET) throw new Error("TELEGRAM_WEBHOOK_SECRET belum dikonfigurasi.");
+  const payload = base64url(JSON.stringify({
+    sub: String(chatId),
+    exp: Math.floor(Date.now() / 1000) + 14400,
+    v: 1
+  }));
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode("SEITON_ADMIN_DASHBOARD_V1." + payload)
+  );
+  return payload + "." + base64urlBytes(new Uint8Array(signature));
+}
+async function verifyDashboardAccess(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  if (!auth.startsWith("Bearer ") || !env.TELEGRAM_WEBHOOK_SECRET) return false;
+  const token = auth.slice(7).trim();
+  const parts = token.split(".");
+  if (parts.length !== 2) return false;
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const expected = await crypto.subtle.sign(
+    "HMAC", key, new TextEncoder().encode("SEITON_ADMIN_DASHBOARD_V1." + parts[0])
+  );
+  if (!constantTimeEqual(base64urlBytes(new Uint8Array(expected)), parts[1])) return false;
+  try {
+    const decoded = atob(parts[0].replace(/-/g, "+").replace(/_/g, "/"));
+    const payload = JSON.parse(decoded);
+    return payload.v === 1 && Number(payload.exp) > Math.floor(Date.now() / 1000) && isAdmin(payload.sub, env);
+  } catch {
+    return false;
+  }
+}
+async function handleAdminDashboardData(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) return json({ ok: false, error: "Akses dashboard tidak valid atau sudah kedaluwarsa. Buka kembali dari bot Telegram admin." }, 401);
+  try {
+    const data = await loadAdminDashboardData(env);
+    return json({ ok: true, ...data });
+  } catch (error) {
+    console.error(JSON.stringify({ level: "error", event: "dashboard_data", message: error.message }));
+    return json({ ok: false, error: "Gagal membaca data Google Sheets: " + error.message }, 502);
+  }
+}
+function csvCell(value) {
+  let text = value == null ? "" : String(value);
+  if (/^[=+\-@]/.test(text) && !/^-?\d+(\.\d+)?$/.test(text)) text = "'" + text;
+  return '"' + text.replace(/"/g, '""') + '"';
+}
+function csvText(rows) {
+  return "\uFEFF" + rows.map(row => row.map(csvCell).join(",")).join("\r\n");
+}
+function buildReportExportsFromData(data) {
+  const orders = data.orders;
+  const products = data.products;
+  const dateStamp = localDateKey(new Date().toISOString()).replace(/-/g, "");
+  const orderCsv = csvText([
+    ["ID Pesanan", "Waktu", "Channel", "Customer ID", "Nama Pelanggan", "Produk", "Jumlah", "Harga Satuan", "Subtotal", "Ongkir", "Total", "Metode Pembayaran", "Status"],
+    ...orders.map(o => [o.order_id, o.created_at, o.channel, o.customer_id, o.customer_name, o.product, o.quantity, o.unit_price, o.subtotal, o.shipping, o.total, o.payment_method, o.status])
+  ]);
+  const financeCsv = csvText([
+    ["ID Pesanan", "Tanggal", "Nama Pelanggan", "Produk", "Jumlah", "Subtotal", "Ongkir", "Total Tagihan", "Penerimaan Terkonfirmasi", "Belum Tertagih", "Metode Pembayaran", "Status"],
+    ...orders.map(o => {
+      const paid = PAID_ORDER_STATUSES.includes(o.status);
+      const cancelled = CANCELLED_ORDER_STATUSES.includes(o.status);
+      return [o.order_id, localDateKey(o.created_at), o.customer_name, o.product, o.quantity, o.subtotal, o.shipping, o.total, paid ? o.total : 0, !paid && !cancelled ? o.total : 0, o.payment_method, o.status];
+    })
+  ]);
+  const daily = new Map();
+  for (const o of orders) {
+    const day = localDateKey(o.created_at);
+    const d = daily.get(day) || { orders: 0, paid: 0, pending: 0, cancelled: 0, gross: 0, received: 0, outstanding: 0 };
+    d.orders++;
+    if (PAID_ORDER_STATUSES.includes(o.status)) { d.paid++; d.received += o.total; d.gross += o.total; }
+    else if (CANCELLED_ORDER_STATUSES.includes(o.status)) d.cancelled++;
+    else { d.pending++; d.outstanding += o.total; d.gross += o.total; }
+    daily.set(day, d);
+  }
+  const dailyCsv = csvText([
+    ["Tanggal", "Jumlah Pesanan", "Pesanan Terbayar", "Menunggu Pembayaran", "Dibatalkan", "Nilai Pesanan Non-Batal", "Penerimaan Terkonfirmasi", "Belum Tertagih"],
+    ...[...daily.entries()].sort((a,b) => a[0].localeCompare(b[0])).map(([day,d]) => [day,d.orders,d.paid,d.pending,d.cancelled,d.gross,d.received,d.outstanding])
+  ]);
+  const inventoryCsv = csvText([
+    ["SKU", "Nama Produk", "Harga Jual", "Stok", "Nilai Stok pada Harga Jual", "Aktif", "Foto URL", "Deskripsi"],
+    ...products.map(p => [p.sku,p.name,p.price,p.stock == null ? "Tidak dibatasi" : p.stock,p.stock == null ? "" : p.price * p.stock,p.active ? "TRUE" : "FALSE",p.photo_url,p.description])
+  ]);
+  return {
+    orders: { csv: orderCsv, filename: "Seiton_Pesanan_" + dateStamp + ".csv", caption: "📋 Rincian seluruh pesanan" },
+    finance: { csv: financeCsv, filename: "Seiton_Keuangan_" + dateStamp + ".csv", caption: "💰 Buku transaksi dan penerimaan terkonfirmasi" },
+    daily: { csv: dailyCsv, filename: "Seiton_Ringkasan_Harian_" + dateStamp + ".csv", caption: "📅 Ringkasan order dan penerimaan per hari" },
+    inventory: { csv: inventoryCsv, filename: "Seiton_Stok_Produk_" + dateStamp + ".csv", caption: "📦 Katalog dan estimasi nilai stok berdasarkan harga jual" }
+  };
+}
+async function buildReportExports(env) {
+  const data = await loadAdminDashboardData(env);
+  return buildReportExportsFromData(data);
+}
+async function handleAdminDashboardExport(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) return json({ ok: false, error: "Akses dashboard tidak valid atau sudah kedaluwarsa." }, 401);
+  const type = new URL(request.url).searchParams.get("type") || "";
+  if (!["orders", "finance", "daily", "inventory"].includes(type)) return json({ ok: false, error: "Jenis export tidak valid." }, 400);
+  try {
+    const report = (await buildReportExports(env))[type];
+    return new Response(report.csv, { headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="' + report.filename + '"',
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    } });
+  } catch (error) {
+    return json({ ok: false, error: "Gagal membuat laporan: " + error.message }, 502);
+  }
+}
+async function sendTelegramDocument(env, chatId, csv, filename, caption = "") {
+  const form = new FormData();
+  form.set("chat_id", String(chatId));
+  if (caption) form.set("caption", caption);
+  form.set("document", new Blob([csv], { type: "text/csv;charset=utf-8" }), filename);
+  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendDocument", { method: "POST", body: form });
+  if (!response.ok) throw new Error("Telegram sendDocument gagal (" + response.status + "): " + (await response.text()).slice(0,300));
 }
 
 function verifyWhatsApp(request, env) {
@@ -667,7 +887,7 @@ async function buildAdminReport(env) {
     payment: String(row[11] || "Lainnya"),
     status: String(row[12] || "")
   })).filter(row => row.orderId);
-  const paid = orders.filter(o => ["DIBAYAR", "SELESAI", "PAID", "COMPLETED"].includes(o.status.toUpperCase()));
+  const paid = orders.filter(o => PAID_ORDER_STATUSES.includes(o.status.toUpperCase()));
   const todays = paid.filter(o => {
     const date = new Date(o.createdAt);
     return !Number.isNaN(date.getTime()) &&
