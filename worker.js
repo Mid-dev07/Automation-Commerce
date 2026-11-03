@@ -1421,17 +1421,20 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
   }
 }
 async function showPaymentRequestsPage(env, message, page = 0) {
-  await ensurePaymentWorkflowHeaders(env);
-  const rows = await readSheet(env, "Pesanan!A2:T");
-  const pending = rows.map((r,i) => ({ r, rowNumber:i+2 }))
-    .filter(x => String(x.r[13] || "") === "MENUNGGU_VERIFIKASI")
-    .reverse();
+  const state = await transactionReadiness(env);
+  if (!state.ready) await ensurePaymentWorkflowHeaders(env);
+  const pending = state.ready
+    ? (await listOrdersTransactional(env,{limit:5000}))
+        .filter(o => String(o.payment_confirmation_status || "") === "MENUNGGU_VERIFIKASI")
+        .map(o => ({r:orderToSheetRow(o),reference:o.order_id}))
+    : (await readSheet(env, "Pesanan!A2:T")).map((r,i) => ({r,reference:String(i+2)}))
+        .filter(x => String(x.r[13] || "") === "MENUNGGU_VERIFIKASI").reverse();
   const pageSize = 8;
   const pages = Math.max(1, Math.ceil(pending.length / pageSize));
   const current = Math.max(0, Math.min(pages - 1, Number.isInteger(page) ? page : 0));
   const subset = pending.slice(current * pageSize, current * pageSize + pageSize);
   const lines = subset.map(x => String(x.r[0]) + " · " + String(x.r[4] || "Pelanggan") + " · " + rupiah(x.r[10]) + " · " + (x.r[14] ? "Bukti tersedia" : "Belum ada bukti"));
-  const keyboard = subset.map(x => [{ text: String(x.r[0]) + (x.r[14] ? " 📎" : " ⏳"), callback_data: "payview:" + x.rowNumber }]);
+  const keyboard = subset.map(x => [{ text: String(x.r[0]) + (x.r[14] ? " 📎" : " ⏳"), callback_data: "payview:" + x.reference }]);
   const nav = [];
   if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "paylist:" + (current - 1) });
   if (current < pages - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "paylist:" + (current + 1) });
@@ -1439,16 +1442,15 @@ async function showPaymentRequestsPage(env, message, page = 0) {
   keyboard.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
   await updateTelegramMessage(env, message, {
     text: pending.length ? "💳 PERMINTAAN VERIFIKASI PEMBAYARAN\nHalaman " + (current + 1) + "/" + pages + "\n\n" + lines.join("\n") : "✅ Tidak ada permintaan verifikasi pembayaran yang menunggu.",
-    replyMarkup: { inline_keyboard: keyboard },
-    clearMedia: true
+    replyMarkup: { inline_keyboard: keyboard }, clearMedia: true
   });
 }
-async function showPaymentRequestDetail(env, message, rowNumber) {
-  await ensurePaymentWorkflowHeaders(env);
-  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
-  const r = values[0];
+async function showPaymentRequestDetail(env, message, reference) {
+  const found = await resolveOrderReference(env,reference);
+  const r = found?.row;
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan ini sudah diproses atau tidak lagi menunggu verifikasi.");
+  const ref = String(reference);
   const text = [
     "🔎 VERIFIKASI PEMBAYARAN",
     "Pesanan: " + r[0],
@@ -1460,8 +1462,8 @@ async function showPaymentRequestDetail(env, message, rowNumber) {
     "Bukti: " + (r[14] ? (r[15] === "PHOTO" ? "Foto tersedia" : "Dokumen tersedia") : "Tidak diunggah — admin wajib cocokkan mutasi secara manual")
   ].join("\n");
   const keyboard = { inline_keyboard: [
-    [{ text: "✅ Setujui Pembayaran", callback_data: "payapprove:" + rowNumber }],
-    [{ text: "❌ Tolak / Minta Ulang", callback_data: "payreject:" + rowNumber }],
+    [{ text: "✅ Setujui Pembayaran", callback_data: "payapprove:" + ref }],
+    [{ text: "❌ Tolak / Minta Ulang", callback_data: "payreject:" + ref }],
     [{ text: "⬅️ Daftar Verifikasi", callback_data: "adm:paymentchecks" }]
   ] };
   if (r[14] && r[15] === "PHOTO") {
@@ -1618,15 +1620,20 @@ async function sendTelegramDocumentById(env, chatId, fileId, caption = "") {
   if (!response.ok) throw new Error("Telegram sendDocument bukti gagal (" + response.status + "): " + (await response.text()).slice(0,300));
 }
 async function showPickupQueuePage(env, message, page = 0) {
-  await ensurePaymentWorkflowHeaders(env);
-  const rows = await readSheet(env, "Pesanan!A2:T");
-  const queue = rows.map((r,i) => ({ r, rowNumber:i+2 }))
-    .filter(x => String(x.r[13] || "") === "DISETUJUI" && String(x.r[18] || "") && String(x.r[19] || "") !== "DIAMBIL" && PAID_ORDER_STATUSES.includes(String(x.r[12] || "").toUpperCase()))
-    .reverse();
+  const state = await transactionReadiness(env);
+  if (!state.ready) await ensurePaymentWorkflowHeaders(env);
+  const queue = state.ready
+    ? (await listOrdersTransactional(env,{limit:5000}))
+        .filter(o => String(o.payment_confirmation_status || "") === "DISETUJUI" && o.receipt_code &&
+          String(o.pickup_status || "") !== "DIAMBIL" && PAID_ORDER_STATUSES.includes(String(o.status || "").toUpperCase()))
+        .map(o => ({r:orderToSheetRow(o),reference:o.order_id}))
+    : (await readSheet(env, "Pesanan!A2:T")).map((r,i) => ({r,reference:String(i+2)}))
+        .filter(x => String(x.r[13] || "") === "DISETUJUI" && String(x.r[18] || "") &&
+          String(x.r[19] || "") !== "DIAMBIL" && PAID_ORDER_STATUSES.includes(String(x.r[12] || "").toUpperCase())).reverse();
   const pageSize = 8; const pages = Math.max(1, Math.ceil(queue.length / pageSize));
   const current = Math.max(0, Math.min(pages - 1, Number.isInteger(page) ? page : 0));
   const subset = queue.slice(current * pageSize, current * pageSize + pageSize);
-  const buttons = subset.map(x => [{ text: String(x.r[0]) + " · " + String(x.r[4] || "Pelanggan"), callback_data: "pickupview:" + x.rowNumber }]);
+  const buttons = subset.map(x => [{ text: String(x.r[0]) + " · " + String(x.r[4] || "Pelanggan"), callback_data: "pickupview:" + x.reference }]);
   const nav = [];
   if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "picklist:" + (current - 1) });
   if (current < pages - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "picklist:" + (current + 1) });
@@ -1634,18 +1641,19 @@ async function showPickupQueuePage(env, message, page = 0) {
   buttons.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
   await updateTelegramMessage(env, message, {
     text: queue.length ? "📦 PESANAN SUDAH DIBAYAR — BELUM DIAMBIL\nHalaman " + (current + 1) + "/" + pages + "\nTotal antrean: " + queue.length : "✅ Tidak ada pesanan lunas yang menunggu pengambilan.",
-    replyMarkup: { inline_keyboard: buttons },
-    clearMedia: true
+    replyMarkup: { inline_keyboard: buttons }, clearMedia: true
   });
 }
-async function showPickupOrderDetail(env, message, rowNumber) {
-  await ensurePaymentWorkflowHeaders(env);
-  const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
-  const r = values[0];
-  if (!r || !r[0] || String(r[13] || "").trim().toUpperCase() !== "DISETUJUI" || !r[18] || !PAID_ORDER_STATUSES.includes(String(r[12] || "").trim().toUpperCase())) throw new Error("Resi pengambilan tidak ditemukan, dibatalkan, atau belum disetujui.");
+async function showPickupOrderDetail(env, message, reference) {
+  const found = await resolveOrderReference(env,reference);
+  const r = found?.row;
+  if (!r || !r[0] || String(r[13] || "").trim().toUpperCase() !== "DISETUJUI" ||
+      !r[18] || !PAID_ORDER_STATUSES.includes(String(r[12] || "").trim().toUpperCase())) {
+    throw new Error("Resi pengambilan tidak ditemukan, dibatalkan, atau belum disetujui.");
+  }
   const ticketUrl = await createPickupTicketUrl(env, String(r[0]), String(r[18]));
   const picked = String(r[19] || "") === "DIAMBIL";
-  const buttons = picked ? [] : [[{ text: "✅ Tandai Sudah Diambil", callback_data: "pickupdone:" + rowNumber }]];
+  const buttons = picked ? [] : [[{ text: "✅ Tandai Sudah Diambil", callback_data: "pickupdone:" + String(reference) }]];
   buttons.push([{ text: "🔗 Buka Verifikasi QR", url: ticketUrl }]);
   buttons.push([{ text: "⬅️ Antrean Pengambilan", callback_data: "adm:pickup" }]);
   await updateTelegramMessage(env, message, {
@@ -1659,8 +1667,7 @@ async function showPickupOrderDetail(env, message, rowNumber) {
       "Kode Resi: " + r[18],
       "Status: " + (picked ? "SUDAH DIAMBIL" : "BELUM DIAMBIL")
     ].join("\n"),
-    replyMarkup: { inline_keyboard: buttons },
-    clearMedia: true
+    replyMarkup: { inline_keyboard: buttons }, clearMedia: true
   });
 }
 async function markOrderPickedUp(env, reference) {
