@@ -44,8 +44,8 @@ CREATE TABLE IF NOT EXISTS orders (
   pickup_status TEXT NOT NULL DEFAULT '',
   stock_reserved INTEGER NOT NULL DEFAULT 0 CHECK(stock_reserved IN (0,1)),
   legacy_sheet_row INTEGER UNIQUE,
-  updated_at TEXT NOT NULL,
- );
+  updated_at TEXT NOT NULL
+);
 
 CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_ms DESC);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, payment_confirmation_status, created_ms DESC);
