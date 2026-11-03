@@ -1116,6 +1116,15 @@ async function handleAdminProductMutation(request, env) {
 }
 
 async function setOrderStatus(env, rowNumber, status) {
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
+  if (state.ready) {
+    const found = await resolveOrderReference(env,rowNumber);
+    if (!found) throw new Error("Pesanan tidak ditemukan.");
+    const updated = await setOrderStatusTransactional(env,found.order.order_id,status,"admin");
+    await mirrorTransactionalOrder(env,updated);
+    return orderToSheetRow(updated);
+  }
   await ensurePaymentWorkflowHeaders(env);
   if (!Number.isInteger(rowNumber) || rowNumber < 2) throw new Error("Nomor baris pesanan tidak valid.");
   const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
@@ -1448,8 +1457,20 @@ async function showPaymentRequestDetail(env, message, rowNumber) {
     if (r[14] && r[15] === "DOCUMENT") await sendTelegramDocumentById(env, message.chat.id, String(r[14]), "Bukti pembayaran " + r[0]);
   }
 }
-async function approvePaymentAndIssueTicket(env, rowNumber) {
+async function approvePaymentAndIssueTicket(env, reference) {
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
+  if (state.ready) {
+    const found = await resolveOrderReference(env,reference);
+    if (!found) throw new Error("Pesanan tidak ditemukan.");
+    const approved = await approvePaymentTransactional(env,found.order.order_id,"telegram-admin");
+    await mirrorTransactionalOrder(env,approved);
+    const row = orderToSheetRow(approved);
+    const ticketUrl = await createPickupTicketUrl(env,String(approved.order_id),String(approved.receipt_code));
+    return {row,receiptCode:approved.receipt_code,ticketUrl,rowNumber:approved.legacy_sheet_row};
+  }
   await ensurePaymentWorkflowHeaders(env);
+  const rowNumber = Number(reference);
   const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
   const r = values[0];
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
@@ -1464,8 +1485,18 @@ async function approvePaymentAndIssueTicket(env, rowNumber) {
   const ticketUrl = await createPickupTicketUrl(env, String(r[0]), receiptCode);
   return { row:r, receiptCode, ticketUrl };
 }
-async function rejectPaymentRequest(env, rowNumber) {
+async function rejectPaymentRequest(env, reference) {
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
+  if (state.ready) {
+    const found = await resolveOrderReference(env,reference);
+    if (!found) throw new Error("Pesanan tidak ditemukan.");
+    const rejected = await rejectPaymentTransactional(env,found.order.order_id,"telegram-admin");
+    await mirrorTransactionalOrder(env,rejected);
+    return orderToSheetRow(rejected);
+  }
   await ensurePaymentWorkflowHeaders(env);
+  const rowNumber = Number(reference);
   const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
   const r = values[0];
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
@@ -1618,8 +1649,18 @@ async function showPickupOrderDetail(env, message, rowNumber) {
     clearMedia: true
   });
 }
-async function markOrderPickedUp(env, rowNumber) {
+async function markOrderPickedUp(env, reference) {
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
+  if (state.ready) {
+    const found = await resolveOrderReference(env,reference);
+    if (!found) throw new Error("Pesanan tidak ditemukan.");
+    const updated = await markPickedUpTransactional(env,found.order.order_id,"telegram-admin");
+    await mirrorTransactionalOrder(env,updated);
+    return orderToSheetRow(updated);
+  }
   await ensurePaymentWorkflowHeaders(env);
+  const rowNumber = Number(reference);
   const values = await readSheet(env, "Pesanan!A" + rowNumber + ":T" + rowNumber);
   const r = values[0];
   if (!r || !r[0] || String(r[13] || "").trim().toUpperCase() !== "DISETUJUI" || !r[18] || !PAID_ORDER_STATUSES.includes(String(r[12] || "").trim().toUpperCase())) throw new Error("Pesanan tidak memiliki resi pembayaran valid atau sudah dibatalkan.");
