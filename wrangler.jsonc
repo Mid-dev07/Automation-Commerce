@@ -20,6 +20,9 @@
     ]
   },
   "exports": {
+    "default": {
+      "type": "worker"
+    },
     "OrderCoordinator": {
       "type": "durable-object",
       "storage": "sqlite"
