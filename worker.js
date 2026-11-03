@@ -1319,10 +1319,12 @@ function paymentProofPrompt(orderId) {
   ].join("\n");
 }
 async function requestPaymentVerification(env, message, chatId, userId, orderId) {
-  await ensurePaymentWorkflowHeaders(env);
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Admin perlu menjalankan /migrasi_d1.");
+  if (!state.ready) await ensurePaymentWorkflowHeaders(env);
   const found = await findOrderById(env, orderId);
   if (!found) throw new Error("Pesanan tidak ditemukan.");
-  const r = found.row;
+  let r = found.row;
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
   const method = String(r[11] || "").trim().toUpperCase();
   if (method === "COD") throw new Error("Pesanan COD dibayar saat pengambilan dan tidak memakai verifikasi pembayaran online.");
@@ -1333,40 +1335,47 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
     return;
   }
   if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan ini sudah dibatalkan.");
+  if (!["MENUNGGU_PEMBAYARAN", "DITOLAK"].includes(String(r[12] || "").toUpperCase()) &&
+      String(r[13] || "").toUpperCase() !== "MENUNGGU_VERIFIKASI") {
+    throw new Error("Status pesanan tidak mengizinkan permintaan verifikasi pembayaran.");
+  }
+  if (state.ready) {
+    const updated = await requestVerificationTransactional(env,orderId,userId);
+    r = orderToSheetRow(updated);
+    await mirrorTransactionalOrder(env,updated);
+  } else if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") {
+    const requestedAt = new Date().toISOString();
+    await updateSheetRange(env, "Pesanan!N" + found.rowNumber + ":T" + found.rowNumber,
+      [["MENUNGGU_VERIFIKASI", "", "", requestedAt, "", "", ""]]);
+  }
   if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
     await updateTelegramMessage(env, message, {
       text: "⏳ Permintaan verifikasi untuk " + orderId + " sudah tercatat. Kirim foto atau dokumen bukti pembayaran dengan membalas pesan instruksi bot.",
-      replyMarkup: customerMenuKeyboard(),
-      clearMedia: true
+      replyMarkup: customerMenuKeyboard(), clearMedia: true
     });
     await sendTelegram(env, chatId, paymentProofPrompt(orderId), { force_reply: true, input_field_placeholder: "Lampirkan foto/dokumen bukti pembayaran" });
+    const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
+    for (const adminId of admins) {
+      try {
+        await sendTelegram(env, adminId,
+          "🔔 Permintaan verifikasi pembayaran baru\nPesanan: " + orderId + "\nPelanggan: " + String(r[4] || "-") + "\nTotal: " + rupiah(r[10]),
+          { inline_keyboard: [[{ text: "Periksa Permintaan", callback_data: "payview:" + (found.rowNumber || orderId) }]] });
+      } catch (error) {
+        console.warn(JSON.stringify({ level: "warn", event: "payment_admin_notify", message: error.message }));
+      }
+    }
     return;
   }
-  if (!["MENUNGGU_PEMBAYARAN", "DITOLAK"].includes(String(r[12] || "").toUpperCase())) {
-    throw new Error("Status pesanan tidak mengizinkan permintaan verifikasi pembayaran.");
-  }
-  const requestedAt = new Date().toISOString();
-  await updateSheetRange(env, "Pesanan!N" + found.rowNumber + ":T" + found.rowNumber,
-    [["MENUNGGU_VERIFIKASI", "", "", requestedAt, "", "", ""]]);
   await updateTelegramMessage(env, message, {
     text: "✅ Permintaan verifikasi pembayaran untuk " + orderId + " telah dikirim ke admin.\n\nSilakan lampirkan bukti transfer/QRIS dengan membalas pesan instruksi bot. Resi pengambilan akan dikirim setelah admin menyetujui pembayaran.",
-    replyMarkup: customerMenuKeyboard(),
-    clearMedia: true
+    replyMarkup: customerMenuKeyboard(), clearMedia: true
   });
   await sendTelegram(env, chatId, paymentProofPrompt(orderId), { force_reply: true, input_field_placeholder: "Lampirkan foto/dokumen bukti pembayaran" });
-  const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
-  for (const adminId of admins) {
-    try {
-      await sendTelegram(env, adminId,
-        "🔔 Permintaan verifikasi pembayaran baru\nPesanan: " + orderId + "\nPelanggan: " + String(r[4] || "-") + "\nTotal: " + rupiah(r[10]),
-        { inline_keyboard: [[{ text: "Periksa Permintaan", callback_data: "payview:" + found.rowNumber }]] });
-    } catch (error) {
-      console.warn(JSON.stringify({ level: "warn", event: "payment_admin_notify", message: error.message }));
-    }
-  }
 }
 async function handlePaymentProofUpload(env, message, chatId, userId) {
-  await ensurePaymentWorkflowHeaders(env);
+  const state = await transactionReadiness(env);
+  if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap.");
+  if (!state.ready) await ensurePaymentWorkflowHeaders(env);
   const prompt = String(message.reply_to_message?.text || "");
   const match = prompt.match(/ORDER_ID=([A-Za-z0-9_-]{1,60})/);
   if (!match) throw new Error("Instruksi bukti pembayaran tidak valid. Ajukan verifikasi ulang dari menu Pesanan Saya.");
@@ -1393,14 +1402,19 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
     await sendTelegram(env, chatId, "Mohon kirim bukti sebagai foto atau dokumen dengan membalas pesan instruksi sebelumnya.");
     return;
   }
-  await updateSheetRange(env, "Pesanan!O" + found.rowNumber + ":P" + found.rowNumber, [[fileId, fileType]]);
+  if (state.ready) {
+    const updated = await updateProofTransactional(env,orderId,userId,fileId,fileType);
+    await mirrorTransactionalOrder(env,updated);
+  } else {
+    await updateSheetRange(env, "Pesanan!O" + found.rowNumber + ":P" + found.rowNumber, [[fileId, fileType]]);
+  }
   await sendTelegram(env, chatId, "✅ Bukti pembayaran untuk " + orderId + " berhasil diterima. Admin akan memeriksanya.");
   const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
   for (const adminId of admins) {
     try {
       await sendTelegram(env, adminId,
         "📎 Bukti pembayaran diunggah\nPesanan: " + orderId + "\nPelanggan: " + String(r[4] || "-"),
-        { inline_keyboard: [[{ text: "Lihat Bukti & Verifikasi", callback_data: "payview:" + found.rowNumber }]] });
+        { inline_keyboard: [[{ text: "Lihat Bukti & Verifikasi", callback_data: "payview:" + (found.rowNumber || orderId) }]] });
     } catch (error) {
       console.warn(JSON.stringify({ level: "warn", event: "payment_proof_notify", message: error.message }));
     }
