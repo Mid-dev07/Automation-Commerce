@@ -763,6 +763,15 @@ async function handleTelegramCallback(env, query) {
     const parts = data.split(":"); const rowNum = Number(parts[1]); const status = parts[2];
     const allowed = ["MENUNGGU_PEMBAYARAN","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
     if (!Number.isInteger(rowNum) || rowNum < 2 || !allowed.includes(status)) throw new Error("Pembaruan status tidak valid");
+    if (["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI"].includes(status)) {
+      const orderValues = await readSheet(env, "Pesanan!A" + rowNum + ":N" + rowNum);
+      const orderRow = orderValues[0];
+      if (!orderRow) throw new Error("Pesanan tidak ditemukan.");
+      const method = String(orderRow[11] || "").toUpperCase();
+      if (["QRIS", "TRANSFER"].includes(method) && String(orderRow[13] || "") !== "DISETUJUI") {
+        throw new Error("Pembayaran QRIS/Transfer harus disetujui melalui menu 💳 Konfirmasi Pembayaran agar resi QR terbit otomatis.");
+      }
+    }
     const token = await getGoogleAccessToken(env); const range = encodeURIComponent("Pesanan!M" + rowNum);
     const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + "?valueInputOption=USER_ENTERED", {
       method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
