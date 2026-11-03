@@ -96,7 +96,7 @@ test("order and catalog append paths use RAW input", () => {
 });
 
 test("admin product editor preserves the SKU being edited", () => {
-  assert.match(worker, /name="original_sku"/);
+  assert.match(worker, /name=\\?"original_sku\\?"/);
   assert.match(worker, /String\(p\.original_sku \|\| ""\)/);
   assert.match(worker, /async function saveCatalogProduct/);
 });
