@@ -1554,7 +1554,8 @@ async function createOrder(env, input) {
   const subtotal = product.price * input.quantity;
   const shipping = env.DEFAULT_SHIPPING == null || env.DEFAULT_SHIPPING === "" ? 0 : Number(env.DEFAULT_SHIPPING);
   if (!Number.isFinite(shipping) || shipping < 0) throw new Error("DEFAULT_SHIPPING harus berupa angka nol atau lebih.");
-  const createdAt = new Date().toISOString();
+  // Store Jakarta-local ISO text so spreadsheet text-prefix formulas can group by business date.
+  const createdAt = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().replace("Z", "+07:00");
   const dateStamp = localDateKey(createdAt).replace(/-/g, "");
   const total = subtotal + shipping;
   const order = {
