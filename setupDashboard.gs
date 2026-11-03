@@ -30,6 +30,8 @@ const SEITON_THEME = {
 
 function setupDashboard() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!ss) throw new Error("Jalankan script dari spreadsheet Seiton.id.");
+  ss.setSpreadsheetTimeZone("Asia/Jakarta");
   ensureSourceSheets_(ss);
   const dashboard = getOrCreateSheet_(ss, "Dashboard");
   dashboard.getRange("A1:L37").breakApart();
