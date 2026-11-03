@@ -80,6 +80,9 @@ test("catalog parser distinguishes unlimited stock from malformed stock", () => 
   const brokenPrice = parseCatalogProduct(["SKU-3", "Produk", "", 10, true]);
   assert.equal(brokenPrice.priceValid, false);
   assert.equal(brokenPrice.active, true);
+
+  const fractionalPrice = parseCatalogProduct(["SKU-4", "Produk", 1000.5, 10, true]);
+  assert.equal(fractionalPrice.priceValid, false);
 });
 
 test("CSV cells neutralize formula prefixes, including whitespace-prefixed formulas", () => {
@@ -99,6 +102,21 @@ test("admin product editor preserves the SKU being edited", () => {
   assert.match(worker, /name=\\?"original_sku\\?"/);
   assert.match(worker, /String\(p\.original_sku \|\| ""\)/);
   assert.match(worker, /async function saveCatalogProduct/);
+});
+
+test("Rupiah amounts reject decimals and validate safe arithmetic", () => {
+  assert.match(worker, /Number\.isSafeInteger\(price\)/);
+  assert.match(worker, /Number\.isSafeInteger\(subtotal\)/);
+  assert.match(worker, /Number\.isSafeInteger\(shipping\)/);
+});
+
+test("Telegram fallback send failures are logged, not rethrown", () => {
+  assert.match(worker, /event:"telegram_fallback_notice"/);
+});
+
+test("Apps Script reporting timezone is Jakarta", () => {
+  const script = fs.readFileSync(path.join(root, "setupDashboard.gs"), "utf8");
+  assert.match(script, /setSpreadsheetTimeZone\("Asia\/Jakarta"\)/);
 });
 
 test("payment state transitions require online payment verification", () => {
