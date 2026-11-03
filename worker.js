@@ -764,13 +764,13 @@ async function handleTelegramCallback(env, query) {
   }
   if (data.startsWith("payview:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
-    await showPaymentRequestDetail(env, message, Number(data.slice("payview:".length)));
+    await showPaymentRequestDetail(env, message, data.slice("payview:".length));
     return;
   }
   if (data.startsWith("payapprove:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
-    const rowNumber = Number(data.slice("payapprove:".length));
-    const approved = await approvePaymentAndIssueTicket(env, rowNumber);
+    const reference = data.slice("payapprove:".length);
+    const approved = await approvePaymentAndIssueTicket(env, reference);
     let receiptSent = true;
     try { await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode); }
     catch(error) {
@@ -789,8 +789,8 @@ async function handleTelegramCallback(env, query) {
   }
   if (data.startsWith("payreject:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
-    const rowNumber = Number(data.slice("payreject:".length));
-    const rejected = await rejectPaymentRequest(env, rowNumber);
+    const reference = data.slice("payreject:".length);
+    const rejected = await rejectPaymentRequest(env, reference);
     await sendTelegram(env, String(rejected[3]), "⚠️ Permintaan verifikasi pembayaran untuk " + rejected[0] + " belum dapat disetujui. Periksa kembali nominal/bukti pembayaran dan ajukan ulang setelah benar.", {
       inline_keyboard: [[{ text: "🔁 Ajukan Verifikasi Ulang", callback_data: "pc:req:" + rejected[0] }]]
     });
@@ -803,13 +803,13 @@ async function handleTelegramCallback(env, query) {
   }
   if (data.startsWith("pickupview:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
-    await showPickupOrderDetail(env, message, Number(data.slice("pickupview:".length)));
+    await showPickupOrderDetail(env, message, data.slice("pickupview:".length));
     return;
   }
   if (data.startsWith("pickupdone:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
-    const rowNumber = Number(data.slice("pickupdone:".length));
-    const order = await markOrderPickedUp(env, rowNumber);
+    const reference = data.slice("pickupdone:".length);
+    const order = await markOrderPickedUp(env, reference);
     try { await sendTelegram(env, String(order[3]), "✅ Pengambilan pesanan " + order[0] + " telah dicatat. Terima kasih sudah berbelanja di Seiton.id!"); } catch {}
     await updateTelegramMessage(env, message, {
       text: "✅ Pesanan " + order[0] + " berhasil ditandai SUDAH DIAMBIL.",
@@ -827,13 +827,14 @@ async function handleTelegramCallback(env, query) {
       await updateTelegramMessage(env, message, { text: "⛔ Menu ini khusus admin.", replyMarkup: null });
       return;
     }
-    const rowNum = Number(data.split(":")[1]);
-    const rows = await readSheet(env, "Pesanan!A" + rowNum + ":M" + rowNum); const r = rows[0];
+    const reference = data.slice("detail:".length);
+    const found = await resolveOrderReference(env,reference);
+    const r = found?.row;
     if (!r) throw new Error("Pesanan tidak ditemukan");
     await updateTelegramMessage(env, message, {
       text: "Detail Pesanan\nID: " + r[0] + "\nPelanggan: " + r[4] + " (" + r[3] + ")\nProduk: " + r[5] + "\nJumlah: " + r[6] + "\nTotal: " + rupiah(r[10]) + "\nPembayaran: " + r[11] + "\nStatus: " + r[12],
       replyMarkup: { inline_keyboard: [
-        [{ text: "🔄 Perbarui Status", callback_data: "st:" + rowNum }],
+        [{ text: "🔄 Perbarui Status", callback_data: "st:" + reference }],
         [{ text: "⬅️ Pesanan Terbaru", callback_data: "adm:recent" }]
       ] }
     });
@@ -845,17 +846,17 @@ async function handleTelegramCallback(env, query) {
       await updateTelegramMessage(env, message, { text: "⛔ Menu ini khusus admin.", replyMarkup: null });
       return;
     }
-    const rowNum = Number(data.split(":")[1]);
+    const reference = data.slice("st:".length);
     await updateTelegramMessage(env, message, {
       text: "Pilih status baru:",
       replyMarkup: { inline_keyboard: [
-        [{ text: "Menunggu Pembayaran", callback_data: "su:" + rowNum + ":MENUNGGU_PEMBAYARAN" }],
-        [{ text: "Dibayar", callback_data: "su:" + rowNum + ":DIBAYAR" }],
-        [{ text: "Diproses", callback_data: "su:" + rowNum + ":DIPROSES" }],
-        [{ text: "Dikirim", callback_data: "su:" + rowNum + ":DIKIRIM" }],
-        [{ text: "Selesai", callback_data: "su:" + rowNum + ":SELESAI" }],
-        [{ text: "Dibatalkan", callback_data: "su:" + rowNum + ":DIBATALKAN" }],
-        [{ text: "⬅️ Kembali", callback_data: "detail:" + rowNum }]
+        [{ text: "Menunggu Pembayaran", callback_data: "su:" + reference + ":MENUNGGU_PEMBAYARAN" }],
+        [{ text: "Dibayar", callback_data: "su:" + reference + ":DIBAYAR" }],
+        [{ text: "Diproses", callback_data: "su:" + reference + ":DIPROSES" }],
+        [{ text: "Dikirim", callback_data: "su:" + reference + ":DIKIRIM" }],
+        [{ text: "Selesai", callback_data: "su:" + reference + ":SELESAI" }],
+        [{ text: "Dibatalkan", callback_data: "su:" + reference + ":DIBATALKAN" }],
+        [{ text: "⬅️ Kembali", callback_data: "detail:" + reference }]
       ] }
     });
     return;
@@ -863,10 +864,10 @@ async function handleTelegramCallback(env, query) {
 
   if (data.startsWith("su:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
-    const parts = data.split(":"); const rowNum = Number(parts[1]); const status = parts[2];
+    const parts = data.split(":"); const reference = parts[1]; const status = parts[2];
     const allowed = ["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
-    if (!Number.isInteger(rowNum) || rowNum < 2 || !allowed.includes(status)) throw new Error("Pembaruan status tidak valid");
-    await setOrderStatus(env, rowNum, status);
+    if (!reference || !allowed.includes(status)) throw new Error("Pembaruan status tidak valid");
+    await setOrderStatus(env, reference, status);
     await updateTelegramMessage(env, message, {
       text: "✅ Status pesanan berhasil diperbarui menjadi " + status + ".",
       replyMarkup: adminMenuKeyboard()
