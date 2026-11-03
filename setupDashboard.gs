@@ -32,6 +32,7 @@ function setupDashboard() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureSourceSheets_(ss);
   const dashboard = getOrCreateSheet_(ss, "Dashboard");
+  dashboard.getRange("A1:L37").breakApart();
   dashboard.clear();
   dashboard.clearConditionalFormatRules();
   dashboard.setHiddenGridlines(true);
@@ -41,7 +42,7 @@ function setupDashboard() {
   dashboard.setRowHeights(1, 1, 38);
   dashboard.setRowHeights(2, 1, 28);
   dashboard.setRowHeights(4, 1, 24);
-  dashboard.getRange("A1:L35").setBackground(SEITON_THEME.canvas)
+  dashboard.getRange("A1:L37").setBackground(SEITON_THEME.canvas)
     .setFontFamily("Arial").setFontColor(SEITON_THEME.slate);
 
   dashboard.getRange("A1:L1").merge().setValue("SEITON.ID  /  EXECUTIVE SALES INTELLIGENCE")
@@ -56,14 +57,19 @@ function setupDashboard() {
 
   createKpiCard_(dashboard, "A5:C5", "A6:C8", "TOTAL OMSET", '=IFERROR(SUMIFS(Pesanan!K:K,Pesanan!M:M,"DIBAYAR")+SUMIFS(Pesanan!K:K,Pesanan!M:M,"SELESAI")+SUMIFS(Pesanan!K:K,Pesanan!M:M,"PAID")+SUMIFS(Pesanan!K:K,Pesanan!M:M,"COMPLETED"),0)', '"Rp" #,##0');
   createKpiCard_(dashboard, "D5:F5", "D6:F8", "JUMLAH PESANAN", '=COUNTIF(Pesanan!A2:A,"<>")', '#,##0');
-  createKpiCard_(dashboard, "G5:I5", "G6:I8", "AVERAGE ORDER VALUE", '=IFERROR(SUM(Pesanan!K2:K)/COUNTIF(Pesanan!A2:A,"<>"),0)', '"Rp" #,##0');
+  createKpiCard_(dashboard, "G5:I5", "G6:I8", "AVERAGE PAID ORDER VALUE", '=IFERROR((SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"DIBAYAR")+SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"SELESAI")+SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"PAID")+SUMIFS(Pesanan!K2:K,Pesanan!M2:M,"COMPLETED"))/(COUNTIF(Pesanan!M2:M,"DIBAYAR")+COUNTIF(Pesanan!M2:M,"SELESAI")+COUNTIF(Pesanan!M2:M,"PAID")+COUNTIF(Pesanan!M2:M,"COMPLETED")),0)', '"Rp" #,##0');
   createKpiCard_(dashboard, "J5:L5", "J6:L8", "OMSET HARI INI", '=SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&TODAY(),Pesanan!B:B,"<"&TODAY()+1,Pesanan!M:M,"DIBAYAR")+SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&TODAY(),Pesanan!B:B,"<"&TODAY()+1,Pesanan!M:M,"SELESAI")+SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&TODAY(),Pesanan!B:B,"<"&TODAY()+1,Pesanan!M:M,"PAID")+SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&TODAY(),Pesanan!B:B,"<"&TODAY()+1,Pesanan!M:M,"COMPLETED")', '"Rp" #,##0');
 
   dashboard.getRange("A10:F10").merge().setValue("REVENUE MOMENTUM  /  14 HARI")
     .setBackground(SEITON_THEME.slate2).setFontColor(SEITON_THEME.white).setFontWeight("bold");
   dashboard.getRange("A11:B11").setValues([["Tanggal", "Omset"]]);
   dashboard.getRange("A12").setFormula('=SEQUENCE(14,1,TODAY()-13,1)');
-  dashboard.getRange("B12").setFormula('=ARRAYFORMULA(IF(A12:A25="",,SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&A12:A25,Pesanan!B:B,"<"&A12:A25+1,Pesanan!M:M,"DIBAYAR")+SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&A12:A25,Pesanan!B:B,"<"&A12:A25+1,Pesanan!M:M,"SELESAI")+SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&A12:A25,Pesanan!B:B,"<"&A12:A25+1,Pesanan!M:M,"PAID")+SUMIFS(Pesanan!K:K,Pesanan!B:B,">="&A12:A25,Pesanan!B:B,"<"&A12:A25+1,Pesanan!M:M,"COMPLETED")))');
+  const dailyFormulas = Array.from({length: 14}, (_, i) => {
+    const row = 12 + i;
+    const criteria = `Pesanan!B$2:B,TEXT(A${row},"yyyy-mm-dd")&"*",Pesanan!M$2:M,`;
+    return [`=IFERROR(SUMIFS(Pesanan!K$2:K,${criteria}"DIBAYAR")+SUMIFS(Pesanan!K$2:K,${criteria}"SELESAI")+SUMIFS(Pesanan!K$2:K,${criteria}"PAID")+SUMIFS(Pesanan!K$2:K,${criteria}"COMPLETED"),0)`];
+  });
+  dashboard.getRange("B12:B25").setFormulas(dailyFormulas);
   dashboard.getRange("C11:F11").merge().setValue("TREND LINE");
   dashboard.getRange("C12:F15").merge()
     .setFormula('=SPARKLINE(B12:B25,{"charttype","line";"linewidth",2;"color","' + SEITON_THEME.emerald + '";"empty","zero"})')
@@ -95,14 +101,14 @@ function setupDashboard() {
   dashboard.getRange("G29").setFormula('=IFERROR(QUERY(Pesanan!M2:M,"select Col1,count(Col1) where Col1 is not null group by Col1 label count(Col1) \'\'",0),{"Belum ada data",0})');
   dashboard.getRange("G29:H35").setBackground(SEITON_THEME.white);
 
-  dashboard.getRange("A35:L35").merge().setValue("Powered by Seiton.id  •  https://seiton.biz.id")
+  dashboard.getRange("A37:L37").merge().setValue("Powered by Seiton.id  •  https://seiton.biz.id")
     .setBackground(SEITON_THEME.slate).setFontColor(SEITON_THEME.white)
     .setFontSize(9).setHorizontalAlignment("center").setVerticalAlignment("middle");
-  dashboard.setRowHeight(35, 28);
-  dashboard.getRange("A1:L35").setVerticalAlignment("middle");
+  dashboard.setRowHeight(37, 28);
+  dashboard.getRange("A1:L37").setVerticalAlignment("middle");
   dashboard.getRange("A5:L8").setBorder(true, true, true, true, true, true, SEITON_THEME.line, SpreadsheetApp.BorderStyle.SOLID);
   dashboard.getRange("A10:L25").setBorder(true, true, true, true, true, true, SEITON_THEME.line, SpreadsheetApp.BorderStyle.SOLID);
-  dashboard.getRange("A27:L34").setBorder(true, true, true, true, true, true, SEITON_THEME.line, SpreadsheetApp.BorderStyle.SOLID);
+  dashboard.getRange("A27:L35").setBorder(true, true, true, true, true, true, SEITON_THEME.line, SpreadsheetApp.BorderStyle.SOLID);
   dashboard.setColumnWidth(1, 180);
   dashboard.setColumnWidth(2, 115);
   dashboard.setColumnWidths(3, 10, 105);
@@ -135,24 +141,39 @@ function applyDashboardRules_(sheet) {
 }
 
 function ensureSourceSheets_(ss) {
+  const orderHeaders = [
+    "order_id", "created_at", "channel", "customer_id", "customer_name",
+    "product", "quantity", "unit_price", "subtotal", "shipping", "total",
+    "payment_method", "status"
+  ];
+  const catalogHeaders = ["sku", "nama_produk", "harga", "stok", "aktif"];
+
   let orders = ss.getSheetByName("Pesanan");
   if (!orders) orders = ss.insertSheet("Pesanan");
   if (orders.getLastRow() === 0) {
-    orders.getRange(1, 1, 1, 13).setValues([[
-      "order_id", "created_at", "channel", "customer_id", "customer_name",
-      "product", "quantity", "unit_price", "subtotal", "shipping", "total",
-      "payment_method", "status"
-    ]]);
+    orders.getRange(1, 1, 1, orderHeaders.length).setValues([orderHeaders]);
     orders.setFrozenRows(1);
-    orders.getRange("A1:M1").setBackground(SEITON_THEME.slate).setFontColor(SEITON_THEME.white).setFontWeight("bold");
+    orders.getRange("A1:M1").setBackground(SEITON_THEME.slate)
+      .setFontColor(SEITON_THEME.white).setFontWeight("bold");
+  } else {
+    const headers = orders.getRange(1, 1, 1, orderHeaders.length).getDisplayValues()[0];
+    if (orderHeaders.some((name, i) => headers[i] !== name)) {
+      throw new Error("Header Pesanan!A:M tidak sesuai. Dashboard dibatalkan agar data tidak salah dihitung.");
+    }
   }
+
   let catalog = ss.getSheetByName("Katalog_Produk");
   if (!catalog) catalog = ss.insertSheet("Katalog_Produk");
   if (catalog.getLastRow() === 0) {
-    catalog.getRange(1, 1, 1, 5).setValues([["sku", "nama_produk", "harga", "stok", "aktif"]]);
-    catalog.getRange("A1:E1").setBackground(SEITON_THEME.slate).setFontColor(SEITON_THEME.white).setFontWeight("bold");
+    catalog.getRange(1, 1, 1, catalogHeaders.length).setValues([catalogHeaders]);
+    catalog.getRange("A1:E1").setBackground(SEITON_THEME.slate)
+      .setFontColor(SEITON_THEME.white).setFontWeight("bold");
     catalog.setFrozenRows(1);
-    catalog.getRange("A2:E2").setValues([["SEI-001", "Contoh Produk (ganti)", 100000, 10, true]]);
+  } else {
+    const headers = catalog.getRange(1, 1, 1, catalogHeaders.length).getDisplayValues()[0];
+    if (catalogHeaders.some((name, i) => headers[i] !== name)) {
+      throw new Error("Header Katalog_Produk!A:E tidak sesuai. Dashboard dibatalkan agar data katalog tidak salah dibaca.");
+    }
   }
 }
 
