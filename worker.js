@@ -469,12 +469,26 @@ async function handleTelegramCallback(env, query) {
   }
 
   if (data === "nav:orders") {
-    const rows = await readSheet(env, "Pesanan!A2:M");
+    await ensurePaymentWorkflowHeaders(env);
+    const rows = await readSheet(env, "Pesanan!A2:T");
     const mine = rows.filter(r => String(r[3] || "") === userId).slice(-5).reverse();
-    const lines = mine.map(r => String(r[0]) + " | " + String(r[5]) + " | " + String(r[6]) + " pcs | " + rupiah(r[10]) + " | " + String(r[12]));
+    const lines = mine.map(r => String(r[0]) + " | " + String(r[5]) + " | " + String(r[6]) + " pcs | " + rupiah(r[10]) + " | " + String(r[12]) +
+      (String(r[13] || "") === "MENUNGGU_VERIFIKASI" ? " · MENUNGGU VERIFIKASI" : String(r[13] || "") === "DISETUJUI" ? " · PEMBAYARAN TERVERIFIKASI" : ""));
+    const buttons = [];
+    for (const r of mine) {
+      const orderId = String(r[0] || "");
+      if (String(r[13] || "") === "DISETUJUI" && r[18]) {
+        buttons.push([{ text: "🎟️ Lihat Resi " + orderId.slice(-8), callback_data: "ticket:" + orderId }]);
+      } else if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
+        buttons.push([{ text: "📎 Kirim / Perbarui Bukti " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
+      } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() !== "COD") {
+        buttons.push([{ text: "💳 Konfirmasi Bayar " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
+      }
+    }
+    buttons.push(...customerMenuKeyboard().inline_keyboard);
     await updateTelegramMessage(env, message, {
       text: mine.length ? "Lima pesanan terakhir:\n\n" + lines.join("\n") : "Belum ada pesanan atas akun Telegram ini.",
-      replyMarkup: customerMenuKeyboard(),
+      replyMarkup: { inline_keyboard: buttons },
       clearMedia: true
     });
     return;
