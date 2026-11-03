@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * SEITON.ID - HIGH-PERFORMANCE BOT & INTERACTIVE DASHBOARD ENGINE
- * Stack: Cloudflare Workers + Google Sheets API + Telegram/WhatsApp Webhook
+ * Stack: Cloudflare Workers + Google Sheets API + Telegram Webhook
  * Official Web : https://seiton.biz.id
  * Copyright (c) 2026 Seiton.id. All rights reserved.
  * ============================================================================
@@ -28,7 +28,6 @@ const ADMIN_DASHBOARD_HTML = "<!doctype html>\n<html lang=\"id\">\n<head>\n<meta
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const TELEGRAM_API = "https://api.telegram.org";
-const WHATSAPP_API_VERSION = "v21.0";
 const TZ = "Asia/Jakarta";
 const HEADERS = [
   "order_id", "created_at", "channel", "customer_id", "customer_name",
@@ -62,22 +61,15 @@ export default {
     if (request.method === "POST" && url.pathname === "/telegram") {
       return handleTelegram(request, env, ctx);
     }
-    if (request.method === "GET" && url.pathname === "/whatsapp") {
-      return verifyWhatsApp(request, env);
-    }
-    if (request.method === "POST" && url.pathname === "/whatsapp") {
-      return handleWhatsApp(request, env, ctx);
-    }
     return json({ ok: false, error: "Not found" }, 404);
   }
 };
 
 async function handleTelegram(request, env, ctx) {
-  if (env.TELEGRAM_WEBHOOK_SECRET) {
-    const supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
-    if (!constantTimeEqual(supplied, env.TELEGRAM_WEBHOOK_SECRET)) {
-      return json({ ok: false, error: "Unauthorized" }, 401);
-    }
+  if (!env.TELEGRAM_WEBHOOK_SECRET) return json({ ok: false, error: "Webhook security is not configured" }, 503);
+  const supplied = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+  if (!constantTimeEqual(supplied, env.TELEGRAM_WEBHOOK_SECRET)) {
+    return json({ ok: false, error: "Unauthorized" }, 401);
   }
   let update;
   try { update = await request.json(); } catch { return json({ ok: false }, 400); }
@@ -134,7 +126,8 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     const result = await createOrder(env, {
-      ...orderInput, channel: "telegram", customerId, customerName
+      ...orderInput, channel: "telegram", customerId, customerName,
+      idempotencyKey: String(update.update_id ?? (chatId + ":" + message.message_id))
     });
     await sendTelegram(env, chatId, orderConfirmation(result, env), orderConfirmationKeyboard(result));
   })();
@@ -465,7 +458,8 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("ok:")) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
     const result = await createOrder(env, { sku: sku.toUpperCase(), quantity: qty, paymentMethod: method,
-      channel: "telegram", customerId: userId, customerName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" ") });
+      channel: "telegram", customerId: userId, customerName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" "),
+      idempotencyKey: String(query.id || "") });
     await updateTelegramMessage(env, message, {
       text: orderConfirmation(result, env),
       replyMarkup: orderConfirmationKeyboard(result)
@@ -1510,83 +1504,10 @@ async function markOrderPickedUp(env, rowNumber) {
   return r;
 }
 
-function verifyWhatsApp(request, env) {
-  const url = new URL(request.url);
-  const mode = url.searchParams.get("hub.mode");
-  const token = url.searchParams.get("hub.verify_token");
-  const challenge = url.searchParams.get("hub.challenge");
-  if (mode === "subscribe" && env.WHATSAPP_VERIFY_TOKEN &&
-      constantTimeEqual(token || "", env.WHATSAPP_VERIFY_TOKEN)) {
-    return new Response(challenge || "", { status: 200 });
-  }
-  return new Response("Forbidden", { status: 403 });
-}
 
-async function handleWhatsApp(request, env, ctx) {
-  if (!env.WHATSAPP_APP_SECRET) {
-    return json({ ok: false, error: "WhatsApp signature verification is not configured" }, 503);
-  }
-  const rawBody = await request.text();
-  const signature = request.headers.get("X-Hub-Signature-256") || "";
-  if (!(await verifyWhatsAppSignature(rawBody, signature, env.WHATSAPP_APP_SECRET))) {
-    return json({ ok: false, error: "Invalid WhatsApp signature" }, 401);
-  }
-  let payload;
-  try { payload = JSON.parse(rawBody); } catch { return json({ ok: false }, 400); }
-  const changes = payload.entry?.flatMap(entry => entry.changes || []) || [];
-  const messages = changes.flatMap(change => change.value?.messages || []);
-  const contacts = changes.flatMap(change => change.value?.contacts || []);
-  const work = Promise.all(messages.map(async message => {
-    if (message.type !== "text" || !message.from) return;
-    const text = String(message.text?.body || "").trim();
-    const customer = contacts.find(c => c.wa_id === message.from)?.profile?.name || "Pelanggan";
-    if (text.toLowerCase().startsWith("/laporan")) {
-      if (!isAdmin(message.from, env)) {
-        await sendWhatsApp(env, message.from, "⛔ Perintah ini khusus admin.");
-      } else {
-        await sendWhatsApp(env, message.from, await buildAdminReport(env));
-      }
-      return;
-    }
-    if (/^(\/start|\/help|halo|hai)$/i.test(text)) {
-      await sendWhatsApp(env, message.from, helpText());
-      return;
-    }
-    const orderInput = parseOrderText(text);
-    if (!orderInput) {
-      await sendWhatsApp(env, message.from,
-        "🛍️ Selamat datang di Seiton.id!\nFormat: beli SKU jumlah metode_pembayaran\nContoh: beli SEI-001 2 QRIS");
-      return;
-    }
-    const result = await createOrder(env, {
-      ...orderInput, channel: "whatsapp", customerId: message.from, customerName: customer
-    });
-    await sendWhatsApp(env, message.from, orderConfirmation(result, env));
-  }));
-  ctx.waitUntil(work.catch(error => {
-    console.error(JSON.stringify({ level: "error", event: "whatsapp_processing", message: error.message }));
-  }));
-  return json({ ok: true });
-}
-
-
-async function verifyWhatsAppSignature(rawBody, signatureHeader, appSecret) {
-  if (!signatureHeader.startsWith("sha256=")) return false;
-  const suppliedHex = signatureHeader.slice(7).toLowerCase();
-  if (!/^[a-f0-9]{64}$/.test(suppliedHex)) return false;
-  const key = await crypto.subtle.importKey(
-    "raw", new TextEncoder().encode(appSecret),
-    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
-  );
-  const digest = new Uint8Array(await crypto.subtle.sign(
-    "HMAC", key, new TextEncoder().encode(rawBody)
-  ));
-  const expectedHex = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
-  return constantTimeEqual(expectedHex, suppliedHex);
-}
 
 function parseOrderText(text) {
-  const match = text.match(/^beli\s+([A-Za-z0-9._-]{1,50})\s+([1-9]\d{0,3})\s+(QRIS|TRANSFER|TRANSFER_BANK|COD)$/i);
+  const match = text.match(/^beli\s+([A-Za-z0-9._-]{1,40})\s+((?:[1-9]\d{0,2}|1000))\s+(QRIS|TRANSFER|TRANSFER_BANK|COD)$/i);
   if (!match) return null;
   return {
     sku: match[1].toUpperCase(),
@@ -1599,10 +1520,12 @@ async function createOrder(env, input) {
   if (!env.GOOGLE_SHEETS_ID || !env.GOOGLE_SERVICE_ACCOUNT_KEY) {
     throw new Error("Google Sheets credentials are not configured");
   }
-  const idempotencyKey = `${input.channel}:${input.customerId}:${input.sku}:${input.quantity}:${input.paymentMethod}`;
-  if (env.ORDERS_KV) {
-    const recent = await env.ORDERS_KV.get(`recent:${idempotencyKey}`, "json");
-    if (recent && Date.now() - recent.createdMs < 30000) return { ...recent, duplicate: true };
+  const idempotencyKey = input.idempotencyKey
+    ? `update:${String(input.channel)}:${String(input.idempotencyKey).slice(0,128)}`
+    : "";
+  if (env.ORDERS_KV && idempotencyKey) {
+    const recent = await env.ORDERS_KV.get(idempotencyKey, "json");
+    if (recent) return { ...recent, duplicate: true };
   }
 
   const product = await findProduct(env, input.sku);
@@ -1615,11 +1538,14 @@ async function createOrder(env, input) {
   }
 
   const subtotal = product.price * input.quantity;
-  const shipping = Number(env.DEFAULT_SHIPPING || 0);
+  const shipping = env.DEFAULT_SHIPPING == null || env.DEFAULT_SHIPPING === "" ? 0 : Number(env.DEFAULT_SHIPPING);
+  if (!Number.isFinite(shipping) || shipping < 0) throw new Error("DEFAULT_SHIPPING harus berupa angka nol atau lebih.");
+  const createdAt = new Date().toISOString();
+  const dateStamp = localDateKey(createdAt).replace(/-/g, "");
   const total = subtotal + shipping;
   const order = {
-    orderId: `SEI-${new Date().toISOString().slice(0,10).replaceAll("-", "")}-${crypto.randomUUID().slice(0,8).toUpperCase()}`,
-    createdAt: new Date().toISOString(),
+    orderId: `SEI-${dateStamp}-${crypto.randomUUID().slice(0,8).toUpperCase()}`,
+    createdAt,
     createdMs: Date.now(),
     channel: input.channel,
     customerId: String(input.customerId),
@@ -1635,23 +1561,52 @@ async function createOrder(env, input) {
     status: "MENUNGGU_PEMBAYARAN"
   };
   await appendOrder(env, order);
-  if (env.ORDERS_KV) {
-    await env.ORDERS_KV.put(`recent:${idempotencyKey}`, JSON.stringify(order), { expirationTtl: 30 });
+  if (env.ORDERS_KV && idempotencyKey) {
+    await env.ORDERS_KV.put(idempotencyKey, JSON.stringify(order), { expirationTtl: 86400 });
   }
   return order;
 }
 
+function parseCatalogProduct(row) {
+  const sku = String(row[0] || "").trim();
+  const rawPrice = row[2], price = Number(rawPrice);
+  const priceValid = rawPrice != null && String(rawPrice).trim() !== "" && Number.isFinite(price) && price >= 0;
+  const rawStock = row[3];
+  const stockBlank = rawStock == null || String(rawStock).trim() === "";
+  const parsedStock = stockBlank ? null : Number(rawStock);
+  const stockValid = stockBlank || (Number.isSafeInteger(parsedStock) && parsedStock >= 0);
+  const activeText = String(row[4] ?? "TRUE").trim().toUpperCase();
+  const active = activeText === "" || ["TRUE","1","YA","YES","AKTIF"].includes(activeText);
+  return {
+    sku, name: String(row[1] || sku).trim(), price: priceValid ? price : 0, priceValid,
+    stock: stockValid ? parsedStock : null, stockValid, active,
+    photoUrl: String(row[5] || "").trim(), description: String(row[6] || "").trim()
+  };
+}
+
 async function findProduct(env, sku) {
-  const rows = await readSheet(env, "Katalog_Produk!A2:E");
-  for (const row of rows) {
-    if (String(row[0] || "").trim().toUpperCase() !== sku) continue;
-    const price = Number(row[2]);
-    const stock = row[3] === "" || row[3] == null ? null : Number(row[3]);
-    const active = !["FALSE", "0", "NONAKTIF", "NO"].includes(String(row[4] ?? "TRUE").toUpperCase());
-    if (!Number.isFinite(price) || price < 0) throw new Error("Harga produk pada katalog tidak valid");
-    return { sku, name: String(row[1] || sku), price, stock: Number.isFinite(stock) ? stock : null, active };
-  }
-  return null;
+  const normalized = String(sku || "").trim().toUpperCase();
+  if (!normalized) throw new Error("SKU produk tidak valid.");
+  const rows = await readSheet(env, "Katalog_Produk!A2:G");
+  const matches = rows.filter(row => String(row[0] || "").trim().toUpperCase() === normalized);
+  if (!matches.length) return null;
+  if (matches.length > 1) throw new Error("SKU duplikat ditemukan pada katalog. Hubungi admin.");
+  const product = parseCatalogProduct(matches[0]);
+  if (!product.priceValid) throw new Error("Harga produk pada katalog tidak valid.");
+  if (!product.stockValid) throw new Error("Stok produk pada katalog tidak valid.");
+  return product;
+}
+
+async function appendSheetRows(env, range, values) {
+  const token = await getGoogleAccessToken(env);
+  const encoded = encodeURIComponent(range);
+  const response = await fetch(`${SHEETS_BASE}/${env.GOOGLE_SHEETS_ID}/values/${encoded}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ values })
+  });
+  if (!response.ok) throw new Error(`Google Sheets append gagal (${response.status}): ${(await response.text()).slice(0,500)}`);
+  return response.json();
 }
 
 async function appendOrder(env, order) {
@@ -1660,17 +1615,7 @@ async function appendOrder(env, order) {
     `${order.sku} - ${order.product}`, order.quantity, order.unitPrice, order.subtotal,
     order.shipping, order.total, order.paymentMethod, order.status
   ];
-  const token = await getGoogleAccessToken(env);
-  const range = encodeURIComponent("Pesanan!A:M");
-  const response = await fetch(`${SHEETS_BASE}/${env.GOOGLE_SHEETS_ID}/values/${range}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ values: [row] })
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0,500);
-    throw new Error(`Google Sheets append gagal (${response.status}): ${detail}`);
-  }
+  await appendSheetRows(env, "Pesanan!A:M", [row]);
 }
 
 async function readSheet(env, range) {
@@ -1852,27 +1797,7 @@ async function sendTelegram(env, chatId, text, replyMarkup = null) {
   if (!response.ok) throw new Error("Telegram sendMessage gagal (" + response.status + "): " + (await response.text()).slice(0,300));
 }
 
-async function sendWhatsApp(env, to, text) {
-  if (!env.WHATSAPP_ACCESS_TOKEN || !env.WHATSAPP_PHONE_NUMBER_ID) {
-    console.error("WhatsApp credentials are not configured");
-    return;
-  }
-  const response = await fetch(`https://graph.facebook.com/${WHATSAPP_API_VERSION}/${env.WHATSAPP_PHONE_NUMBER_ID}/messages`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to,
-      type: "text",
-      text: { preview_url: false, body: text.replace(/\*/g, "").replace(/_/g, "") }
-    })
-  });
-  if (!response.ok) throw new Error(`WhatsApp send gagal (${response.status})`);
-}
+
 
 function isAdmin(id, env) {
   const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
