@@ -227,23 +227,39 @@ async function handleAdminProductForm(env, chatId, input, prompt) {
   await sendTelegram(env, chatId, "✅ Produk " + sku + " berhasil ditambahkan ke katalog.", adminMenuKeyboard());
 }
 async function deleteCatalogProduct(env, sku) {
+  const normalizedSku = String(sku || "").trim().toUpperCase();
+  if (!normalizedSku) throw new Error("SKU produk tidak valid.");
   const rows = await readSheet(env, "Katalog_Produk!A2:G");
-  const index = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
-  if (index < 0) throw new Error("Produk tidak ditemukan.");
-  const meta = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "?fields=sheets.properties");
-  if (!meta.ok) throw new Error("Tidak dapat membaca metadata spreadsheet.");
+  const index = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === normalizedSku);
+  if (index < 0) throw new Error("Produk tidak ditemukan. Muat ulang katalog admin lalu coba kembali.");
+
+  // Google Sheets API requires OAuth authorization for spreadsheet metadata too.
+  const token = await getGoogleAccessToken(env);
+  const meta = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "?fields=sheets.properties", {
+    headers: { Authorization: "Bearer " + token }
+  });
+  if (!meta.ok) {
+    const detail = (await meta.text()).slice(0, 400);
+    throw new Error("Tidak dapat membaca metadata spreadsheet (" + meta.status + "): " + detail);
+  }
   const metadata = await meta.json();
   const sheet = (metadata.sheets || []).find(x => x.properties?.title === "Katalog_Produk");
-  if (!sheet) throw new Error("Tab Katalog_Produk tidak ditemukan.");
+  if (!sheet || sheet.properties?.sheetId == null) throw new Error("Tab Katalog_Produk tidak ditemukan atau sheetId tidak tersedia.");
+
+  // A2 is row index 1 in the zero-based GridRange used by batchUpdate.
   const rowIndex = index + 1;
-  const token = await getGoogleAccessToken(env);
   const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + ":batchUpdate", {
-    method: "POST", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
     body: JSON.stringify({ requests: [{ deleteDimension: { range: {
       sheetId: sheet.properties.sheetId, dimension: "ROWS", startIndex: rowIndex, endIndex: rowIndex + 1
     } } }] })
   });
-  if (!response.ok) throw new Error("Gagal menghapus produk: " + (await response.text()).slice(0,300));
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 400);
+    throw new Error("Gagal menghapus produk (" + response.status + "): " + detail);
+  }
+  return { sku: normalizedSku, row: index + 2 };
 }
 async function sendTelegramPhoto(env, chatId, photo, caption, replyMarkup = null) {
   const payload = { chat_id: chatId, photo, caption: String(caption).slice(0,1024), disable_notification: true };
