@@ -159,13 +159,20 @@ async function ensureCatalogHeaders(env) {
 }
 async function promptAdminProduct(env, chatId, mode, sku = "") {
   const intro = mode === "ADD" ? "📝 FORM PRODUK SEITON — ADD" : "📝 FORM PRODUK SEITON — EDIT — " + sku;
+  let current = "";
+  if (mode === "EDIT") {
+    const rows = await readSheet(env, "Katalog_Produk!A2:G");
+    const product = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
+    if (!product) throw new Error("Produk tidak ditemukan.");
+    current = "DATA SAAT INI:\n" + [product[0] || "", product[1] || "", product[2] ?? 0, product[3] ?? 0, product[4] ?? "TRUE", product[5] || "", product[6] || ""].join(" | ") + "\n\n";
+  }
   const guide = [
     intro,
-    "Kirim satu pesan dengan 7 kolom dipisahkan tanda |",
+    current + "Kirim satu pesan dengan 7 kolom dipisahkan tanda |",
     "SKU | Nama Produk | Harga | Stok | Aktif(TRUE/FALSE) | URL_FOTO(https://...) | Deskripsi",
     mode === "ADD" ? "Contoh: SEI-002 | Kaos Seiton | 99000 | 20 | TRUE | https://contoh.com/foto.jpg | Kaos cotton combed" :
-      "Untuk edit, SKU harus tetap sama. URL foto boleh dikosongkan untuk menghapus foto.",
-    "Gunakan angka 0 untuk stok habis. Deskripsi tanpa tanda |."
+      "Salin data saat ini lalu ubah bagian yang diperlukan. SKU harus tetap sama. URL foto boleh dikosongkan untuk menghapus foto.",
+    "Gunakan angka 0 untuk stok habis. Deskripsi maksimal 500 karakter dan tanpa tanda |."
   ].join("\n");
   await sendTelegram(env, chatId, guide, { force_reply: true, input_field_placeholder: "SKU | Nama | Harga | Stok | TRUE/FALSE | URL foto | Deskripsi" });
 }
@@ -175,6 +182,7 @@ async function handleAdminProductForm(env, chatId, input, prompt) {
   const [sku, name, priceText, stockText, activeText, imageUrl, description] = parts;
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU hanya boleh berisi huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
   if (!name || name.length > 100) throw new Error("Nama produk wajib diisi (maksimal 100 karakter).");
+  if (description.length > 500) throw new Error("Deskripsi maksimal 500 karakter.");
   const price = Number(priceText); const stock = Number(stockText);
   if (!Number.isFinite(price) || price < 0 || !Number.isInteger(stock) || stock < 0) throw new Error("Harga dan stok harus berupa angka valid.");
   if (!["TRUE","FALSE","YA","TIDAK","1","0","AKTIF","NONAKTIF"].includes(activeText.toUpperCase())) throw new Error("Status aktif harus TRUE atau FALSE.");
