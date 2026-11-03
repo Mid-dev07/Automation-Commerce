@@ -342,8 +342,8 @@ async function handleTelegramCallback(env, query) {
     if (action === "report") { await sendTelegram(env, chatId, await buildAdminReport(env), adminMenuKeyboard()); return; }
     if (action === "dashboard") {
       const accessToken = await createDashboardAccessToken(env, chatId);
-      const link = "https://seiton-order-bot.midzpribadi.workers.dev/admin?access=" + encodeURIComponent(accessToken);
-      await sendTelegram(env, chatId, "📈 Dashboard admin siap dibuka. Tautan akses berlaku selama 4 jam dan hanya untuk akun admin ini.", {
+      const link = "https://seiton-order-bot.midzpribadi.workers.dev/admin#access=" + encodeURIComponent(accessToken);
+      await sendTelegram(env, chatId, "📈 Dashboard admin siap dibuka. Tautan akses berlaku selama 4 jam. Jangan teruskan tautan ini kepada orang lain.", {
         inline_keyboard: [[{ text: "Buka Dashboard Interaktif", url: link }], [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]]
       });
       return;
@@ -539,7 +539,8 @@ async function verifyDashboardAccess(request, env) {
   );
   if (!constantTimeEqual(base64urlBytes(new Uint8Array(expected)), parts[1])) return false;
   try {
-    const decoded = atob(parts[0].replace(/-/g, "+").replace(/_/g, "/"));
+    const encodedPayload = parts[0].replace(/-/g, "+").replace(/_/g, "/");
+    const decoded = atob(encodedPayload + "=".repeat((4 - encodedPayload.length % 4) % 4));
     const payload = JSON.parse(decoded);
     return payload.v === 1 && Number(payload.exp) > Math.floor(Date.now() / 1000) && isAdmin(payload.sub, env);
   } catch {
