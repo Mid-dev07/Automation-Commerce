@@ -84,3 +84,17 @@ test("Google Sheets is only a best-effort mirror after transactional checkout", 
   assert.match(worker, /const order = await createOrderTransactional\(env,\{\.\.\.input,shipping\}\)/);
   assert.match(worker, /event:"order_sheet_mirror"/);
 });
+
+test("payment approval event records the actual previous status", () => {
+  assert.match(layer, /SELECT order_id,'PAYMENT_APPROVED',\?,'DIBAYAR'/);
+  assert.match(layer, /\.bind\(o\.status,clean\(actor,128\),\"approve:\"\+code/);
+});
+
+test("coordinator audit is best-effort and bounded", () => {
+  const start = layer.indexOf("  audit(operation,key,result)");
+  const end = layer.indexOf("\n  async createOrder", start);
+  const audit = layer.slice(start, end);
+  assert.match(audit, /try \{/);
+  assert.match(audit, /catch \(error\)/);
+  assert.match(audit, /LIMIT 1 OFFSET 999/);
+});
