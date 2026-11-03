@@ -81,7 +81,9 @@ async function isReady(db) {
   }
 }
 export async function transactionReadiness(env) {
-  return { configured: Boolean(env.DB && env.ORDER_COORDINATOR), ready: await isReady(env.DB) };
+  const configured = Boolean(env.DB);
+  const ready = Boolean(env.ORDER_COORDINATOR) && await isReady(env.DB);
+  return { configured, ready, coordinator: Boolean(env.ORDER_COORDINATOR) };
 }
 async function requireReady(db) {
   if (!(await isReady(db))) throw new Error("Lapisan transaksi D1 belum diaktifkan. Admin perlu menjalankan /migrasi_d1 di bot.");
