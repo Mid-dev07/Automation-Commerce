@@ -570,9 +570,13 @@ async function handleTelegramCallback(env, query) {
   }
 
   if (data === "nav:orders") {
-    await ensurePaymentWorkflowHeaders(env);
-    const rows = await readSheet(env, "Pesanan!A2:T");
-    const mine = rows.filter(r => String(r[3] || "") === userId).slice(-5).reverse();
+    const state = await transactionReadiness(env);
+    if (!state.ready) await ensurePaymentWorkflowHeaders(env);
+    const rows = state.ready
+      ? (await listOrdersTransactional(env,{limit:5000})).map(orderToSheetRow)
+      : await readSheet(env, "Pesanan!A2:T");
+    const mine = (state.ready ? rows : rows.filter(r => String(r[3] || "") === userId).slice(-5).reverse())
+      .filter(r => String(r[3] || "") === userId).slice(0,5);
     const lines = mine.map(r => String(r[0]) + " | " + String(r[5]) + " | " + String(r[6]) + " pcs | " + rupiah(r[10]) + " | " + String(r[12]) +
       (String(r[13] || "") === "MENUNGGU_VERIFIKASI" ? " · MENUNGGU VERIFIKASI" : String(r[13] || "") === "DISETUJUI" ? " · PEMBAYARAN TERVERIFIKASI" : ""));
     const buttons = [];
@@ -664,14 +668,16 @@ async function handleTelegramCallback(env, query) {
       return;
     }
     if (action === "recent" || action === "statuslist") {
-      const rows = await readSheet(env, "Pesanan!A2:M");
-      const recent = rows.map((r,i) => ({ r, row:i+2 })).filter(x => x.r[0]).slice(-10).reverse();
+      const state = await transactionReadiness(env);
+      const recent = state.ready
+        ? (await listOrdersTransactional(env,{limit:10})).map(o => ({r:orderToSheetRow(o),reference:o.order_id}))
+        : (await readSheet(env, "Pesanan!A2:M")).map((r,i) => ({r,reference:String(i+2)})).filter(x => x.r[0]).slice(-10).reverse();
       if (!recent.length) {
         await updateTelegramMessage(env, message, { text: "Belum ada pesanan.", replyMarkup: adminMenuKeyboard() });
         return;
       }
       const buttons = recent.map(x => [{ text: String(x.r[0]).slice(0,22) + " · " + String(x.r[12] || "BARU").slice(0,18),
-        callback_data: (action === "statuslist" ? "st:" : "detail:") + x.row }]);
+        callback_data: (action === "statuslist" ? "st:" : "detail:") + x.reference }]);
       buttons.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
       const summary = recent.map(x => String(x.r[0]) + " | " + String(x.r[5]) + " | " + rupiah(x.r[10]) + " | " + String(x.r[12])).join("\n");
       await updateTelegramMessage(env, message, {
@@ -1082,7 +1088,7 @@ async function handleAdminPaymentAction(request, env) {
     if (body.action==="approve") {
       const method=String(found.row[11]||"").toUpperCase();
       if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi melalui menu ini.");
-      const approved=await approvePaymentAndIssueTicket(env,found.rowNumber);
+      const approved=await approvePaymentAndIssueTicket(env,found.rowNumber ?? body.order_id);
       let receiptSent = true;
       try { await sendPickupReceipt(env,String(approved.row[3]),approved.row,String(approved.row[0]),approved.receiptCode); }
       catch(error) {
@@ -1092,7 +1098,7 @@ async function handleAdminPaymentAction(request, env) {
       return json({ok:true,status:"DIBAYAR",receipt_code:approved.receiptCode,receipt_sent:receiptSent});
     }
     if (body.action==="reject") {
-      const rejected=await rejectPaymentRequest(env,found.rowNumber);
+      const rejected=await rejectPaymentRequest(env,found.rowNumber ?? body.order_id);
       try { await sendTelegram(env,String(rejected[3]),"⚠️ Permintaan verifikasi pembayaran untuk "+rejected[0]+" belum dapat disetujui. Periksa kembali bukti dan nominal pembayaran, lalu ajukan ulang dari menu Pesanan Saya.",{inline_keyboard:[[{text:"🔁 Ajukan Verifikasi Ulang",callback_data:"pc:req:"+rejected[0]}]]}); } catch (error) { console.warn(JSON.stringify({level:"warn",event:"dashboard_payment_rejection_notice",message:error.message})); }
       return json({ok:true,status:"DITOLAK"});
     }
@@ -1153,7 +1159,7 @@ async function handleAdminOrderStatus(request, env) {
   const status=String(body.status||"").trim().toUpperCase();
   const allowed=["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
   if(!allowed.includes(status))return json({ok:false,error:"Status pesanan tidak dikenal."},400);
-  try { await setOrderStatus(env,found.rowNumber,status); return json({ok:true,status}); }
+  try { await setOrderStatus(env,found.rowNumber ?? body.order_id,status); return json({ok:true,status}); }
   catch(error){return json({ok:false,error:error.message},400);}
 }
 async function handleAdminPaymentProof(request, env) {
