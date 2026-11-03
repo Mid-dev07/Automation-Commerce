@@ -284,8 +284,8 @@ async function approvePaymentD1(db,id,actor="admin") {
       WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI'
         AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')`).bind(at,code,at,id),
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
-      SELECT order_id,'PAYMENT_APPROVED',status,'DIBAYAR',?,?, '{}',? FROM orders
-      WHERE order_id=? AND receipt_code=?`).bind(clean(actor,128),"approve:"+code,at,id,code),
+      SELECT order_id,'PAYMENT_APPROVED',?,'DIBAYAR',?,?, '{}',? FROM orders
+      WHERE order_id=? AND receipt_code=?`).bind(o.status,clean(actor,128),"approve:"+code,at,id,code),
     db.prepare(`INSERT OR IGNORE INTO outbox(event_type,aggregate_id,payload_json,created_at)
       SELECT 'PAYMENT_APPROVED',order_id,json_object('order_id',order_id),?
       FROM orders WHERE order_id=? AND receipt_code=?`).bind(at,id,code)
@@ -547,10 +547,19 @@ export class OrderCoordinator extends DurableObject {
     return next;
   }
   audit(operation,key,result) {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO coordinator_audit(operation,aggregate_key,result,created_at) VALUES(?,?,?,?)",
-      operation,String(key),String(result||"OK"),nowJakarta()
-    );
+    try {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO coordinator_audit(operation,aggregate_key,result,created_at) VALUES(?,?,?,?)",
+        operation,String(key),String(result||"OK"),nowJakarta()
+      );
+      this.ctx.storage.sql.exec(
+        "DELETE FROM coordinator_audit WHERE id < COALESCE(" +
+        "(SELECT id FROM coordinator_audit ORDER BY id DESC LIMIT 1 OFFSET 999),0)"
+      );
+    } catch (error) {
+      // Transaction state is authoritative in D1; audit failure must not mask a committed operation.
+      console.warn(JSON.stringify({level:"warn",event:"coordinator_audit",operation,message:error?.message||String(error)}));
+    }
   }
   async createOrder(input) {
     return this.enqueue(async()=>{
