@@ -318,28 +318,49 @@ async function updateTelegramMessage(env, message, options) {
   const chatId = message.chat.id;
   const messageId = message.message_id;
   const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
+  const markup = replyMarkup || { inline_keyboard: [] };
 
+  // Photo -> photo: replace the media and keep the same Telegram message.
   if (hasPhoto && photo) {
     return telegramApiRequest(env, "editMessageMedia", {
       chat_id: chatId,
       message_id: messageId,
       media: { type: "photo", media: photo, caption: text.slice(0, 1024) },
-      reply_markup: replyMarkup || { inline_keyboard: [] }
-    });
-  }
-  if (!hasPhoto && !photo) {
-    return telegramApiRequest(env, "editMessageText", {
-      chat_id: chatId,
-      message_id: messageId,
-      text: text.slice(0, 4096),
-      disable_web_page_preview: true,
-      reply_markup: replyMarkup || { inline_keyboard: [] }
+      reply_markup: markup
     });
   }
 
+  // Photo -> text screen: edit the caption in-place whenever possible.
+  // This missing case caused each checkout step to create another message.
+  if (hasPhoto && !photo && !options.clearMedia && text.length <= 1024) {
+    return telegramApiRequest(env, "editMessageCaption", {
+      chat_id: chatId,
+      message_id: messageId,
+      caption: text,
+      reply_markup: markup
+    });
+  }
+
+  // Text -> text: edit the existing message instead of sending another one.
+  if (!hasPhoto && !photo) {
+    if (text.length <= 4096) {
+      return telegramApiRequest(env, "editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        disable_web_page_preview: true,
+        reply_markup: markup
+      });
+    }
+    await deleteTelegramMessage(env, message);
+    return sendTelegram(env, chatId, text.slice(0, 4096), replyMarkup);
+  }
+
+  // Telegram cannot convert a text message into a photo or remove photo media.
+  // Delete the old UI message before sending the replacement.
   await deleteTelegramMessage(env, message);
   if (photo) return sendTelegramPhoto(env, chatId, photo, text, replyMarkup);
-  return sendTelegram(env, chatId, text, replyMarkup);
+  return sendTelegram(env, chatId, text.slice(0, 4096), replyMarkup);
 }
 
 async function answerTelegramCallback(env, callbackId, message = "") {
@@ -361,7 +382,8 @@ async function handleTelegramCallback(env, query) {
     const showAdmin = data === "adm:home" && admin;
     await updateTelegramMessage(env, message, {
       text: showAdmin ? adminMenuText() : customerMenuText(),
-      replyMarkup: showAdmin ? adminMenuKeyboard() : customerMenuKeyboard()
+      replyMarkup: showAdmin ? adminMenuKeyboard() : customerMenuKeyboard(),
+      clearMedia: true
     });
     return;
   }
@@ -388,6 +410,7 @@ async function handleTelegramCallback(env, query) {
     await updateTelegramMessage(env, message, {
       text: productText,
       photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
+      clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
       replyMarkup: productKeyboard
     });
     return;
@@ -442,7 +465,8 @@ async function handleTelegramCallback(env, query) {
     const lines = mine.map(r => String(r[0]) + " | " + String(r[5]) + " | " + String(r[6]) + " pcs | " + rupiah(r[10]) + " | " + String(r[12]));
     await updateTelegramMessage(env, message, {
       text: mine.length ? "Lima pesanan terakhir:\n\n" + lines.join("\n") : "Belum ada pesanan atas akun Telegram ini.",
-      replyMarkup: customerMenuKeyboard()
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
     });
     return;
   }
@@ -450,7 +474,8 @@ async function handleTelegramCallback(env, query) {
   if (data === "nav:help") {
     await updateTelegramMessage(env, message, {
       text: "Bantuan Seiton.id\nPilih Belanja Produk untuk membuat pesanan melalui tombol. Untuk bantuan admin, silakan hubungi admin toko.",
-      replyMarkup: customerMenuKeyboard()
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
     });
     return;
   }
@@ -462,7 +487,7 @@ async function handleTelegramCallback(env, query) {
     }
     const action = data.slice(4);
     if (action === "report") {
-      await updateTelegramMessage(env, message, { text: await buildAdminReport(env), replyMarkup: adminMenuKeyboard() });
+      await updateTelegramMessage(env, message, { text: await buildAdminReport(env), replyMarkup: adminMenuKeyboard(), clearMedia: true });
       return;
     }
     if (action === "dashboard") {
@@ -470,6 +495,7 @@ async function handleTelegramCallback(env, query) {
       const link = "https://seiton-order-bot.midzpribadi.workers.dev/admin#access=" + encodeURIComponent(accessToken);
       await updateTelegramMessage(env, message, {
         text: "📈 Dashboard admin siap dibuka. Tautan akses berlaku selama 4 jam. Jangan teruskan tautan ini kepada orang lain.",
+        clearMedia: true,
         replyMarkup: { inline_keyboard: [
           [{ text: "Buka Dashboard Interaktif", url: link }],
           [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
@@ -480,6 +506,7 @@ async function handleTelegramCallback(env, query) {
     if (action === "exports") {
       await updateTelegramMessage(env, message, {
         text: "📥 Pilih jenis laporan yang ingin diunduh. Semua file berformat CSV dan bisa dibuka di Excel atau Google Sheets.",
+        clearMedia: true,
         replyMarkup: { inline_keyboard: [
           [{ text: "📋 Data Pesanan", callback_data: "exp:orders" }],
           [{ text: "💰 Buku Kas / Keuangan", callback_data: "exp:finance" }],
@@ -492,7 +519,7 @@ async function handleTelegramCallback(env, query) {
       return;
     }
     if (action === "addproduct") {
-      await updateTelegramMessage(env, message, { text: "📝 Menyiapkan formulir produk…", replyMarkup: null });
+      await deleteTelegramMessage(env, message);
       await ensureCatalogHeaders(env);
       await promptAdminProduct(env, chatId, "ADD");
       return;
@@ -527,7 +554,7 @@ async function handleTelegramCallback(env, query) {
       await updateTelegramMessage(env, message, { text: "⛔ Menu ini khusus admin.", replyMarkup: null });
       return;
     }
-    await updateTelegramMessage(env, message, { text: "📝 Menyiapkan formulir edit produk…", replyMarkup: null });
+    await deleteTelegramMessage(env, message);
     await promptAdminProduct(env, chatId, "EDIT", data.slice("prod:edit:".length));
     return;
   }
@@ -673,6 +700,7 @@ async function showCustomerCatalogPage(env, message, page = 0) {
   await updateTelegramMessage(env, message, {
     text: caption,
     photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
+    clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
     replyMarkup: keyboard
   });
 }
@@ -708,6 +736,7 @@ async function showAdminCatalogPage(env, message, page = 0) {
   await updateTelegramMessage(env, message, {
     text: caption,
     photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
+    clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
     replyMarkup: keyboard
   });
 }
