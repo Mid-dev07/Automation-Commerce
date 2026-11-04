@@ -99,6 +99,17 @@ function checkChanges(result, message) {
   if (!result?.meta || Number(result.meta.changes) !== 1) throw new Error(message);
 }
 
+
+function sheetMirrorStatement(db,id,at) {
+  return db.prepare(`INSERT INTO outbox
+    (event_type,aggregate_id,payload_json,status,attempts,available_at,created_at)
+    SELECT 'SHEET_MIRROR',order_id,json_object('order_id',order_id),'PENDING',0,?,?
+    FROM orders WHERE order_id=?
+    ON CONFLICT(event_type,aggregate_id) DO UPDATE SET
+      payload_json=excluded.payload_json,status='PENDING',attempts=0,
+      available_at=excluded.available_at,processed_at=NULL`).bind(at,at,id);
+}
+
 async function createOrderD1(db, input) {
   await requireReady(db);
   const sku = clean(input.sku, 40).toUpperCase();
@@ -146,9 +157,7 @@ async function createOrderD1(db, input) {
       (order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'ORDER_CREATED','','MENUNGGU_PEMBAYARAN',? ,?, '{}',?
       FROM orders WHERE order_id=?`).bind(clean(input.channel || "telegram",24), dedupe, createdAt, id),
-    db.prepare(`INSERT OR IGNORE INTO outbox(event_type,aggregate_id,payload_json,created_at)
-      SELECT 'ORDER_CREATED',order_id,json_object('order_id',order_id),?
-      FROM orders WHERE order_id=?`).bind(createdAt, id)
+    sheetMirrorStatement(db,id,createdAt)
   ]);
   const current = await db.prepare("SELECT * FROM orders WHERE idempotency_key = ?").bind(dedupe).first();
   if (current) {
@@ -249,7 +258,8 @@ async function requestVerificationD1(db, id, customerId) {
   const at = nowJakarta();
   const results = await db.batch([
     db.prepare("UPDATE orders SET payment_confirmation_status='MENUNGGU_VERIFIKASI',payment_proof_file_id='',payment_proof_type='',payment_requested_at=?,updated_at=? WHERE order_id=? AND status=? AND payment_confirmation_status IN ('','DITOLAK')").bind(at,at,id,o.status),
-    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_REQUESTED',?,?,?,?,'{}',? FROM orders WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND updated_at=?").bind(o.payment_confirmation_status||"","MENUNGGU_VERIFIKASI",clean(customerId,128),"request:"+at,at,id,at)
+    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_REQUESTED',?,?,?,?,'{}',? FROM orders WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND updated_at=?").bind(o.payment_confirmation_status||"","MENUNGGU_VERIFIKASI",clean(customerId,128),"request:"+at,at,id,at),
+    sheetMirrorStatement(db,id,at)
   ]);
   if (Number(results[0].meta?.changes) !== 1) {
     const latest = await getOrderD1(db,id);
@@ -263,7 +273,8 @@ async function savePaymentProofD1(db,id,customerId,fileId,fileType) {
   const at=nowJakarta();
   const results=await db.batch([
     db.prepare("UPDATE orders SET payment_proof_file_id=?,payment_proof_type=?,updated_at=? WHERE order_id=? AND customer_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')").bind(fileId,fileType,at,id,String(customerId)),
-    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_PROOF_UPLOADED','','MENUNGGU_VERIFIKASI',?,?,?,? FROM orders WHERE order_id=? AND payment_proof_file_id=? AND updated_at=?").bind(clean(customerId,128),"proof:"+fileId,JSON.stringify({file_type:fileType}),at,id,fileId,at)
+    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_PROOF_UPLOADED','','MENUNGGU_VERIFIKASI',?,?,?,? FROM orders WHERE order_id=? AND payment_proof_file_id=? AND updated_at=?").bind(clean(customerId,128),"proof:"+fileId,JSON.stringify({file_type:fileType}),at,id,fileId,at),
+    sheetMirrorStatement(db,id,at)
   ]);
   checkChanges(results[0],"Permintaan pembayaran tidak sedang menunggu verifikasi.");
   return getOrderD1(db,id);
@@ -286,9 +297,7 @@ async function approvePaymentD1(db,id,actor="admin") {
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'PAYMENT_APPROVED',?,'DIBAYAR',?,?, '{}',? FROM orders
       WHERE order_id=? AND receipt_code=?`).bind(o.status,clean(actor,128),"approve:"+code,at,id,code),
-    db.prepare(`INSERT OR IGNORE INTO outbox(event_type,aggregate_id,payload_json,created_at)
-      SELECT 'PAYMENT_APPROVED',order_id,json_object('order_id',order_id),?
-      FROM orders WHERE order_id=? AND receipt_code=?`).bind(at,id,code)
+    sheetMirrorStatement(db,id,at)
   ]);
   checkChanges(results[0],"Permintaan pembayaran sudah diproses atau status pesanan tidak memenuhi syarat.");
   return getOrderD1(db,id);
@@ -305,7 +314,8 @@ async function rejectPaymentD1(db,id,actor="admin") {
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'PAYMENT_REJECTED','MENUNGGU_VERIFIKASI','DITOLAK',?,?, '{}',?
       FROM orders WHERE order_id=? AND payment_confirmation_status='DITOLAK' AND updated_at=?`)
-      .bind(clean(actor,128),"reject:"+at,at,id,at)
+      .bind(clean(actor,128),"reject:"+at,at,id,at),
+    sheetMirrorStatement(db,id,at)
   ]);
   checkChanges(results[0],"Permintaan pembayaran sudah diproses.");
   return getOrderD1(db,id);
@@ -349,6 +359,7 @@ async function setOrderStatusD1(db,id,status,actor="admin") {
     SELECT order_id,'STATUS_CHANGED',?,?,?,?,?,? FROM orders
     WHERE order_id=? AND status=? AND updated_at=?`)
     .bind(o.status,status,clean(actor,128),"status:"+crypto.randomUUID(),"{}",at,id,status,at));
+  stmts.push(sheetMirrorStatement(db,id,at));
   const results=await db.batch(stmts);
   checkChanges(results[0],"Status pesanan berubah di proses lain. Muat ulang data terlebih dahulu.");
   return getOrderD1(db,id);
@@ -364,7 +375,8 @@ async function markPickedUpD1(db,id,actor="admin") {
         AND pickup_status<>'DIAMBIL'`).bind(at,id),
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'PICKED_UP',status,'SELESAI',?,?, '{}',? FROM orders
-      WHERE order_id=? AND pickup_status='DIAMBIL' AND updated_at=?`).bind(clean(actor,128),"pickup:"+at,at,id,at)
+      WHERE order_id=? AND pickup_status='DIAMBIL' AND updated_at=?`).bind(clean(actor,128),"pickup:"+at,at,id,at),
+    sheetMirrorStatement(db,id,at)
   ]);
   checkChanges(results[0],"Resi tidak valid, pembayaran belum disetujui, atau pesanan sudah diambil.");
   return getOrderD1(db,id);
@@ -512,6 +524,48 @@ export async function setOrderStatusTransactional(env,id,status,actor) {
 export async function markPickedUpTransactional(env,id,actor) {
   return orderOperation(env,id,"markPickedUp",actor);
 }
+
+export async function claimSheetMirrorOutbox(env, limit = 20) {
+  await requireReady(env.DB);
+  const now=nowJakarta();
+  const leaseUntil=new Date(Date.now()+120000+TZ_OFFSET_MS).toISOString().replace("Z","+07:00");
+  const result=await env.DB.prepare(`UPDATE outbox
+    SET status='PROCESSING',attempts=attempts+1,available_at=?
+    WHERE id IN (
+      SELECT id FROM outbox
+      WHERE event_type='SHEET_MIRROR'
+        AND ((status='PENDING' AND available_at<=?)
+          OR (status='PROCESSING' AND available_at<=?))
+      ORDER BY id LIMIT ?
+    )
+    RETURNING id,aggregate_id,payload_json,attempts`)
+    .bind(leaseUntil,now,now,Math.min(50,Math.max(1,Number(limit)||20))).all();
+  return result.results || [];
+}
+export async function completeSheetMirrorOutbox(env,event) {
+  const at=nowJakarta();
+  const result=await env.DB.prepare(`UPDATE outbox SET status='DONE',processed_at=?,available_at=?
+    WHERE id=? AND status='PROCESSING' AND attempts=?`)
+    .bind(at,at,Number(event.id),Number(event.attempts)).run();
+  return Number(result.meta?.changes)===1;
+}
+export async function failSheetMirrorOutbox(env,event,error) {
+  const attempts=Number(event.attempts)||1;
+  const delaySeconds=Math.min(3600,15*Math.pow(2,Math.min(8,attempts-1)));
+  const nextAt=new Date(Date.now()+delaySeconds*1000+TZ_OFFSET_MS).toISOString().replace("Z","+07:00");
+  const status=attempts>=8?"FAILED":"PENDING";
+  const result=await env.DB.prepare(`UPDATE outbox SET status=?,available_at=?,processed_at=NULL
+    WHERE id=? AND status='PROCESSING' AND attempts=?`)
+    .bind(status,nextAt,Number(event.id),attempts).run();
+  if (Number(result.meta?.changes)!==1) return false;
+  console.warn(JSON.stringify({
+    level:"warn",event:"sheet_mirror_retry",outbox_id:event.id,
+    aggregate_id:event.aggregate_id,attempts,status,
+    message:String(error?.message||error||"Unknown error").slice(0,300)
+  }));
+  return true;
+}
+
 export async function listDashboardDataTransactional(env) {
   const [orders,products]=await Promise.all([
     listOrdersD1(env.DB,{limit:5000}),listProductsD1(env.DB,true)
