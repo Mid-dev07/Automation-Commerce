@@ -101,7 +101,7 @@ test("coordinator audit is best-effort and bounded", () => {
 
 test("D1 outbox queues every order mirror mutation and reclaims expired leases", () => {
   assert.match(layer, /sheetMirrorStatement\(db,id,at\)/);
-  assert.match(layer, /event_type='SHEET_MIRROR'/);
+  assert.match(layer, /event_type IN \('SHEET_MIRROR','CATALOG_MIRROR'\)/);
   assert.match(layer, /status='PROCESSING',attempts=attempts\+1,available_at=\?/);
   assert.match(layer, /status='DONE',processed_at=\?,available_at=\?/);
   assert.match(layer, /const status=attempts>=8\?"FAILED":"PENDING"/);
