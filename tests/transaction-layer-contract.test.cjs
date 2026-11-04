@@ -133,7 +133,7 @@ test("product create, update, and soft-delete enqueue retryable catalog mirrors"
 
 test("scheduled outbox dispatch handles both order and catalog mirrors", () => {
   assert.match(worker,/event\.event_type === "CATALOG_MIRROR"/);
-  assert.match(worker,/findProductTransactional\(env,event\.aggregate_id\)/);
+  assert.match(worker,/findProductTransactional\(env,\s*event\.aggregate_id\)/);
   assert.match(worker,/mirrorTransactionalProduct\(env, product\)/);
   assert.match(worker,/SHEET_MIRROR/);
 });
