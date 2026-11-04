@@ -98,3 +98,23 @@ test("coordinator audit is best-effort and bounded", () => {
   assert.match(audit, /catch \(error\)/);
   assert.match(audit, /LIMIT 1 OFFSET 999/);
 });
+
+test("D1 outbox queues every order mirror mutation and reclaims expired leases", () => {
+  assert.match(layer, /sheetMirrorStatement\(db,id,at\)/);
+  assert.match(layer, /event_type='SHEET_MIRROR'/);
+  assert.match(layer, /status='PROCESSING',attempts=attempts\+1,available_at=\?/);
+  assert.match(layer, /status='DONE',processed_at=\?,available_at=\?/);
+  assert.match(layer, /const status=attempts>=8\?"FAILED":"PENDING"/);
+});
+
+test("scheduled dispatcher retries Sheets mirror and recovers orphaned append", () => {
+  assert.match(worker, /async scheduled\(controller, env\)/);
+  assert.match(worker, /dispatchSheetsMirrorOutbox\(env, 20\)/);
+  assert.match(worker, /recoverAppend: true/);
+  assert.match(worker, /Pesanan!A2:A/);
+});
+
+test("Wrangler config schedules outbox delivery every five minutes", () => {
+  const config = fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8");
+  assert.match(config, /"crons": \["\*\/5 \* \* \* \*"\]/);
+});
