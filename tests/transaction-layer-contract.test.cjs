@@ -118,3 +118,22 @@ test("Wrangler config schedules outbox delivery every five minutes", () => {
   const config = fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8");
   assert.match(config, /"crons": \["\*\/5 \* \* \* \*"\]/);
 });
+
+test("product create, update, and soft-delete enqueue retryable catalog mirrors", () => {
+  const saveStart=layer.indexOf("async function saveProductD1");
+  const saveEnd=layer.indexOf("\nasync function deleteProductD1",saveStart);
+  const save=layer.slice(saveStart,saveEnd);
+  const deleteStart=layer.indexOf("async function deleteProductD1");
+  const deleteEnd=layer.indexOf("\nasync function setLegacySheetRowD1",deleteStart);
+  const remove=layer.slice(deleteStart,deleteEnd);
+  assert.equal((save.match(/catalogMirrorStatement\(db,/g)||[]).length,2);
+  assert.match(remove,/catalogMirrorStatement\(db,old\.sku,at\)/);
+  assert.match(layer,/event_type IN \('SHEET_MIRROR','CATALOG_MIRROR'\)/);
+});
+
+test("scheduled outbox dispatch handles both order and catalog mirrors", () => {
+  assert.match(worker,/event\.event_type === "CATALOG_MIRROR"/);
+  assert.match(worker,/findProductTransactional\(env,event\.aggregate_id\)/);
+  assert.match(worker,/mirrorTransactionalProduct\(env, product\)/);
+  assert.match(worker,/SHEET_MIRROR/);
+});
