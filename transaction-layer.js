@@ -201,6 +201,17 @@ async function getProductD1(db, sku) {
   await requireReady(db);
   return db.prepare("SELECT * FROM catalog_products WHERE sku=? COLLATE NOCASE").bind(clean(sku,40)).first();
 }
+
+function catalogMirrorStatement(db,sku,at) {
+  return db.prepare(`INSERT INTO outbox
+    (event_type,aggregate_id,payload_json,status,attempts,available_at,created_at)
+    SELECT 'CATALOG_MIRROR',sku,json_object('sku',sku),'PENDING',0,?,?
+    FROM catalog_products WHERE sku=? COLLATE NOCASE
+    ON CONFLICT(event_type,aggregate_id) DO UPDATE SET
+      payload_json=excluded.payload_json,status='PENDING',attempts=0,
+      available_at=excluded.available_at,processed_at=NULL`).bind(at,at,sku);
+}
+
 async function saveProductD1(db, product, originalSku = "") {
   await requireReady(db);
   const sku = clean(product.sku,40), name = clean(product.name,100);
@@ -217,20 +228,29 @@ async function saveProductD1(db, product, originalSku = "") {
   if (editing && !old) throw new Error("Produk yang akan diedit tidak ditemukan.");
   const time = nowJakarta();
   if (old) {
-    await db.prepare(`UPDATE catalog_products SET name=?,price=?,stock=?,active=?,photo_url=?,description=?,updated_at=? WHERE sku=? COLLATE NOCASE`)
-      .bind(name,price,stock,product.active?1:0,photo,description,time,old.sku).run();
+    await db.batch([
+      db.prepare(`UPDATE catalog_products SET name=?,price=?,stock=?,active=?,photo_url=?,description=?,updated_at=? WHERE sku=? COLLATE NOCASE`)
+        .bind(name,price,stock,product.active?1:0,photo,description,time,old.sku),
+      catalogMirrorStatement(db,old.sku,time)
+    ]);
     return "updated";
   }
-  await db.prepare(`INSERT INTO catalog_products(sku,name,price,stock,active,photo_url,description,updated_at)
-    VALUES(?,?,?,?,?,?,?,?)`).bind(sku,name,price,stock,product.active?1:0,photo,description,time).run();
+  await db.batch([
+    db.prepare(`INSERT INTO catalog_products(sku,name,price,stock,active,photo_url,description,updated_at)
+      VALUES(?,?,?,?,?,?,?,?)`).bind(sku,name,price,stock,product.active?1:0,photo,description,time),
+    catalogMirrorStatement(db,sku,time)
+  ]);
   return "created";
 }
 async function deleteProductD1(db, sku) {
   await requireReady(db);
   const old = await getProductD1(db,sku);
   if (!old) throw new Error("Produk tidak ditemukan.");
-  await db.prepare("UPDATE catalog_products SET active=0,updated_at=? WHERE sku=? COLLATE NOCASE")
-    .bind(nowJakarta(),old.sku).run();
+  const at=nowJakarta();
+  await db.batch([
+    db.prepare("UPDATE catalog_products SET active=0,updated_at=? WHERE sku=? COLLATE NOCASE").bind(at,old.sku),
+    catalogMirrorStatement(db,old.sku,at)
+  ]);
   return { sku: old.sku };
 }
 async function setLegacySheetRowD1(db, id, rowNumber) {
@@ -533,7 +553,7 @@ export async function claimSheetMirrorOutbox(env, limit = 20) {
     SET status='PROCESSING',attempts=attempts+1,available_at=?
     WHERE id IN (
       SELECT id FROM outbox
-      WHERE event_type='SHEET_MIRROR'
+      WHERE event_type IN ('SHEET_MIRROR','CATALOG_MIRROR')
         AND ((status='PENDING' AND available_at<=?)
           OR (status='PROCESSING' AND available_at<=?))
       ORDER BY id LIMIT ?
