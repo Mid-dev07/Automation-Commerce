@@ -118,10 +118,17 @@ async function dispatchSheetsMirrorOutbox(env, limit = 20) {
   let delivered = 0, retried = 0, failed = 0;
   for (const event of events) {
     try {
-      const order = await findOrderTransactional(env, event.aggregate_id);
-      if (!order) throw new Error("Order untuk event mirror tidak ditemukan.");
-      const rowNumber = await mirrorTransactionalOrder(env, order, { recoverAppend: true });
-      if (!rowNumber || rowNumber < 2) throw new Error("Google Sheets belum mengonfirmasi lokasi baris order.");
+      if (event.event_type === "CATALOG_MIRROR") {
+        const product = await findProductTransactional(env, event.aggregate_id);
+        if (!product || !(await mirrorTransactionalProduct(env, product))) {
+          throw new Error("Katalog produk belum berhasil dicerminkan ke Google Sheets.");
+        }
+      } else {
+        const order = await findOrderTransactional(env, event.aggregate_id);
+        if (!order) throw new Error("Order untuk event mirror tidak ditemukan.");
+        const rowNumber = await mirrorTransactionalOrder(env, order, { recoverAppend: true });
+        if (!rowNumber || rowNumber < 2) throw new Error("Google Sheets belum mengonfirmasi lokasi baris order.");
+      }
       if (!(await completeSheetMirrorOutbox(env, event))) throw new Error("Lease outbox berubah sebelum event selesai dicatat.");
       delivered++;
     } catch (error) {
@@ -145,8 +152,10 @@ async function mirrorTransactionalProduct(env, product) {
       Boolean(product.active),product.photo_url || "",product.description || ""]];
     if (index >= 0) await updateSheetRange(env,"Katalog_Produk!A"+(index+2)+":G"+(index+2),values);
     else await appendSheetRows(env,"Katalog_Produk!A:G",values);
+    return true;
   } catch(error) {
     console.warn(JSON.stringify({level:"warn",event:"catalog_sheet_mirror",sku:product.sku,message:error.message}));
+    return false;
   }
 }
 
