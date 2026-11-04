@@ -5,7 +5,8 @@ import {
   deleteProductTransactional, setLegacyRowTransactional, updateProofTransactional,
   requestVerificationTransactional, approvePaymentTransactional, rejectPaymentTransactional,
   setOrderStatusTransactional, markPickedUpTransactional, listDashboardDataTransactional,
-  orderToSheetRow, OrderCoordinator
+  orderToSheetRow, OrderCoordinator, claimSheetMirrorOutbox,
+  completeSheetMirrorOutbox, failSheetMirrorOutbox
 } from "./transaction-layer.js";
 export { OrderCoordinator };
 /**
@@ -81,7 +82,7 @@ async function resolveOrderReference(env, reference) {
   const index = rows.findIndex(r => String(r[0] || "").trim() === ref);
   return index < 0 ? null : { rowNumber: index + 2, row: rows[index], order: null };
 }
-async function mirrorTransactionalOrder(env, order) {
+async function mirrorTransactionalOrder(env, order, options = {}) {
   if (!order) return null;
   const row = orderToSheetRow(order);
   let rowNumber = order.legacy_sheet_row == null ? null : Number(order.legacy_sheet_row);
@@ -89,6 +90,17 @@ async function mirrorTransactionalOrder(env, order) {
     if (rowNumber && rowNumber >= 2) {
       await updateSheetRange(env, "Pesanan!A" + rowNumber + ":T" + rowNumber, [row]);
       return rowNumber;
+    }
+    // Recovery pass: an earlier append may have succeeded before D1 stored its row number.
+    if (options.recoverAppend) {
+      const ids = await readSheet(env, "Pesanan!A2:A");
+      const existing = ids.findIndex(r => String(r[0] || "").trim() === String(order.order_id));
+      if (existing >= 0) {
+        rowNumber = existing + 2;
+        await setLegacyRowTransactional(env, order.order_id, rowNumber);
+        await updateSheetRange(env, "Pesanan!A" + rowNumber + ":T" + rowNumber, [row]);
+        return rowNumber;
+      }
     }
     const result = await appendSheetRows(env, "Pesanan!A:T", [row]);
     const updatedRange = String(result?.updates?.updatedRange || "");
@@ -102,6 +114,29 @@ async function mirrorTransactionalOrder(env, order) {
     console.warn(JSON.stringify({level:"warn",event:"order_sheet_mirror",order_id:order.order_id,message:error.message}));
     return null;
   }
+}
+async function dispatchSheetsMirrorOutbox(env, limit = 20) {
+  const events = await claimSheetMirrorOutbox(env, limit);
+  let delivered = 0, retried = 0, failed = 0;
+  for (const event of events) {
+    try {
+      const order = await findOrderTransactional(env, event.aggregate_id);
+      if (!order) throw new Error("Order untuk event mirror tidak ditemukan.");
+      const rowNumber = await mirrorTransactionalOrder(env, order, { recoverAppend: true });
+      if (!rowNumber || rowNumber < 2) throw new Error("Google Sheets belum mengonfirmasi lokasi baris order.");
+      if (!(await completeSheetMirrorOutbox(env, event))) throw new Error("Lease outbox berubah sebelum event selesai dicatat.");
+      delivered++;
+    } catch (error) {
+      try {
+        const saved = await failSheetMirrorOutbox(env, event, error);
+        if (saved && Number(event.attempts) >= 8) failed++;
+        else if (saved) retried++;
+      } catch (retryError) {
+        console.error(JSON.stringify({level:"error",event:"sheet_mirror_outbox_state",outbox_id:event.id,message:retryError.message}));
+      }
+    }
+  }
+  return {claimed:events.length,delivered,retried,failed};
 }
 async function mirrorTransactionalProduct(env, product) {
   try {
@@ -118,6 +153,14 @@ async function mirrorTransactionalProduct(env, product) {
 }
 
 export default {
+  async scheduled(controller, env) {
+    const state = await transactionReadiness(env);
+    if (!state.ready) return;
+    const result = await dispatchSheetsMirrorOutbox(env, 20);
+    if (result.claimed) {
+      console.log(JSON.stringify({level:"info",event:"sheet_mirror_outbox_batch",cron:controller.cron,...result}));
+    }
+  },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/pickup") {
