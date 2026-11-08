@@ -2411,12 +2411,12 @@ async function showTelegramHandoffQueue(env, message, adminChatId, notice = "") 
       const row = [];
       const take = telegramHandoffCallback("take", item.handoff_id);
       const decline = telegramHandoffCallback("decline", item.handoff_id);
-      if (take) row.push({ text: "✅ Terima", callback_data: take });
-      if (decline) row.push({ text: "❌ Tolak", callback_data: decline });
+      if (take) row.push({ text: "✅ Terima #" + (index + 1), callback_data: take });
+      if (decline) row.push({ text: "❌ Tolak #" + (index + 1), callback_data: decline });
       if (row.length) keyboard.push(row);
     } else if (claimedBy === String(adminChatId)) {
       const done = telegramHandoffCallback("done", item.handoff_id);
-      if (done) keyboard.push([{ text: "✅ Selesaikan", callback_data: done }]);
+      if (done) keyboard.push([{ text: "✅ Selesaikan #" + (index + 1), callback_data: done }]);
     }
     return (index + 1) + ". " + String(item.customer_name || "Pelanggan") +
       "\nStatus: " + status +
