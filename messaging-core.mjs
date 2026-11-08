@@ -411,11 +411,22 @@ async function finalizeMessagingHandoff(env, rawHandoffId, rawAdminActorId, reso
   }
 
   const now = new Date().toISOString();
+  let handoffUpdateSql =
+    "UPDATE messaging_handoff_requests SET status='CLOSED',closed_by=?,closed_at=?,resolution=?,updated_at=? ";
+  let handoffUpdateArgs;
+  if (policy === "OPEN_ONLY") {
+    handoffUpdateSql += "WHERE handoff_id=? AND status='OPEN'";
+    handoffUpdateArgs = [adminActorId, now, resolution, now, handoffId];
+  } else if (policy === "CLAIMED_BY_ACTOR") {
+    handoffUpdateSql += "WHERE handoff_id=? AND status='CLAIMED' AND claimed_by=?";
+    handoffUpdateArgs = [adminActorId, now, resolution, now, handoffId, adminActorId];
+  } else {
+    handoffUpdateSql += "WHERE handoff_id=? AND status IN ('OPEN','CLAIMED') AND (claimed_by IS NULL OR claimed_by=?)";
+    handoffUpdateArgs = [adminActorId, now, resolution, now, handoffId, adminActorId];
+  }
+
   const statements = [
-    env.DB.prepare(
-      "UPDATE messaging_handoff_requests SET status='CLOSED',closed_by=?,closed_at=?,resolution=?,updated_at=? " +
-      "WHERE handoff_id=? AND status IN ('OPEN','CLAIMED') AND (claimed_by IS NULL OR claimed_by=?)"
-    ).bind(adminActorId, now, resolution, now, handoffId, adminActorId),
+    env.DB.prepare(handoffUpdateSql).bind(...handoffUpdateArgs),
     env.DB.prepare(
       "UPDATE messaging_conversations SET mode='BOT',updated_at=? " +
       "WHERE tenant_id=? AND channel=? AND conversation_id=? AND mode='HUMAN' " +
