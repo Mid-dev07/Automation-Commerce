@@ -294,15 +294,17 @@ export async function routeMessagingCommand(event, command, mode, services) {
     const adminTargets = services.getAdminTargets ? await services.getAdminTargets() : [];
     for (const recipientId of adminTargets) {
       actions.push(textAction(
-        "📣 Permintaan bantuan pelanggan\nNama: " + event.customerName +
+        "📣 PERMINTAAN BANTUAN PELANGGAN\nNama: " + event.customerName +
         "\nKanal: " + event.channel +
-        "\nID pengirim: " + event.senderId +
-        "\nConversation: " + event.conversationId +
-        "\nID bantuan: " + handoff.handoffId +
-        "\nAmbil: /handoff_claim " + handoff.handoffId +
-        "\nBalas: /handoff_reply " + handoff.handoffId + " pesan Anda" +
-        "\nTutup: /handoff_close " + handoff.handoffId,
-        { channel: "telegram", recipientId }
+        "\nPermintaan baru menunggu admin. Pilih tindakan di bawah ini.",
+        {
+          channel: "telegram",
+          recipientId,
+          buttons: [
+            { label: "✅ Terima", value: "handoff:take:" + handoff.handoffId },
+            { label: "❌ Tolak", value: "handoff:decline:" + handoff.handoffId }
+          ]
+        }
       ));
     }
     actions.push(textAction(
@@ -329,20 +331,21 @@ function requireAdminActor(value) {
 async function findMessagingHandoff(db, handoffId) {
   return db.prepare(
     "SELECT handoff_id,tenant_id,source_channel,conversation_id,customer_id,customer_name," +
-    "source_event_id,status,claimed_by,claimed_at,closed_by,closed_at,created_at,updated_at " +
+    "source_event_id,status,claimed_by,claimed_at,closed_by,closed_at,resolution,created_at,updated_at " +
     "FROM messaging_handoff_requests WHERE handoff_id=?"
   ).bind(handoffId).first();
 }
 
-export async function listMessagingHandoffs(env, limit = 5) {
+export async function listMessagingHandoffs(env, limit = 5, channel = null) {
   if (!env?.DB) throw new Error("MESSAGING_DATABASE_NOT_CONFIGURED");
   const boundedLimit = Math.min(20, Math.max(1, Number(limit) || 5));
   const result = await env.DB.prepare(
     "SELECT handoff_id,tenant_id,source_channel,conversation_id,customer_id,customer_name," +
-    "status,claimed_by,claimed_at,created_at,updated_at " +
+    "status,claimed_by,claimed_at,created_at,updated_at,resolution " +
     "FROM messaging_handoff_requests WHERE status IN ('OPEN','CLAIMED') " +
-    "ORDER BY created_at ASC LIMIT ?"
-  ).bind(boundedLimit).all();
+    "AND (? IS NULL OR source_channel=?) " +
+    "ORDER BY CASE status WHEN 'OPEN' THEN 0 ELSE 1 END,created_at ASC LIMIT ?"
+  ).bind(channel, channel, boundedLimit).all();
   return result.results || [];
 }
 
@@ -380,23 +383,39 @@ export async function claimMessagingHandoff(env, rawHandoffId, rawAdminActorId) 
   return { ok: true, alreadyClaimed: false, handoff: latest };
 }
 
-export async function closeMessagingHandoff(env, rawHandoffId, rawAdminActorId) {
+async function finalizeMessagingHandoff(env, rawHandoffId, rawAdminActorId, resolution, policy) {
   if (!env?.DB) throw new Error("MESSAGING_DATABASE_NOT_CONFIGURED");
   const handoffId = requireHandoffId(rawHandoffId);
   const adminActorId = requireAdminActor(rawAdminActorId);
   const current = await findMessagingHandoff(env.DB, handoffId);
   if (!current) return { ok: false, reason: "NOT_FOUND" };
-  if (current.status === "CLOSED") return { ok: true, alreadyClosed: true, handoff: current };
+  if (current.status === "CLOSED") {
+    return {
+      ok: true,
+      alreadyClosed: true,
+      handoff: current,
+      resolution: current.resolution || "RESOLVED"
+    };
+  }
+  if (policy === "OPEN_ONLY" && current.status !== "OPEN") {
+    return { ok: false, reason: current.status === "CLAIMED" ? "ALREADY_CLAIMED" : "CONFLICT", handoff: current };
+  }
+  if (policy === "CLAIMED_BY_ACTOR" && current.status !== "CLAIMED") {
+    return { ok: false, reason: "NOT_CLAIMED", handoff: current };
+  }
   if (current.claimed_by && current.claimed_by !== adminActorId) {
+    return { ok: false, reason: "CLAIMED_BY_OTHER", handoff: current };
+  }
+  if (policy === "CLAIMED_BY_ACTOR" && current.claimed_by !== adminActorId) {
     return { ok: false, reason: "CLAIMED_BY_OTHER", handoff: current };
   }
 
   const now = new Date().toISOString();
-  const results = await env.DB.batch([
+  const statements = [
     env.DB.prepare(
-      "UPDATE messaging_handoff_requests SET status='CLOSED',closed_by=?,closed_at=?,updated_at=? " +
+      "UPDATE messaging_handoff_requests SET status='CLOSED',closed_by=?,closed_at=?,resolution=?,updated_at=? " +
       "WHERE handoff_id=? AND status IN ('OPEN','CLAIMED') AND (claimed_by IS NULL OR claimed_by=?)"
-    ).bind(adminActorId, now, now, handoffId, adminActorId),
+    ).bind(adminActorId, now, resolution, now, handoffId, adminActorId),
     env.DB.prepare(
       "UPDATE messaging_conversations SET mode='BOT',updated_at=? " +
       "WHERE tenant_id=? AND channel=? AND conversation_id=? AND mode='HUMAN' " +
@@ -409,11 +428,32 @@ export async function closeMessagingHandoff(env, rawHandoffId, rawAdminActorId) 
       now, current.tenant_id, current.source_channel, current.conversation_id,
       handoffId, adminActorId, current.tenant_id, current.source_channel, current.conversation_id
     )
-  ]);
+  ];
 
+  if (resolution === "DECLINED" && current.source_channel === "telegram") {
+    const actionId = "admin-handoff-declined:" + crypto.randomUUID();
+    const sourceEventId = "admin-handoff-declined:" + crypto.randomUUID();
+    const payload = JSON.stringify({
+      type: "text",
+      text: "ℹ️ Permintaan bantuan belum dapat diambil admin saat ini. Anda dapat melanjutkan menggunakan menu bot atau mengirim permintaan bantuan kembali nanti.",
+      buttons: [{ label: "🏠 Buka Menu", value: "menu" }]
+    });
+    statements.push(env.DB.prepare(
+      "INSERT INTO messaging_outbox(" +
+      "action_id,tenant_id,channel,conversation_id,recipient_id,source_event_id," +
+      "action_type,payload_json,status,attempts,available_at,created_at,updated_at) " +
+      "SELECT ?,tenant_id,source_channel,conversation_id,conversation_id,?," +
+      "'text',?,'PENDING',0,?,?,? FROM messaging_handoff_requests " +
+      "WHERE handoff_id=? AND status='CLOSED' AND resolution='DECLINED'"
+    ).bind(actionId, sourceEventId, payload, now, now, now, handoffId));
+  }
+
+  const results = await env.DB.batch(statements);
   if (changed(results?.[0]) !== 1) {
     const latest = await findMessagingHandoff(env.DB, handoffId);
-    if (latest?.status === "CLOSED") return { ok: true, alreadyClosed: true, handoff: latest };
+    if (latest?.status === "CLOSED") {
+      return { ok: true, alreadyClosed: true, handoff: latest, resolution: latest.resolution || "RESOLVED" };
+    }
     if (latest?.claimed_by && latest.claimed_by !== adminActorId) {
       return { ok: false, reason: "CLAIMED_BY_OTHER", handoff: latest };
     }
@@ -430,8 +470,22 @@ export async function closeMessagingHandoff(env, rawHandoffId, rawAdminActorId) 
     alreadyClosed: false,
     automationResumed: conversation?.mode === "BOT",
     conversationMode: conversation?.mode || null,
+    noticeQueued: resolution === "DECLINED" && current.source_channel === "telegram" && changed(results?.[2]) === 1,
+    resolution,
     handoff: latest
   };
+}
+
+export async function closeMessagingHandoff(env, handoffId, adminActorId) {
+  return finalizeMessagingHandoff(env, handoffId, adminActorId, "RESOLVED", "ANY_OWNED");
+}
+
+export async function resolveMessagingHandoff(env, handoffId, adminActorId) {
+  return finalizeMessagingHandoff(env, handoffId, adminActorId, "RESOLVED", "CLAIMED_BY_ACTOR");
+}
+
+export async function declineMessagingHandoff(env, handoffId, adminActorId) {
+  return finalizeMessagingHandoff(env, handoffId, adminActorId, "DECLINED", "OPEN_ONLY");
 }
 
 export async function queueMessagingHandoffReply(env, rawHandoffId, rawAdminActorId, rawMessage) {
