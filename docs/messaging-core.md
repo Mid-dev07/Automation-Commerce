@@ -73,18 +73,24 @@ This command is intentionally not run by this change. The migration is additive 
 
 ## Admin handoff operations
 
-Admin access is checked against `ADMIN_CHAT_ID` before any handoff command is executed. After migrations 0004 and 0005 are applied, an authorized admin can use these Telegram commands:
+Admin access is checked against `ADMIN_CHAT_ID`. The Telegram admin menu contains **Bantuan Pelanggan**, which displays the current queue without requiring admins to copy handoff IDs. New help notifications also include action buttons.
 
-| Command | Behavior |
-|---|---|
-| `/handoff` | List up to five open or claimed support requests |
-| `/handoff_claim <handoff-id>` | Exclusively claim an open request |
-| `/handoff_reply <handoff-id> <message>` | Queue a text reply to a claimed Telegram customer conversation |
-| `/handoff_close <handoff-id>` | Close the request and resume BOT mode when no other active handoff remains |
+For each handoff:
+- `OPEN`: admins can choose **Terima** or **Tolak**.
+- `CLAIMED` by the current admin: that admin can choose **Selesaikan**.
+- `CLAIMED` by another admin: the queue shows who owns the case and does not offer competing actions.
 
-A request already claimed by another admin cannot be replied to or closed by a different admin. Closing a case does not override a customer's `STOP` preference: an `OPTED_OUT` conversation remains opted out. Replies are text-only and use the Telegram outbox with its retry policy.
+**Tolak** closes an unclaimed request with disposition `DECLINED`, tells the customer that the request could not be taken, and resumes bot mode only when no other active handoff remains. **Selesaikan** is restricted to the admin who claimed the case. Both actions preserve a customer's `STOP` / `OPTED_OUT` preference.
 
-Migration 0005 adds `claimed_by`, `claimed_at`, and `closed_by` audit fields. It is additive and must be applied after migration 0004.
+The legacy commands remain supported:
+- `/handoff`
+- `/handoff_claim <handoff-id>`
+- `/handoff_reply <handoff-id> <message>`
+- `/handoff_close <handoff-id>`
+
+Replies and decline notices are text-only and use the Telegram outbox with its retry policy. Callback actions are checked against `ADMIN_CHAT_ID` and the current D1 handoff state before applying a transition.
+
+Migration 0005 adds `claimed_by`, `claimed_at`, and `closed_by` audit fields. Migration 0006 adds the `resolution` field (`RESOLVED` or `DECLINED`). Both are additive; apply 0006 after migrations 0004 and 0005.
 
 ## Telegram adapter behavior
 
@@ -109,6 +115,6 @@ The GitHub Actions workflow `.github/workflows/messaging-core.yml` runs these te
 - WhatsApp Cloud API / BSP webhook adapter and sender.
 - Provider-specific interactive list/button rendering.
 - Conversation ordering via per-conversation Durable Object.
-- Visual handoff queue inside the web admin dashboard; handoff operations are currently handled through authenticated Telegram admin commands.
+- A visual handoff queue inside the web admin dashboard; Telegram admins can manage the queue from inline buttons.
 - Payment proof upload through WhatsApp media.
 - Multi-tenant provisioning and provider credentials.
