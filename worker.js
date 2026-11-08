@@ -763,9 +763,11 @@ async function handleTelegramCallback(env, query) {
             ? "✅ Bantuan selesai. Preferensi STOP pelanggan tetap berlaku."
             : "✅ Kasus diselesaikan, tetapi percakapan masih memiliki permintaan bantuan lain.";
       } else {
-        notice = result.automationResumed
-          ? "❌ Permintaan ditolak. Pelanggan diberi tahu dan bot otomatis diaktifkan kembali."
-          : "❌ Permintaan ditolak. Pelanggan diberi tahu; bot tetap dijeda karena masih ada kasus aktif lain.";
+        notice = result.conversationMode === "OPTED_OUT"
+          ? "❌ Permintaan ditolak. Pelanggan diberi tahu; preferensi STOP tetap berlaku sehingga balasan otomatis tetap nonaktif."
+          : result.automationResumed
+            ? "❌ Permintaan ditolak. Pelanggan diberi tahu dan bot otomatis diaktifkan kembali."
+            : "❌ Permintaan ditolak. Pelanggan diberi tahu; bot tetap dijeda karena masih ada kasus aktif lain.";
       }
       await showTelegramHandoffQueue(env, message, chatId, notice);
       return;

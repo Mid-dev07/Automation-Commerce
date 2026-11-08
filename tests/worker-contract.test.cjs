@@ -61,6 +61,10 @@ test("Telegram handoff queue uses inline actions and admin-only state transition
   assert.match(worker, /showTelegramHandoffQueue\(env, \{ chat: \{ id: chatId \} \}, chatId\)/);
 });
 
+test("handoff decline notice preserves explicit customer STOP preference", () => {
+  assert.match(worker, /result\.conversationMode === "OPTED_OUT"[\s\S]{0,220}preferensi STOP tetap berlaku/);
+});
+
 test("Telegram webhook fails closed without secret", () => {
   assert.match(worker, /if \(!env\.TELEGRAM_WEBHOOK_SECRET\) return json\(\{ ok: false, error: "Webhook security is not configured" \}, 503\)/);
   assert.match(worker, /X-Telegram-Bot-Api-Secret-Token/);
