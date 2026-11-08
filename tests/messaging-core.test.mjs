@@ -8,6 +8,8 @@ import {
   listMessagingHandoffs,
   claimMessagingHandoff,
   closeMessagingHandoff,
+  resolveMessagingHandoff,
+  declineMessagingHandoff,
   queueMessagingHandoffReply,
   routeMessagingCommand
 } from "../messaging-core.mjs";
@@ -54,7 +56,8 @@ function createHandoffEnv(initialHandoff, initialMode = "HUMAN", otherActive = f
         state.handoff.status = "CLOSED";
         state.handoff.closed_by = args[0];
         state.handoff.closed_at = args[1];
-        state.handoff.updated_at = args[2];
+        state.handoff.resolution = args[2];
+        state.handoff.updated_at = args[3];
         return { meta: { changes: 1 } };
       }
       return { meta: { changes: 0 } };
@@ -70,6 +73,10 @@ function createHandoffEnv(initialHandoff, initialMode = "HUMAN", otherActive = f
         return { meta: { changes: 1 } };
       }
       return { meta: { changes: 0 } };
+    }
+    if (sql.includes("INSERT INTO messaging_outbox")) {
+      state.outbox.push({ payload_json: args[2], action_id: args[0] });
+      return { meta: { changes: 1 } };
     }
     if (sql.includes("INSERT OR IGNORE INTO messaging_outbox")) {
       state.outbox.push({
@@ -91,6 +98,8 @@ function createHandoffEnv(initialHandoff, initialMode = "HUMAN", otherActive = f
       return {
         bind(...args) {
           return {
+            sql,
+            args,
             sql,
             args,
             first: async () => {
@@ -213,6 +222,35 @@ test("handoff claim is exclusive and idempotent for its assigned admin", async (
   const other = await claimMessagingHandoff(env, handoffRow.handoff_id, "admin-2");
   assert.equal(other.ok, false);
   assert.equal(other.reason, "CLAIMED_BY_OTHER");
+});
+
+test("resolve action is restricted to the admin who claimed the case", async () => {
+  const env = createHandoffEnv({ ...handoffRow, status: "CLAIMED", claimed_by: "admin-1" });
+  const other = await resolveMessagingHandoff(env, handoffRow.handoff_id, "admin-2");
+  assert.equal(other.ok, false);
+  assert.equal(other.reason, "CLAIMED_BY_OTHER");
+  const result = await resolveMessagingHandoff(env, handoffRow.handoff_id, "admin-1");
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution, "RESOLVED");
+  assert.equal(env.state.handoff.resolution, "RESOLVED");
+});
+
+test("decline is allowed only for open cases and records a separate disposition", async () => {
+  const env = createHandoffEnv(handoffRow);
+  const result = await declineMessagingHandoff(env, handoffRow.handoff_id, "admin-1");
+  assert.equal(result.ok, true);
+  assert.equal(result.resolution, "DECLINED");
+  assert.equal(result.noticeQueued, true);
+  assert.equal(env.state.handoff.status, "CLOSED");
+  assert.equal(env.state.handoff.resolution, "DECLINED");
+  assert.equal(env.state.mode, "BOT");
+  assert.equal(env.state.outbox.length, 1);
+  assert.match(JSON.parse(env.state.outbox[0].payload_json).text, /belum dapat diambil admin/);
+
+  const claimed = createHandoffEnv({ ...handoffRow, status: "CLAIMED", claimed_by: "admin-2" });
+  const denied = await declineMessagingHandoff(claimed, handoffRow.handoff_id, "admin-1");
+  assert.equal(denied.ok, false);
+  assert.equal(denied.reason, "ALREADY_CLAIMED");
 });
 
 test("closing a handoff resumes BOT mode but preserves customer opt-out", async () => {
