@@ -2369,7 +2369,7 @@ async function messagingHandoffSchemaReady(env) {
   if (!(await messagingCoreReady(env))) return false;
   try {
     await env.DB.prepare(
-      "SELECT claimed_by,claimed_at,closed_by FROM messaging_handoff_requests LIMIT 0"
+      "SELECT claimed_by,claimed_at,closed_by,resolution FROM messaging_handoff_requests LIMIT 0"
     ).all();
     return true;
   } catch {
