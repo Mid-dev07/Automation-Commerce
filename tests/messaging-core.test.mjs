@@ -326,6 +326,11 @@ test("human handoff pauses the bot and creates admin notifications", async () =>
   assert.equal(result.actions.length, 2);
   assert.equal(result.actions[0].channel, "telegram");
   assert.equal(result.actions[0].recipientId, "admin-chat-1");
+  assert.equal(result.actions[0].buttons.length, 2);
+  assert.equal(result.actions[0].buttons[0].value, "handoff:take:" + result.handoff.handoffId);
+  assert.equal(result.actions[0].buttons[1].value, "handoff:decline:" + result.handoff.handoffId);
+  assert.ok(new TextEncoder().encode("hf:take:" + result.handoff.handoffId).length <= 64);
+  assert.ok(new TextEncoder().encode("hf:decline:" + result.handoff.handoffId).length <= 64);
 });
 
 test("START cannot interrupt an active human handoff", async () => {
