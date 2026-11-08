@@ -91,6 +91,8 @@ function createHandoffEnv(initialHandoff, initialMode = "HUMAN", otherActive = f
       return {
         bind(...args) {
           return {
+            sql,
+            args,
             first: async () => {
               if (sql.includes("FROM messaging_handoff_requests")) {
                 return state.handoff.handoff_id === args[0] ? { ...state.handoff } : null;
