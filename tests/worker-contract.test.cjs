@@ -47,6 +47,20 @@ test("embedded dashboard JavaScript parses", () => {
   new vm.Script(match[1], { filename: "admin-dashboard-inline.js" });
 });
 
+test("Telegram handoff queue uses inline actions and admin-only state transitions", () => {
+  assert.match(worker, /Bantuan Pelanggan[\s\S]{0,80}adm:handoff/);
+  assert.match(worker, /async function showTelegramHandoffQueue/);
+  assert.match(worker, /listMessagingHandoffs\(env, 20, "telegram"\)/);
+  assert.match(worker, /callback_data: take/);
+  assert.match(worker, /callback_data: decline/);
+  assert.match(worker, /callback_data: done/);
+  assert.match(worker, /function telegramHandoffCallback\(action, handoffId\)[\s\S]{0,180}length <= 64/);
+  assert.match(worker, /if \(data\.startsWith\("hf:"\)\)[\s\S]{0,220}if \(!admin\)/);
+  assert.match(worker, /resolveMessagingHandoff\(env, handoffId, chatId\)/);
+  assert.match(worker, /declineMessagingHandoff\(env, handoffId, chatId\)/);
+  assert.match(worker, /showTelegramHandoffQueue\(env, \{ chat: \{ id: chatId \} \}, chatId\)/);
+});
+
 test("Telegram webhook fails closed without secret", () => {
   assert.match(worker, /if \(!env\.TELEGRAM_WEBHOOK_SECRET\) return json\(\{ ok: false, error: "Webhook security is not configured" \}, 503\)/);
   assert.match(worker, /X-Telegram-Bot-Api-Secret-Token/);
