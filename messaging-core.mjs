@@ -215,16 +215,21 @@ export async function routeMessagingCommand(event, command, mode, services) {
       customerName: event.customerName,
       idempotencyKey: event.eventId
     });
-    const reply = services.renderOrder
-      ? services.renderOrder(order)
-      : [
-          "✅ PESANAN TERCATAT",
-          "ID: " + order.orderId,
-          "Produk: " + order.product,
-          "Jumlah: " + order.quantity,
-          "Total: " + formatPrice(order.total),
-          "Status: " + order.status
-        ].join("\n");
+    const paymentInstructions = services.getPaymentInstructions
+      ? services.getPaymentInstructions(order, event)
+      : "";
+    const reply = [
+      "✅ PESANAN TERCATAT",
+      "ID: " + order.orderId,
+      "Produk: " + order.product + " (" + order.sku + ")",
+      "Jumlah: " + order.quantity,
+      "Harga satuan: " + formatPrice(order.unitPrice),
+      "Ongkir: " + formatPrice(order.shipping),
+      "Total: " + formatPrice(order.total),
+      "Metode: " + order.paymentMethod,
+      "Status: " + order.status,
+      paymentInstructions
+    ].filter(Boolean).join("\n");
     actions.push(textAction(reply, {
       buttons: [{ label: "📦 Pesanan Saya", value: "orders" }]
     }));
