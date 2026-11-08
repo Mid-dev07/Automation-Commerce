@@ -59,10 +59,11 @@ export function parseMessagingCommand(rawText) {
 
   if (/^\/?(?:START)(?:\s|$)/.test(normalized)) return { kind: "START" };
   if (/^\/?(?:STOP)(?:\s|$)/.test(normalized)) return { kind: "STOP" };
+  if (/^\/?BANTUAN ADMIN(?:\s|$)/.test(normalized)) return { kind: "HANDOFF" };
   if (/^\/?(?:MENU|HELP|BANTUAN)(?:\s|$)/.test(normalized)) return { kind: "MENU" };
   if (/^\/?(?:KATALOG|PRODUK|CATALOG)(?:\s|$)/.test(normalized)) return { kind: "CATALOG" };
   if (/^\/?(?:PESANAN|ORDERS)(?:\s|$)/.test(normalized)) return { kind: "ORDERS" };
-  if (/^\/?(?:ADMIN|BANTUAN ADMIN)(?:\s|$)/.test(normalized)) return { kind: "HANDOFF" };
+  if (/^\/?ADMIN(?:\s|$)/.test(normalized)) return { kind: "HANDOFF" };
 
   const statusMatch = normalized.match(/^STATUS\s+([A-Z0-9._-]{4,80})$/);
   if (statusMatch) return { kind: "STATUS", orderId: statusMatch[1] };
