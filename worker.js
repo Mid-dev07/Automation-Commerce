@@ -277,22 +277,7 @@ async function handleTelegram(request, env, ctx) {
       }
       try {
         if (handoffCommand.kind === "HANDOFF_LIST") {
-          const items = await listMessagingHandoffs(env, 5);
-          if (!items.length) {
-            await sendTelegram(env, chatId, "✅ Tidak ada permintaan bantuan pelanggan yang masih terbuka.");
-            return;
-          }
-          const blocks = items.map(item => {
-            const status = item.status === "CLAIMED" ? "🟡 DIAMBIL" : "🆕 MENUNGGU ADMIN";
-            const owner = item.claimed_by ? "\nAdmin: " + item.claimed_by : "";
-            return status + "\nNama: " + item.customer_name +
-              "\nKanal: " + item.source_channel + " | ID pelanggan: " + item.customer_id +
-              owner + "\nID: " + item.handoff_id +
-              "\nAmbil: /handoff_claim " + item.handoff_id +
-              "\nBalas: /handoff_reply " + item.handoff_id + " pesan Anda" +
-              "\nTutup: /handoff_close " + item.handoff_id;
-          });
-          await sendTelegram(env, chatId, "📥 ANTREAN BANTUAN PELANGGAN\n\n" + blocks.join("\n\n"));
+          await showTelegramHandoffQueue(env, { chat: { id: chatId } }, chatId);
           return;
         }
         if (handoffCommand.kind === "HANDOFF_CLAIM") {
