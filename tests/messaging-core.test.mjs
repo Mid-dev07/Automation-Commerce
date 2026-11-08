@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeInboundEvent,
+  parseMessagingChoice,
   parseMessagingCommand,
   routeMessagingCommand
 } from "../messaging-core.mjs";
@@ -157,4 +158,23 @@ test("status lookup rejects an order from another channel or sender", async () =
 
 test("BANTUAN ADMIN is parsed as handoff rather than general help", () => {
   assert.deepEqual(parseMessagingCommand("BANTUAN ADMIN"), { kind: "HANDOFF" });
+});
+
+test("maps provider button choices to channel-neutral commands", () => {
+  assert.deepEqual(parseMessagingChoice("catalog"), { kind: "CATALOG" });
+  assert.deepEqual(parseMessagingChoice("orders"), { kind: "ORDERS" });
+  assert.deepEqual(parseMessagingChoice("help"), { kind: "MENU" });
+  assert.deepEqual(parseMessagingChoice("admin"), { kind: "HANDOFF" });
+  assert.deepEqual(parseMessagingChoice("unknown-button"), { kind: "UNKNOWN" });
+});
+
+test("a help choice returns the menu instead of an empty response", async () => {
+  const result = await routeMessagingCommand(
+    event,
+    parseMessagingChoice("help"),
+    "BOT",
+    {}
+  );
+  assert.equal(result.actions.length, 1);
+  assert.match(result.actions[0].text, /SELAMAT DATANG DI SEITON.ID/);
 });
