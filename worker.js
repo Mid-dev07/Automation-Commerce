@@ -17,6 +17,8 @@ import {
   listMessagingHandoffs,
   claimMessagingHandoff,
   closeMessagingHandoff,
+  resolveMessagingHandoff,
+  declineMessagingHandoff,
   queueMessagingHandoffReply
 } from "./messaging-core.mjs";
 export { OrderCoordinator };
@@ -270,27 +272,12 @@ async function handleTelegram(request, env, ctx) {
       }
       if (!(await messagingHandoffSchemaReady(env))) {
         await sendTelegram(env, chatId,
-          "⚠️ Fitur pengelolaan bantuan belum aktif. Pastikan migrasi D1 0004 dan 0005 sudah diterapkan.");
+          "⚠️ Fitur pengelolaan bantuan belum aktif. Pastikan migrasi D1 0004, 0005, dan 0006 sudah diterapkan.");
         return;
       }
       try {
         if (handoffCommand.kind === "HANDOFF_LIST") {
-          const items = await listMessagingHandoffs(env, 5);
-          if (!items.length) {
-            await sendTelegram(env, chatId, "✅ Tidak ada permintaan bantuan pelanggan yang masih terbuka.");
-            return;
-          }
-          const blocks = items.map(item => {
-            const status = item.status === "CLAIMED" ? "🟡 DIAMBIL" : "🆕 MENUNGGU ADMIN";
-            const owner = item.claimed_by ? "\nAdmin: " + item.claimed_by : "";
-            return status + "\nNama: " + item.customer_name +
-              "\nKanal: " + item.source_channel + " | ID pelanggan: " + item.customer_id +
-              owner + "\nID: " + item.handoff_id +
-              "\nAmbil: /handoff_claim " + item.handoff_id +
-              "\nBalas: /handoff_reply " + item.handoff_id + " pesan Anda" +
-              "\nTutup: /handoff_close " + item.handoff_id;
-          });
-          await sendTelegram(env, chatId, "📥 ANTREAN BANTUAN PELANGGAN\n\n" + blocks.join("\n\n"));
+          await showTelegramHandoffQueue(env, { chat: { id: chatId } }, chatId);
           return;
         }
         if (handoffCommand.kind === "HANDOFF_CLAIM") {
@@ -469,6 +456,7 @@ function customerMenuKeyboard() {
 function adminMenuKeyboard() {
   return { inline_keyboard: [
     [{ text: "📊 Laporan Penjualan", callback_data: "adm:report" }],
+    [{ text: "🆘 Bantuan Pelanggan", callback_data: "adm:handoff" }],
     [{ text: "📈 Dashboard Interaktif", callback_data: "adm:dashboard" }],
     [{ text: "📥 Unduh Laporan", callback_data: "adm:exports" }],
     [{ text: "💳 Konfirmasi Pembayaran", callback_data: "adm:paymentchecks" }],
@@ -718,6 +706,84 @@ async function handleTelegramCallback(env, query) {
   const admin = isAdmin(chatId, env);
   await answerTelegramCallback(env, query.id);
 
+  if (data.startsWith("hf:")) {
+    if (!admin) {
+      await updateTelegramMessage(env, message, {
+        text: "⛔ Tombol antrean bantuan khusus admin.",
+        replyMarkup: null,
+        clearMedia: true
+      });
+      return;
+    }
+    const parts = data.split(":");
+    const action = parts[1];
+    const handoffId = parts.slice(2).join(":");
+    if (!["take", "done", "decline"].includes(action) || !handoffId) {
+      await showTelegramHandoffQueue(env, message, chatId, "⚠️ Tombol tidak valid. Perbarui antrean.");
+      return;
+    }
+
+    if (!(await messagingHandoffSchemaReady(env))) {
+      await showTelegramHandoffQueue(env, message, chatId, "⚠️ Fitur bantuan belum aktif.");
+      return;
+    }
+
+    let result;
+    try {
+      if (action === "take") {
+        result = await claimMessagingHandoff(env, handoffId, chatId);
+      } else if (action === "done") {
+        result = await resolveMessagingHandoff(env, handoffId, chatId);
+      } else {
+        result = await declineMessagingHandoff(env, handoffId, chatId);
+      }
+    } catch (error) {
+      console.error(JSON.stringify({level:"error",event:"telegram_handoff_action",message:error.message}));
+      await showTelegramHandoffQueue(env, message, chatId, "⚠️ Aksi tidak berhasil. Coba perbarui antrean.");
+      return;
+    }
+
+    if (result.ok) {
+      if (action === "decline" && result.noticeQueued) {
+        await dispatchTelegramMessagingOutbox(env, 50);
+      }
+      let notice;
+      if (result.alreadyClosed) {
+        notice = result.resolution === "DECLINED"
+          ? "ℹ️ Permintaan bantuan ini sudah ditolak sebelumnya."
+          : "ℹ️ Permintaan bantuan ini sudah diselesaikan sebelumnya.";
+      } else if (action === "take") {
+        notice = result.alreadyClaimed
+          ? "ℹ️ Kasus ini sudah Anda ambil."
+          : "✅ Kasus berhasil Anda terima. Anda sekarang menjadi admin penanggung jawab.";
+      } else if (action === "done") {
+        notice = result.automationResumed
+          ? "✅ Bantuan selesai. Bot otomatis aktif kembali untuk pelanggan."
+          : result.conversationMode === "OPTED_OUT"
+            ? "✅ Bantuan selesai. Preferensi STOP pelanggan tetap berlaku."
+            : "✅ Kasus diselesaikan, tetapi percakapan masih memiliki permintaan bantuan lain.";
+      } else {
+        notice = result.automationResumed
+          ? "❌ Permintaan ditolak. Pelanggan diberi tahu dan bot otomatis diaktifkan kembali."
+          : "❌ Permintaan ditolak. Pelanggan diberi tahu; bot tetap dijeda karena masih ada kasus aktif lain.";
+      }
+      await showTelegramHandoffQueue(env, message, chatId, notice);
+      return;
+    }
+
+    const reason = {
+      NOT_FOUND: "Kasus tidak ditemukan.",
+      CLOSED: "Kasus sudah ditutup.",
+      ALREADY_CLAIMED: "Kasus sudah diterima admin lain dan tidak dapat ditolak.",
+      NOT_CLAIMED: "Terima kasus terlebih dahulu.",
+      CLAIMED_BY_OTHER: "Kasus sedang ditangani admin lain: " + (result.handoff?.claimed_by || "-"),
+      CONFLICT: "Status kasus berubah. Perbarui antrean."
+    };
+    await showTelegramHandoffQueue(env, message, chatId,
+      "⚠️ " + (reason[result.reason] || "Aksi tidak dapat dilakukan."));
+    return;
+  }
+
   if (data === "nav:home" || data === "adm:home") {
     const showAdmin = data === "adm:home" && admin;
     await updateTelegramMessage(env, message, {
@@ -845,6 +911,10 @@ async function handleTelegramCallback(env, query) {
       return;
     }
     const action = data.slice(4);
+    if (action === "handoff") {
+      await showTelegramHandoffQueue(env, message, chatId);
+      return;
+    }
     if (action === "report") {
       await updateTelegramMessage(env, message, { text: await buildAdminReport(env), replyMarkup: adminMenuKeyboard(), clearMedia: true });
       return;
@@ -2284,12 +2354,86 @@ async function messagingHandoffSchemaReady(env) {
   if (!(await messagingCoreReady(env))) return false;
   try {
     await env.DB.prepare(
-      "SELECT claimed_by,claimed_at,closed_by FROM messaging_handoff_requests LIMIT 0"
+      "SELECT claimed_by,claimed_at,closed_by,resolution FROM messaging_handoff_requests LIMIT 0"
     ).all();
     return true;
   } catch {
     return false;
   }
+}
+
+function telegramHandoffCallback(action, handoffId) {
+  const callback = "hf:" + action + ":" + String(handoffId || "");
+  return new TextEncoder().encode(callback).length <= 64 ? callback : null;
+}
+
+function formatHandoffDate(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "-";
+  return new Intl.DateTimeFormat("id-ID", {
+    timeZone: "Asia/Jakarta", dateStyle: "short", timeStyle: "short"
+  }).format(date);
+}
+
+async function showTelegramHandoffQueue(env, message, adminChatId, notice = "") {
+  if (!(await messagingHandoffSchemaReady(env))) {
+    await updateTelegramMessage(env, message, {
+      text: "⚠️ Antrean bantuan belum tersedia. Periksa migrasi D1 Messaging Core.",
+      replyMarkup: { inline_keyboard: [[{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]] },
+      clearMedia: true
+    });
+    return;
+  }
+
+  const items = await listMessagingHandoffs(env, 20, "telegram");
+  if (!items.length) {
+    await updateTelegramMessage(env, message, {
+      text: (notice ? notice + "\n\n" : "") +
+        "🆘 ANTREAN BANTUAN PELANGGAN\n\n✅ Tidak ada permintaan bantuan yang menunggu atau sedang ditangani.",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "🔄 Perbarui", callback_data: "adm:handoff" }],
+        [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+      ] },
+      clearMedia: true
+    });
+    return;
+  }
+
+  const keyboard = [];
+  const cards = items.map((item, index) => {
+    const claimedBy = String(item.claimed_by || "");
+    const status = item.status === "OPEN" ? "🆕 MENUNGGU ADMIN" :
+      claimedBy === String(adminChatId) ? "🟡 ANDA MENANGANI" : "🔒 SEDANG DITANGANI";
+    const owner = item.status === "CLAIMED"
+      ? "\nAdmin: " + (claimedBy === String(adminChatId) ? "Anda" : claimedBy)
+      : "";
+    if (item.status === "OPEN") {
+      const row = [];
+      const take = telegramHandoffCallback("take", item.handoff_id);
+      const decline = telegramHandoffCallback("decline", item.handoff_id);
+      if (take) row.push({ text: "✅ Terima #" + (index + 1), callback_data: take });
+      if (decline) row.push({ text: "❌ Tolak #" + (index + 1), callback_data: decline });
+      if (row.length) keyboard.push(row);
+    } else if (claimedBy === String(adminChatId)) {
+      const done = telegramHandoffCallback("done", item.handoff_id);
+      if (done) keyboard.push([{ text: "✅ Selesaikan #" + (index + 1), callback_data: done }]);
+    }
+    return (index + 1) + ". " + String(item.customer_name || "Pelanggan") +
+      "\nStatus: " + status +
+      "\nKanal: " + item.source_channel +
+      "\nWaktu: " + formatHandoffDate(item.created_at) +
+      owner;
+  });
+
+  keyboard.push([{ text: "🔄 Perbarui antrean", callback_data: "adm:handoff" }]);
+  keyboard.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
+  await updateTelegramMessage(env, message, {
+    text: (notice ? notice + "\n\n" : "") +
+      "🆘 ANTREAN BANTUAN PELANGGAN\n" +
+      "Pilih tindakan pada setiap permintaan.\n\n" + cards.join("\n\n"),
+    replyMarkup: { inline_keyboard: keyboard },
+    clearMedia: true
+  });
 }
 
 function telegramMessagingEvent(update, message, textOverride = null) {
@@ -2406,10 +2550,13 @@ function telegramMessagingReplyMarkup(payload) {
   };
   const rows = buttons.map(button => {
     const value = String(button.value || "");
-    const callback = callbackByValue[value] || "nav:home";
+    let callback = callbackByValue[value] || "nav:home";
+    if (value.startsWith("handoff:take:")) callback = "hf:take:" + value.slice("handoff:take:".length);
+    else if (value.startsWith("handoff:decline:")) callback = "hf:decline:" + value.slice("handoff:decline:".length);
+    if (new TextEncoder().encode(callback).length > 64) return null;
     return [{ text: String(button.label || "Pilih").slice(0, 60), callback_data: callback }];
-  });
-  return { inline_keyboard: rows };
+  }).filter(Boolean);
+  return rows.length ? { inline_keyboard: rows } : null;
 }
 
 async function dispatchTelegramMessagingOutbox(env, limit = 20) {
