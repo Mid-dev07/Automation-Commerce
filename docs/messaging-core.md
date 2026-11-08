@@ -29,7 +29,7 @@ Required fields:
 
 Optional fields include `customerName`, `eventType`, `choiceId`, `occurredAt`, `fromMe`, and `isDirect`.
 
-An adapter must reject or mark as non-customer any event sent by the business itself, group chats, status updates, or unsupported message types before invoking the core.
+An adapter must reject or mark as non-customer any event sent by the business itself, group chats, status updates, or unsupported message types before invoking the core. Interactive provider choices should use event type `choice` with one of the neutral choice IDs `menu`, `catalog`, `orders`, `help`, or `admin`.
 
 ## Commands
 
@@ -43,6 +43,8 @@ An adapter must reject or mark as non-customer any event sent by the business it
 | `ADMIN`, `BANTUAN ADMIN` | Pause bot replies and create a human handoff request |
 | `STOP` | Set conversation mode to `OPTED_OUT` |
 | `START` | Explicitly re-enable automatic replies |
+ 
+Interactive choice IDs map to the same command router: `catalog`, `orders`, `help`, and `admin`.
 
 The order ID, pricing, stock, and payment status are not trusted from the message. They are read or calculated by the existing application services.
 
@@ -92,6 +94,6 @@ The GitHub Actions workflow `.github/workflows/messaging-core.yml` runs these te
 - WhatsApp Cloud API / BSP webhook adapter and sender.
 - Provider-specific interactive list/button rendering.
 - Conversation ordering via per-conversation Durable Object.
-- Admin UI for claiming and closing handoff requests.
+- Admin UI or command for claiming and closing handoff requests; the initial core records the request and pauses bot replies, but release of a human handoff remains a follow-up task.
 - Payment proof upload through WhatsApp media.
 - Multi-tenant provisioning and provider credentials.
