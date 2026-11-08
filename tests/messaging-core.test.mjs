@@ -87,3 +87,74 @@ test("human mode does not emit automatic replies for ordinary messages", async (
   assert.equal(result.actions.length, 0);
   assert.equal(result.mode, "HUMAN");
 });
+
+test("routes catalog requests through the provider-independent product service", async () => {
+  const result = await routeMessagingCommand(
+    event,
+    parseMessagingCommand("KATALOG"),
+    "BOT",
+    { listProducts: async () => [
+      { sku: "SEI-001", name: "Produk A", price: 25000, stock: 4, active: true },
+      { sku: "SEI-002", name: "Produk B", price: 30000, stock: 0, active: false }
+    ] }
+  );
+  assert.equal(result.actions.length, 1);
+  assert.match(result.actions[0].text, /SEI-001/);
+  assert.doesNotMatch(result.actions[0].text, /SEI-002/);
+});
+
+test("order creation forwards channel-scoped identity and stable idempotency key", async () => {
+  let received;
+  const result = await routeMessagingCommand(
+    { ...event, text: "BELI SEI-001 2 QRIS" },
+    parseMessagingCommand("BELI SEI-001 2 QRIS"),
+    "BOT",
+    {
+      createOrder: async input => {
+        received = input;
+        return {
+          orderId: "SEI-20261108-ABCD1234",
+          product: "Produk A",
+          sku: "SEI-001",
+          quantity: 2,
+          unitPrice: 25000,
+          shipping: 0,
+          total: 50000,
+          paymentMethod: "QRIS",
+          status: "MENUNGGU_PEMBAYARAN"
+        };
+      },
+      getPaymentInstructions: () => "Instruksi QRIS tersedia."
+    }
+  );
+  assert.equal(received.channel, "telegram");
+  assert.equal(received.customerId, "user-99");
+  assert.equal(received.idempotencyKey, event.eventId);
+  assert.match(result.actions[0].text, /Rp50.000/);
+  assert.equal(result.actions[0].buttons[0].value, "orders");
+});
+
+test("status lookup rejects an order from another channel or sender", async () => {
+  const result = await routeMessagingCommand(
+    event,
+    parseMessagingCommand("STATUS SEI-20261108-ABCD1234"),
+    "BOT",
+    {
+      findOrder: async () => ({
+        orderId: "SEI-20261108-ABCD1234",
+        customerId: "user-else",
+        channel: "whatsapp",
+        product: "Produk A",
+        quantity: 1,
+        total: 25000,
+        paymentMethod: "COD",
+        status: "MENUNGGU_PEMBAYARAN"
+      })
+    }
+  );
+  assert.match(result.actions[0].text, /tidak ditemukan/);
+});
+
+test("BANTUAN ADMIN is parsed as handoff rather than general help", () => {
+  assert.deepEqual(parseMessagingCommand("BANTUAN ADMIN"), { kind: "HANDOFF" });
+});
