@@ -172,7 +172,7 @@ export async function routeMessagingCommand(event, command, mode, services) {
       ));
     }
   } else if (command.kind === "ORDERS") {
-    const orders = await services.listOrders(event.senderId);
+    const orders = await services.listOrders(event.senderId, event.channel);
     const mine = (orders || []).slice(0, 5);
 
     if (!mine.length) {
@@ -191,7 +191,8 @@ export async function routeMessagingCommand(event, command, mode, services) {
     }
   } else if (command.kind === "STATUS") {
     const order = await services.findOrder(command.orderId);
-    if (!order || String(order.customerId) !== String(event.senderId)) {
+    if (!order || String(order.customerId) !== String(event.senderId) ||
+        (order.channel && String(order.channel) !== String(event.channel))) {
       actions.push(textAction("Pesanan tidak ditemukan untuk akun ini."));
     } else {
       actions.push(textAction([
@@ -224,7 +225,9 @@ export async function routeMessagingCommand(event, command, mode, services) {
           "Total: " + formatPrice(order.total),
           "Status: " + order.status
         ].join("\n");
-    actions.push(textAction(reply));
+    actions.push(textAction(reply, {
+      buttons: [{ label: "📦 Pesanan Saya", value: "orders" }]
+    }));
   } else if (command.kind === "HANDOFF") {
     nextMode = "HUMAN";
     const handoff = {
