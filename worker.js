@@ -8,6 +8,12 @@ import {
   orderToSheetRow, OrderCoordinator, claimSheetMirrorOutbox,
   completeSheetMirrorOutbox, failSheetMirrorOutbox
 } from "./transaction-layer.js";
+import {
+  processMessagingEvent,
+  claimMessagingOutbox,
+  completeMessagingOutbox,
+  failMessagingOutbox
+} from "./messaging-core.mjs";
 export { OrderCoordinator };
 /**
  * ============================================================================
@@ -161,6 +167,10 @@ async function mirrorTransactionalProduct(env, product) {
 
 export default {
   async scheduled(controller, env) {
+    const messaging = await dispatchTelegramMessagingOutbox(env, 20);
+    if (messaging.claimed) {
+      console.log(JSON.stringify({level:"info",event:"messaging_outbox_batch",cron:controller.cron,...messaging}));
+    }
     const state = await transactionReadiness(env);
     if (!state.ready) return;
     const result = await dispatchSheetsMirrorOutbox(env, 20);
@@ -265,15 +275,29 @@ async function handleTelegram(request, env, ctx) {
     }
     if (text.startsWith("/start") || text.startsWith("/help")) {
       const admin = isAdmin(chatId, env);
-      await sendTelegram(env, chatId, admin ? adminMenuText() : customerMenuText(), admin ? adminMenuKeyboard() : customerMenuKeyboard());
+      if (admin) {
+        await sendTelegram(env, chatId, adminMenuText(), adminMenuKeyboard());
+        return;
+      }
+      const messagingText = text.startsWith("/start") ? "START" : "MENU";
+      const event = telegramMessagingEvent(update, message, messagingText);
+      await processMessagingEvent(env, event, createMessagingServices(env));
+      await dispatchTelegramMessagingOutbox(env, 20);
+      return;
+    }
+    if (!isAdmin(chatId, env)) {
+      if (message.chat.type && message.chat.type !== "private") return;
+      const event = telegramMessagingEvent(update, message, text);
+      await processMessagingEvent(env, event, createMessagingServices(env));
+      await dispatchTelegramMessagingOutbox(env, 20);
       return;
     }
     const orderInput = parseOrderText(text);
     if (!orderInput) {
       await sendTelegram(env, chatId,
-        "🛍️ *Selamat datang di Seiton.id!*\n\n" +
-        "Format pesanan:\n`beli SKU jumlah metode_pembayaran`\n" +
-        "Contoh: `beli SEI-001 2 QRIS`\n\n" +
+        "🛍️ *Selamat datang di Seiton.id!*\\n\\n" +
+        "Format pesanan:\\n`beli SKU jumlah metode_pembayaran`\\n" +
+        "Contoh: `beli SEI-001 2 QRIS`\\n\\n" +
         "Ketik /help untuk bantuan.");
       return;
     }
@@ -2109,6 +2133,160 @@ function rupiah(value) {
     style: "currency", currency: "IDR", maximumFractionDigits: 0
   }).format(Number(value) || 0);
 }
+
+function telegramMessagingEvent(update, message, textOverride = null) {
+  const chatId = String(message.chat.id);
+  const senderId = String(message.from.id);
+  return {
+    tenantId: "seiton",
+    channel: "telegram",
+    eventId: "telegram:" + String(update.update_id ?? (chatId + ":" + message.message_id)),
+    externalMessageId: String(message.message_id ?? update.update_id ?? ""),
+    conversationId: chatId,
+    senderId,
+    customerName: [message.from.first_name, message.from.last_name].filter(Boolean).join(" ") || "Pelanggan",
+    text: textOverride == null ? String(message.text || message.caption || "").trim() : textOverride,
+    fromMe: false,
+    isDirect: !message.chat.type || message.chat.type === "private",
+    occurredAt: new Date().toISOString()
+  };
+}
+
+function createMessagingServices(env) {
+  return {
+    async listProducts() {
+      const rows = await readCatalogRows(env);
+      return rows.map(parseCatalogProduct).filter(product =>
+        product.active && product.priceValid && product.stockValid
+      ).map(product => ({
+        sku: product.sku,
+        name: product.name,
+        price: product.price,
+        stock: product.stock,
+        active: product.active,
+        priceValid: product.priceValid,
+        stockValid: product.stockValid,
+        photoUrl: product.photoUrl,
+        description: product.description
+      }));
+    },
+    async listOrders(customerId, channel) {
+      const state = await transactionReadiness(env);
+      if (state.ready) {
+        const orders = await listOrdersTransactional(env, { limit: 5000 });
+        return orders.filter(order =>
+          String(order.customer_id) === String(customerId) &&
+          String(order.channel) === String(channel)
+        ).slice(0, 5).map(order => ({
+          orderId: order.order_id,
+          customerId: order.customer_id,
+          channel: order.channel,
+          product: String(order.sku || "") + " - " + String(order.product_name || ""),
+          quantity: Number(order.quantity),
+          total: Number(order.total),
+          paymentMethod: order.payment_method,
+          status: order.status
+        }));
+      }
+      const rows = await readSheet(env, "Pesanan!A2:T");
+      return rows.filter(row =>
+        String(row[3] || "") === String(customerId) &&
+        String(row[2] || "") === String(channel)
+      ).slice(-5).reverse().map(row => ({
+        orderId: String(row[0] || ""),
+        customerId: String(row[3] || ""),
+        channel: String(row[2] || ""),
+        product: String(row[5] || ""),
+        quantity: Number(row[6] || 0),
+        total: Number(row[10] || 0),
+        paymentMethod: String(row[11] || ""),
+        status: String(row[12] || "")
+      }));
+    },
+    async findOrder(orderId) {
+      const found = await findOrderById(env, orderId);
+      if (!found) return null;
+      const row = found.row;
+      return {
+        orderId: String(row[0] || ""),
+        customerId: String(row[3] || ""),
+        channel: String(row[2] || ""),
+        product: String(row[5] || ""),
+        quantity: Number(row[6] || 0),
+        unitPrice: Number(row[7] || 0),
+        shipping: Number(row[9] || 0),
+        total: Number(row[10] || 0),
+        paymentMethod: String(row[11] || ""),
+        status: String(row[12] || "")
+      };
+    },
+    createOrder(input) {
+      return createOrder(env, input);
+    },
+    getPaymentInstructions(order) {
+      if (String(order.paymentMethod).toUpperCase() === "QRIS") {
+        return "Instruksi QRIS: " + String(env.LINK_QRIS_IMAGE || "Hubungi admin untuk mendapatkan QRIS.");
+      }
+      if (String(order.paymentMethod).toUpperCase() === "TRANSFER") {
+        return "Instruksi transfer akan diberikan admin.";
+      }
+      return "Pembayaran COD dipilih.";
+    },
+    getAdminTargets() {
+      return String(env.ADMIN_CHAT_ID || "").split(",").map(value => value.trim()).filter(Boolean);
+    }
+  };
+}
+
+function telegramMessagingReplyMarkup(payload) {
+  const buttons = Array.isArray(payload.buttons) ? payload.buttons : [];
+  if (!buttons.length) return null;
+  const callbackByValue = {
+    catalog: "nav:catalog",
+    orders: "nav:orders",
+    help: "nav:help"
+  };
+  const rows = buttons.map(button => {
+    const value = String(button.value || "");
+    const callback = callbackByValue[value] || "nav:home";
+    return [{ text: String(button.label || "Pilih").slice(0, 60), callback_data: callback }];
+  });
+  return { inline_keyboard: rows };
+}
+
+async function dispatchTelegramMessagingOutbox(env, limit = 20) {
+  if (!env.DB || !env.TELEGRAM_TOKEN) return { claimed: 0, sent: 0, failed: 0 };
+  const jobs = await claimMessagingOutbox(env, "telegram", limit);
+  let sent = 0;
+  let failed = 0;
+  for (const job of jobs) {
+    try {
+      const payload = JSON.parse(job.payload_json || "{}");
+      if (payload.type !== "text" || !payload.text) throw new Error("OUTBOX_PAYLOAD_INVALID");
+      await sendTelegram(
+        env,
+        String(job.recipient_id),
+        String(payload.text),
+        telegramMessagingReplyMarkup(payload)
+      );
+      await completeMessagingOutbox(env, job, null);
+      sent += 1;
+    } catch (error) {
+      await failMessagingOutbox(env, job, "TELEGRAM_SEND_FAILED");
+      failed += 1;
+      console.warn(JSON.stringify({
+        level: "warn",
+        event: "messaging_outbox_delivery_failed",
+        action_id: job.action_id,
+        code: error instanceof Error && /^[A-Z0-9_:-]{1,80}$/.test(error.message)
+          ? error.message
+          : "TELEGRAM_SEND_FAILED"
+      }));
+    }
+  }
+  return { claimed: jobs.length, sent, failed };
+}
+
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
