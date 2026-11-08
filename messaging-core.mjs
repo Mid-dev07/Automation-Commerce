@@ -99,7 +99,7 @@ function formatPrice(value) {
     style: "currency",
     currency: "IDR",
     maximumFractionDigits: 0
-  }).format(Number(value) || 0).replace(/\\u00a0/g, " ");
+  }).format(Number(value) || 0).replace(new RegExp(String.fromCharCode(160), "g"), " ");
 }
 
 export async function routeMessagingCommand(event, command, mode, services) {
