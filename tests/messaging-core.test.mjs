@@ -130,7 +130,7 @@ test("order creation forwards channel-scoped identity and stable idempotency key
   assert.equal(received.channel, "telegram");
   assert.equal(received.customerId, "user-99");
   assert.equal(received.idempotencyKey, event.eventId);
-  assert.match(result.actions[0].text, /Rp50.000/);
+  assert.match(result.actions[0].text, /Rp\\s50\\.000/);
   assert.equal(result.actions[0].buttons[0].value, "orders");
 });
 
