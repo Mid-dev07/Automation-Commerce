@@ -157,6 +157,10 @@ export async function routeMessagingCommand(event, command, mode, services) {
     return { actions, mode: nextMode, state: conversationState, handoff: false };
   }
 
+  if (mode === "HUMAN" && command.kind !== "STOP") {
+    return { actions, mode: "HUMAN", state: conversationState, handoff: false };
+  }
+
   if (command.kind === "START") {
     nextMode = "BOT";
     actions.push(textAction([
