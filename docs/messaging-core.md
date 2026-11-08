@@ -63,13 +63,28 @@ Outbound delivery uses at-least-once processing. The outbox reduces lost message
 
 Do not enable the Messaging Core until the migration has been reviewed and applied to the intended D1 database. The Worker checks for the new table and retains the previous Telegram command flow when the migration is absent.
 
-The configured D1 database in `wrangler.jsonc` is `seiton-transactions-prod`. After reviewing the migration and confirming the target environment, apply it with:
+The configured D1 database in `wrangler.jsonc` is `seiton-transactions-prod`. After reviewing the migration files and confirming the target environment, apply them in order with:
 
 ```bash
 npx wrangler d1 migrations apply seiton-transactions-prod --remote
 ```
 
 This command is intentionally not run by this change. The migration is additive and creates only Messaging Core tables and indexes.
+
+## Admin handoff operations
+
+Admin access is checked against `ADMIN_CHAT_ID` before any handoff command is executed. After migrations 0004 and 0005 are applied, an authorized admin can use these Telegram commands:
+
+| Command | Behavior |
+|---|---|
+| `/handoff` | List up to five open or claimed support requests |
+| `/handoff_claim <handoff-id>` | Exclusively claim an open request |
+| `/handoff_reply <handoff-id> <message>` | Queue a text reply to a claimed Telegram customer conversation |
+| `/handoff_close <handoff-id>` | Close the request and resume BOT mode when no other active handoff remains |
+
+A request already claimed by another admin cannot be replied to or closed by a different admin. Closing a case does not override a customer's `STOP` preference: an `OPTED_OUT` conversation remains opted out. Replies are text-only and use the Telegram outbox with its retry policy.
+
+Migration 0005 adds `claimed_by`, `claimed_at`, and `closed_by` audit fields. It is additive and must be applied after migration 0004.
 
 ## Telegram adapter behavior
 
@@ -94,6 +109,6 @@ The GitHub Actions workflow `.github/workflows/messaging-core.yml` runs these te
 - WhatsApp Cloud API / BSP webhook adapter and sender.
 - Provider-specific interactive list/button rendering.
 - Conversation ordering via per-conversation Durable Object.
-- Admin UI or command for claiming and closing handoff requests; the initial core records the request and pauses bot replies, but release of a human handoff remains a follow-up task.
+- Visual handoff queue inside the web admin dashboard; handoff operations are currently handled through authenticated Telegram admin commands.
 - Payment proof upload through WhatsApp media.
 - Multi-tenant provisioning and provider credentials.

@@ -66,6 +66,35 @@ export function parseMessagingChoice(rawChoiceId) {
   return { kind: mapping[choice] || "UNKNOWN" };
 }
 
+export function parseMessagingAdminCommand(rawText) {
+  const text = clean(rawText, 4000);
+  const match = text.match(/^\/(handoff|handoff_claim|handoff_reply|handoff_close)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
+  if (!match) return { kind: "UNKNOWN" };
+
+  const command = match[1].toLowerCase();
+  const args = String(match[2] || "").trim();
+  if (command === "handoff") {
+    return args ? { kind: "INVALID", command } : { kind: "HANDOFF_LIST" };
+  }
+
+  if (command === "handoff_reply") {
+    const reply = args.match(/^([A-Za-z0-9:._-]{1,180})\s+([\s\S]{1,3500})$/);
+    if (!reply) return { kind: "INVALID", command };
+    return {
+      kind: "HANDOFF_REPLY",
+      handoffId: reply[1],
+      message: clean(reply[2], 3500)
+    };
+  }
+
+  const id = args.match(/^([A-Za-z0-9:._-]{1,180})$/);
+  if (!id) return { kind: "INVALID", command };
+  return {
+    kind: command === "handoff_claim" ? "HANDOFF_CLAIM" : "HANDOFF_CLOSE",
+    handoffId: id[1]
+  };
+}
+
 export function parseMessagingCommand(rawText) {
   const text = clean(rawText, 2000);
   const normalized = text.toUpperCase();
@@ -126,6 +155,10 @@ export async function routeMessagingCommand(event, command, mode, services) {
       "Permintaan berhenti diterima. Balasan otomatis Seiton dinonaktifkan untuk percakapan ini. Ketik START untuk mengaktifkannya kembali."
     ));
     return { actions, mode: nextMode, state: conversationState, handoff: false };
+  }
+
+  if (mode === "HUMAN" && command.kind !== "STOP") {
+    return { actions, mode: "HUMAN", state: conversationState, handoff: false };
   }
 
   if (command.kind === "START") {
@@ -264,7 +297,11 @@ export async function routeMessagingCommand(event, command, mode, services) {
         "📣 Permintaan bantuan pelanggan\nNama: " + event.customerName +
         "\nKanal: " + event.channel +
         "\nID pengirim: " + event.senderId +
-        "\nConversation: " + event.conversationId,
+        "\nConversation: " + event.conversationId +
+        "\nID bantuan: " + handoff.handoffId +
+        "\nAmbil: /handoff_claim " + handoff.handoffId +
+        "\nBalas: /handoff_reply " + handoff.handoffId + " pesan Anda" +
+        "\nTutup: /handoff_close " + handoff.handoffId,
         { channel: "telegram", recipientId }
       ));
     }
@@ -275,6 +312,164 @@ export async function routeMessagingCommand(event, command, mode, services) {
   }
 
   return { actions, mode: nextMode, state: conversationState, handoff: false };
+}
+
+function requireHandoffId(value) {
+  const id = clean(value, 180);
+  if (!/^[A-Za-z0-9:._-]{1,180}$/.test(id)) throw new Error("MESSAGING_INVALID_HANDOFF_ID");
+  return id;
+}
+
+function requireAdminActor(value) {
+  const actor = clean(value, 180);
+  if (!actor) throw new Error("MESSAGING_ADMIN_ID_REQUIRED");
+  return actor;
+}
+
+async function findMessagingHandoff(db, handoffId) {
+  return db.prepare(
+    "SELECT handoff_id,tenant_id,source_channel,conversation_id,customer_id,customer_name," +
+    "source_event_id,status,claimed_by,claimed_at,closed_by,closed_at,created_at,updated_at " +
+    "FROM messaging_handoff_requests WHERE handoff_id=?"
+  ).bind(handoffId).first();
+}
+
+export async function listMessagingHandoffs(env, limit = 5) {
+  if (!env?.DB) throw new Error("MESSAGING_DATABASE_NOT_CONFIGURED");
+  const boundedLimit = Math.min(20, Math.max(1, Number(limit) || 5));
+  const result = await env.DB.prepare(
+    "SELECT handoff_id,tenant_id,source_channel,conversation_id,customer_id,customer_name," +
+    "status,claimed_by,claimed_at,created_at,updated_at " +
+    "FROM messaging_handoff_requests WHERE status IN ('OPEN','CLAIMED') " +
+    "ORDER BY created_at ASC LIMIT ?"
+  ).bind(boundedLimit).all();
+  return result.results || [];
+}
+
+export async function claimMessagingHandoff(env, rawHandoffId, rawAdminActorId) {
+  if (!env?.DB) throw new Error("MESSAGING_DATABASE_NOT_CONFIGURED");
+  const handoffId = requireHandoffId(rawHandoffId);
+  const adminActorId = requireAdminActor(rawAdminActorId);
+  const current = await findMessagingHandoff(env.DB, handoffId);
+  if (!current) return { ok: false, reason: "NOT_FOUND" };
+  if (current.status === "CLOSED") return { ok: false, reason: "CLOSED", handoff: current };
+  if (current.status === "CLAIMED") {
+    return current.claimed_by === adminActorId
+      ? { ok: true, alreadyClaimed: true, handoff: current }
+      : { ok: false, reason: "CLAIMED_BY_OTHER", handoff: current };
+  }
+
+  const now = new Date().toISOString();
+  const result = await env.DB.prepare(
+    "UPDATE messaging_handoff_requests SET status='CLAIMED',claimed_by=?,claimed_at=?,updated_at=? " +
+    "WHERE handoff_id=? AND status='OPEN'"
+  ).bind(adminActorId, now, now, handoffId).run();
+
+  const latest = await findMessagingHandoff(env.DB, handoffId);
+  if (changed(result) !== 1) {
+    if (latest?.status === "CLAIMED" && latest.claimed_by === adminActorId) {
+      return { ok: true, alreadyClaimed: true, handoff: latest };
+    }
+    return {
+      ok: false,
+      reason: latest?.status === "CLAIMED" ? "CLAIMED_BY_OTHER" :
+        latest?.status === "CLOSED" ? "CLOSED" : "CONFLICT",
+      handoff: latest || current
+    };
+  }
+  return { ok: true, alreadyClaimed: false, handoff: latest };
+}
+
+export async function closeMessagingHandoff(env, rawHandoffId, rawAdminActorId) {
+  if (!env?.DB) throw new Error("MESSAGING_DATABASE_NOT_CONFIGURED");
+  const handoffId = requireHandoffId(rawHandoffId);
+  const adminActorId = requireAdminActor(rawAdminActorId);
+  const current = await findMessagingHandoff(env.DB, handoffId);
+  if (!current) return { ok: false, reason: "NOT_FOUND" };
+  if (current.status === "CLOSED") return { ok: true, alreadyClosed: true, handoff: current };
+  if (current.claimed_by && current.claimed_by !== adminActorId) {
+    return { ok: false, reason: "CLAIMED_BY_OTHER", handoff: current };
+  }
+
+  const now = new Date().toISOString();
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      "UPDATE messaging_handoff_requests SET status='CLOSED',closed_by=?,closed_at=?,updated_at=? " +
+      "WHERE handoff_id=? AND status IN ('OPEN','CLAIMED') AND (claimed_by IS NULL OR claimed_by=?)"
+    ).bind(adminActorId, now, now, handoffId, adminActorId),
+    env.DB.prepare(
+      "UPDATE messaging_conversations SET mode='BOT',updated_at=? " +
+      "WHERE tenant_id=? AND channel=? AND conversation_id=? AND mode='HUMAN' " +
+      "AND EXISTS (SELECT 1 FROM messaging_handoff_requests h " +
+      "WHERE h.handoff_id=? AND h.status='CLOSED' AND h.closed_by=?) " +
+      "AND NOT EXISTS (SELECT 1 FROM messaging_handoff_requests active " +
+      "WHERE active.tenant_id=? AND active.source_channel=? AND active.conversation_id=? " +
+      "AND active.status IN ('OPEN','CLAIMED'))"
+    ).bind(
+      now, current.tenant_id, current.source_channel, current.conversation_id,
+      handoffId, adminActorId, current.tenant_id, current.source_channel, current.conversation_id
+    )
+  ]);
+
+  if (changed(results?.[0]) !== 1) {
+    const latest = await findMessagingHandoff(env.DB, handoffId);
+    if (latest?.status === "CLOSED") return { ok: true, alreadyClosed: true, handoff: latest };
+    if (latest?.claimed_by && latest.claimed_by !== adminActorId) {
+      return { ok: false, reason: "CLAIMED_BY_OTHER", handoff: latest };
+    }
+    return { ok: false, reason: "CONFLICT", handoff: latest || current };
+  }
+
+  const latest = await findMessagingHandoff(env.DB, handoffId);
+  const conversation = await env.DB.prepare(
+    "SELECT mode FROM messaging_conversations WHERE tenant_id=? AND channel=? AND conversation_id=?"
+  ).bind(current.tenant_id, current.source_channel, current.conversation_id).first();
+
+  return {
+    ok: true,
+    alreadyClosed: false,
+    automationResumed: conversation?.mode === "BOT",
+    conversationMode: conversation?.mode || null,
+    handoff: latest
+  };
+}
+
+export async function queueMessagingHandoffReply(env, rawHandoffId, rawAdminActorId, rawMessage) {
+  if (!env?.DB) throw new Error("MESSAGING_DATABASE_NOT_CONFIGURED");
+  const handoffId = requireHandoffId(rawHandoffId);
+  const adminActorId = requireAdminActor(rawAdminActorId);
+  const message = clean(rawMessage, 3500);
+  if (!message) throw new Error("MESSAGING_EMPTY_HANDOFF_REPLY");
+
+  const handoff = await findMessagingHandoff(env.DB, handoffId);
+  if (!handoff) return { ok: false, reason: "NOT_FOUND" };
+  if (handoff.status !== "CLAIMED") return {
+    ok: false,
+    reason: handoff.status === "CLOSED" ? "CLOSED" : "NOT_CLAIMED",
+    handoff
+  };
+  if (handoff.claimed_by !== adminActorId) return { ok: false, reason: "CLAIMED_BY_OTHER", handoff };
+  if (handoff.source_channel !== "telegram") return { ok: false, reason: "CHANNEL_NOT_CONNECTED", handoff };
+
+  const now = new Date().toISOString();
+  const actionId = "admin-handoff:" + crypto.randomUUID();
+  const sourceEventId = "admin-handoff:" + crypto.randomUUID();
+  const payload = JSON.stringify({
+    type: "text",
+    text: "💬 Admin Seiton:\n" + message,
+    buttons: []
+  });
+  const result = await env.DB.prepare(
+    "INSERT OR IGNORE INTO messaging_outbox(" +
+    "action_id,tenant_id,channel,conversation_id,recipient_id,source_event_id," +
+    "action_type,payload_json,status,attempts,available_at,created_at,updated_at) " +
+    "VALUES(?,?,?,?,?,?,'text',?,'PENDING',0,?,?,?)"
+  ).bind(
+    actionId, handoff.tenant_id, handoff.source_channel, handoff.conversation_id,
+    handoff.conversation_id, sourceEventId, payload, now, now, now
+  ).run();
+  if (changed(result) !== 1) throw new Error("MESSAGING_HANDOFF_REPLY_QUEUE_FAILED");
+  return { ok: true, actionId, handoff };
 }
 
 export async function processMessagingEvent(env, input, services) {

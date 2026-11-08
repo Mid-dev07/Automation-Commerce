@@ -12,7 +12,12 @@ import {
   processMessagingEvent,
   claimMessagingOutbox,
   completeMessagingOutbox,
-  failMessagingOutbox
+  failMessagingOutbox,
+  parseMessagingAdminCommand,
+  listMessagingHandoffs,
+  claimMessagingHandoff,
+  closeMessagingHandoff,
+  queueMessagingHandoffReply
 } from "./messaging-core.mjs";
 export { OrderCoordinator };
 /**
@@ -251,6 +256,108 @@ async function handleTelegram(request, env, ctx) {
       try { await handleAdminProductForm(env, chatId, text, message.reply_to_message.text); }
       catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
       return;
+    }
+    const handoffCommand = parseMessagingAdminCommand(text);
+    if (handoffCommand.kind !== "UNKNOWN") {
+      if (!isAdmin(chatId, env)) {
+        await sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+        return;
+      }
+      if (handoffCommand.kind === "INVALID") {
+        await sendTelegram(env, chatId,
+          "⚠️ Format perintah tidak valid. Gunakan /handoff, /handoff_claim ID, /handoff_reply ID pesan, atau /handoff_close ID.");
+        return;
+      }
+      if (!(await messagingHandoffSchemaReady(env))) {
+        await sendTelegram(env, chatId,
+          "⚠️ Fitur pengelolaan bantuan belum aktif. Pastikan migrasi D1 0004 dan 0005 sudah diterapkan.");
+        return;
+      }
+      try {
+        if (handoffCommand.kind === "HANDOFF_LIST") {
+          const items = await listMessagingHandoffs(env, 5);
+          if (!items.length) {
+            await sendTelegram(env, chatId, "✅ Tidak ada permintaan bantuan pelanggan yang masih terbuka.");
+            return;
+          }
+          const blocks = items.map(item => {
+            const status = item.status === "CLAIMED" ? "🟡 DIAMBIL" : "🆕 MENUNGGU ADMIN";
+            const owner = item.claimed_by ? "\nAdmin: " + item.claimed_by : "";
+            return status + "\nNama: " + item.customer_name +
+              "\nKanal: " + item.source_channel + " | ID pelanggan: " + item.customer_id +
+              owner + "\nID: " + item.handoff_id +
+              "\nAmbil: /handoff_claim " + item.handoff_id +
+              "\nBalas: /handoff_reply " + item.handoff_id + " pesan Anda" +
+              "\nTutup: /handoff_close " + item.handoff_id;
+          });
+          await sendTelegram(env, chatId, "📥 ANTREAN BANTUAN PELANGGAN\n\n" + blocks.join("\n\n"));
+          return;
+        }
+        if (handoffCommand.kind === "HANDOFF_CLAIM") {
+          const result = await claimMessagingHandoff(env, handoffCommand.handoffId, chatId);
+          if (result.ok) {
+            await sendTelegram(env, chatId,
+              (result.alreadyClaimed ? "ℹ️ Kasus ini sudah diambil oleh Anda." : "✅ Kasus berhasil diambil.") +
+              "\nPelanggan: " + (result.handoff?.customer_name || "-") +
+              "\nBalas dengan: /handoff_reply " + handoffCommand.handoffId + " pesan Anda" +
+              "\nSelesaikan dengan: /handoff_close " + handoffCommand.handoffId);
+          } else {
+            const messageByReason = {
+              NOT_FOUND: "Kasus bantuan tidak ditemukan.",
+              CLOSED: "Kasus bantuan sudah ditutup.",
+              CLAIMED_BY_OTHER: "Kasus ini sedang ditangani admin lain: " + (result.handoff?.claimed_by || "-"),
+              CONFLICT: "Status kasus berubah. Jalankan /handoff untuk memuat ulang antrean."
+            };
+            await sendTelegram(env, chatId, "⚠️ " + (messageByReason[result.reason] || "Kasus tidak dapat diambil."));
+          }
+          return;
+        }
+        if (handoffCommand.kind === "HANDOFF_REPLY") {
+          const result = await queueMessagingHandoffReply(
+            env, handoffCommand.handoffId, chatId, handoffCommand.message
+          );
+          if (!result.ok) {
+            const messageByReason = {
+              NOT_FOUND: "Kasus bantuan tidak ditemukan.",
+              CLOSED: "Kasus sudah ditutup. Balasan tidak dikirim.",
+              NOT_CLAIMED: "Ambil kasus terlebih dahulu dengan /handoff_claim ID.",
+              CLAIMED_BY_OTHER: "Kasus ini sedang dipegang admin lain: " + (result.handoff?.claimed_by || "-"),
+              CHANNEL_NOT_CONNECTED: "Kanal pelanggan belum memiliki pengirim aktif."
+            };
+            await sendTelegram(env, chatId, "⚠️ " + (messageByReason[result.reason] || "Balasan tidak dapat diantrikan."));
+            return;
+          }
+          await dispatchTelegramMessagingOutbox(env, 50);
+          await sendTelegram(env, chatId,
+            "✅ Balasan admin dimasukkan ke antrean pengiriman Telegram untuk pelanggan " +
+            (result.handoff?.customer_name || "") + ". Perintah pengiriman langsung sudah dijalankan; kegagalan sementara akan dicoba ulang otomatis.");
+          return;
+        }
+        if (handoffCommand.kind === "HANDOFF_CLOSE") {
+          const result = await closeMessagingHandoff(env, handoffCommand.handoffId, chatId);
+          if (!result.ok) {
+            const messageByReason = {
+              NOT_FOUND: "Kasus bantuan tidak ditemukan.",
+              CLAIMED_BY_OTHER: "Kasus ini sedang dipegang admin lain: " + (result.handoff?.claimed_by || "-"),
+              CONFLICT: "Status kasus berubah. Jalankan /handoff untuk memuat ulang antrean."
+            };
+            await sendTelegram(env, chatId, "⚠️ " + (messageByReason[result.reason] || "Kasus tidak dapat ditutup."));
+          } else if (result.alreadyClosed) {
+            await sendTelegram(env, chatId, "ℹ️ Kasus bantuan tersebut sudah berstatus ditutup.");
+          } else if (result.automationResumed) {
+            await sendTelegram(env, chatId, "✅ Kasus ditutup. Balasan otomatis BOT diaktifkan kembali untuk percakapan tersebut.");
+          } else if (result.conversationMode === "OPTED_OUT") {
+            await sendTelegram(env, chatId, "✅ Kasus ditutup. Pelanggan sebelumnya menonaktifkan balasan otomatis, sehingga mode STOP tetap dipertahankan.");
+          } else {
+            await sendTelegram(env, chatId, "✅ Kasus ditutup. Percakapan tetap dalam penanganan admin karena masih ada permintaan bantuan aktif lainnya.");
+          }
+          return;
+        }
+      } catch (error) {
+        console.error(JSON.stringify({level:"error",event:"messaging_handoff_admin",message:error.message}));
+        await sendTelegram(env, chatId, "⚠️ Operasi bantuan gagal. Periksa status migrasi D1 dan coba kembali.");
+        return;
+      }
     }
     if (text === "/migrasi_d1") {
       if (!isAdmin(chatId,env)) return sendTelegram(env,chatId,"⛔ Perintah ini khusus admin.");
@@ -2168,6 +2275,18 @@ async function messagingCoreReady(env) {
       "SELECT name FROM sqlite_master WHERE type='table' AND name='messaging_outbox' LIMIT 1"
     ).first();
     return Boolean(row?.name);
+  } catch {
+    return false;
+  }
+}
+
+async function messagingHandoffSchemaReady(env) {
+  if (!(await messagingCoreReady(env))) return false;
+  try {
+    await env.DB.prepare(
+      "SELECT claimed_by,claimed_at,closed_by FROM messaging_handoff_requests LIMIT 0"
+    ).all();
+    return true;
   } catch {
     return false;
   }
