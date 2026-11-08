@@ -83,7 +83,7 @@ For each handoff:
 **Tolak** closes an unclaimed request with disposition `DECLINED`, tells the customer that the request could not be taken, and resumes bot mode only when no other active handoff remains. **Selesaikan** is restricted to the admin who claimed the case. Both actions preserve a customer's `STOP` / `OPTED_OUT` preference.
 
 The legacy commands remain supported:
-- `/handoff`
+- `/handoff` — opens the same interactive queue from chat.
 - `/handoff_claim <handoff-id>`
 - `/handoff_reply <handoff-id> <message>`
 - `/handoff_close <handoff-id>`
