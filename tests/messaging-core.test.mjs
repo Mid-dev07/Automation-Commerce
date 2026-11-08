@@ -48,11 +48,16 @@ function createHandoffEnv(initialHandoff, initialMode = "HUMAN", otherActive = f
       return { meta: { changes: 0 } };
     }
     if (sql.includes("UPDATE messaging_handoff_requests SET status='CLOSED'")) {
-      if (
-        state.handoff.handoff_id === args[4] &&
-        ["OPEN", "CLAIMED"].includes(state.handoff.status) &&
-        (!state.handoff.claimed_by || state.handoff.claimed_by === args[5])
-      ) {
+      const handoffId = args[4];
+      const isOpenOnly = sql.includes("WHERE handoff_id=? AND status='OPEN'");
+      const isClaimedByActor = sql.includes("WHERE handoff_id=? AND status='CLAIMED' AND claimed_by=?");
+      const allowedState = isOpenOnly
+        ? state.handoff.status === "OPEN"
+        : isClaimedByActor
+          ? state.handoff.status === "CLAIMED" && state.handoff.claimed_by === args[5]
+          : ["OPEN", "CLAIMED"].includes(state.handoff.status) &&
+            (!state.handoff.claimed_by || state.handoff.claimed_by === args[5]);
+      if (state.handoff.handoff_id === handoffId && allowedState) {
         state.handoff.status = "CLOSED";
         state.handoff.closed_by = args[0];
         state.handoff.closed_at = args[1];
