@@ -292,6 +292,17 @@ test("human handoff pauses the bot and creates admin notifications", async () =>
   assert.equal(result.actions[0].recipientId, "admin-chat-1");
 });
 
+test("START cannot interrupt an active human handoff", async () => {
+  const result = await routeMessagingCommand(
+    { ...event, text: "START" },
+    parseMessagingCommand("START"),
+    "HUMAN",
+    {}
+  );
+  assert.equal(result.actions.length, 0);
+  assert.equal(result.mode, "HUMAN");
+});
+
 test("human mode does not emit automatic replies for ordinary messages", async () => {
   const result = await routeMessagingCommand(
     { ...event, text: "MENU" },
