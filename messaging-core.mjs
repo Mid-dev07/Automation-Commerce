@@ -88,7 +88,8 @@ function textAction(text, target = {}) {
     channel: target.channel,
     recipientId: target.recipientId,
     type: "text",
-    text: clean(text, 3500)
+    text: clean(text, 3500),
+    buttons: Array.isArray(target.buttons) ? target.buttons.slice(0, 8) : []
   };
 }
 
@@ -254,10 +255,10 @@ export async function processMessagingEvent(env, input, services) {
   const inserted = await db.prepare(
     "INSERT OR IGNORE INTO messaging_inbound_events(" +
     "tenant_id,channel,event_id,external_message_id,conversation_id,sender_id,event_type," +
-    "status,attempts,lease_until,received_at) VALUES(?,?,?,?,?,?,'message','PROCESSING',1,?,?)"
+    "status,attempts,lease_until,received_at) VALUES(?,?,?,?,?,?,?,'PROCESSING',1,?,?)"
   ).bind(
     event.tenantId, event.channel, event.eventId, event.externalMessageId,
-    event.conversationId, event.senderId, leaseUntil, now
+    event.conversationId, event.senderId, event.eventType, leaseUntil, now
   ).run();
 
   if (changed(inserted) !== 1) {
@@ -313,7 +314,11 @@ export async function processMessagingEvent(env, input, services) {
       const targetChannel = action.channel || event.channel;
       const recipientId = action.recipientId || event.conversationId;
       const actionId = event.channel + ":" + event.eventId + ":" + index;
-      const payload = JSON.stringify({ type: action.type, text: action.text });
+      const payload = JSON.stringify({
+        type: action.type,
+        text: action.text,
+        buttons: Array.isArray(action.buttons) ? action.buttons : []
+      });
       return db.prepare(
         "INSERT OR IGNORE INTO messaging_outbox(" +
         "action_id,tenant_id,channel,conversation_id,recipient_id,source_event_id," +
@@ -343,16 +348,7 @@ export async function processMessagingEvent(env, input, services) {
         event.conversationId
       ),
       ...outboxStatements,
-      db.prepare(
-        "UPDATE messaging_inbound_events SET status='PROCESSED',lease_until=NULL," +
-        "processed_at=?,error_code=NULL WHERE tenant_id=? AND channel=? AND event_id=?"
-      ).bind(now, event.tenantId, event.channel, event.eventId)
-    ];
-
-    await db.batch(statements);
-
-    if (routed.handoff) {
-      await db.prepare(
+      ...(routed.handoff ? [db.prepare(
         "INSERT OR IGNORE INTO messaging_handoff_requests(" +
         "handoff_id,tenant_id,source_channel,conversation_id,customer_id,customer_name," +
         "source_event_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'OPEN',?,?)"
@@ -360,8 +356,14 @@ export async function processMessagingEvent(env, input, services) {
         routed.handoff.handoffId, routed.handoff.tenantId, routed.handoff.sourceChannel,
         routed.handoff.conversationId, routed.handoff.customerId, routed.handoff.customerName,
         routed.handoff.sourceEventId, now, now
-      ).run();
-    }
+      )] : []),
+      db.prepare(
+        "UPDATE messaging_inbound_events SET status='PROCESSED',lease_until=NULL," +
+        "processed_at=?,error_code=NULL WHERE tenant_id=? AND channel=? AND event_id=?"
+      ).bind(now, event.tenantId, event.channel, event.eventId)
+    ];
+
+    await db.batch(statements);
 
     return { accepted: true, duplicate: false, inProgress: false, actions };
   } catch (error) {
