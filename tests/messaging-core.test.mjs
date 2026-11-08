@@ -49,9 +49,9 @@ function createHandoffEnv(initialHandoff, initialMode = "HUMAN", otherActive = f
     }
     if (sql.includes("UPDATE messaging_handoff_requests SET status='CLOSED'")) {
       if (
-        state.handoff.handoff_id === args[3] &&
+        state.handoff.handoff_id === args[4] &&
         ["OPEN", "CLAIMED"].includes(state.handoff.status) &&
-        (!state.handoff.claimed_by || state.handoff.claimed_by === args[4])
+        (!state.handoff.claimed_by || state.handoff.claimed_by === args[5])
       ) {
         state.handoff.status = "CLOSED";
         state.handoff.closed_by = args[0];
@@ -98,8 +98,6 @@ function createHandoffEnv(initialHandoff, initialMode = "HUMAN", otherActive = f
       return {
         bind(...args) {
           return {
-            sql,
-            args,
             sql,
             args,
             first: async () => {
