@@ -167,9 +167,11 @@ async function mirrorTransactionalProduct(env, product) {
 
 export default {
   async scheduled(controller, env) {
-    const messaging = await dispatchTelegramMessagingOutbox(env, 20);
-    if (messaging.claimed) {
-      console.log(JSON.stringify({level:"info",event:"messaging_outbox_batch",cron:controller.cron,...messaging}));
+    if (await messagingCoreReady(env)) {
+      const messaging = await dispatchTelegramMessagingOutbox(env, 20);
+      if (messaging.claimed) {
+        console.log(JSON.stringify({level:"info",event:"messaging_outbox_batch",cron:controller.cron,...messaging}));
+      }
     }
     const state = await transactionReadiness(env);
     if (!state.ready) return;
@@ -279,17 +281,42 @@ async function handleTelegram(request, env, ctx) {
         await sendTelegram(env, chatId, adminMenuText(), adminMenuKeyboard());
         return;
       }
-      const messagingText = text.startsWith("/start") ? "START" : "MENU";
-      const event = telegramMessagingEvent(update, message, messagingText);
-      await processMessagingEvent(env, event, createMessagingServices(env));
-      await dispatchTelegramMessagingOutbox(env, 20);
+      if (message.chat.type && message.chat.type !== "private") return;
+      if (await messagingCoreReady(env)) {
+        const messagingText = text.startsWith("/start") ? "START" : "MENU";
+        const event = telegramMessagingEvent(update, message, messagingText);
+        await processMessagingEvent(env, event, createMessagingServices(env));
+        await dispatchTelegramMessagingOutbox(env, 20);
+      } else {
+        await sendTelegram(env, chatId, customerMenuText(), customerMenuKeyboard());
+      }
       return;
     }
     if (!isAdmin(chatId, env)) {
       if (message.chat.type && message.chat.type !== "private") return;
-      const event = telegramMessagingEvent(update, message, text);
-      await processMessagingEvent(env, event, createMessagingServices(env));
-      await dispatchTelegramMessagingOutbox(env, 20);
+      if (await messagingCoreReady(env)) {
+        const event = telegramMessagingEvent(update, message, text);
+        await processMessagingEvent(env, event, createMessagingServices(env));
+        await dispatchTelegramMessagingOutbox(env, 20);
+        return;
+      }
+
+      // Migration is additive but must be applied before Messaging Core is enabled.
+      // Preserve the previous Telegram ordering flow until the messaging tables exist.
+      const legacyOrderInput = parseOrderText(text);
+      if (!legacyOrderInput) {
+        await sendTelegram(env, chatId,
+          "🛍️ *Selamat datang di Seiton.id!*\\n\\n" +
+          "Format pesanan:\\n`beli SKU jumlah metode_pembayaran`\\n" +
+          "Contoh: `beli SEI-001 2 QRIS`\\n\\n" +
+          "Ketik /help untuk bantuan.");
+        return;
+      }
+      const legacyResult = await createOrder(env, {
+        ...legacyOrderInput, channel: "telegram", customerId, customerName,
+        idempotencyKey: String(update.update_id ?? (chatId + ":" + message.message_id))
+      });
+      await sendTelegram(env, chatId, orderConfirmation(legacyResult, env), orderConfirmationKeyboard(legacyResult));
       return;
     }
     const orderInput = parseOrderText(text);
@@ -2132,6 +2159,18 @@ function rupiah(value) {
   return new Intl.NumberFormat("id-ID", {
     style: "currency", currency: "IDR", maximumFractionDigits: 0
   }).format(Number(value) || 0);
+}
+
+async function messagingCoreReady(env) {
+  if (!env.DB) return false;
+  try {
+    const row = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='messaging_outbox' LIMIT 1"
+    ).first();
+    return Boolean(row?.name);
+  } catch {
+    return false;
+  }
 }
 
 function telegramMessagingEvent(update, message, textOverride = null) {
