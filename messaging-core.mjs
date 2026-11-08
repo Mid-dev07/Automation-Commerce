@@ -116,7 +116,17 @@ export async function routeMessagingCommand(event, command, mode, services) {
 
   if (command.kind === "START") {
     nextMode = "BOT";
-    actions.push(textAction("Layanan otomatis Seiton diaktifkan kembali. Ketik MENU untuk melihat pilihan."));
+    actions.push(textAction([
+      "✅ Layanan otomatis Seiton diaktifkan kembali.",
+      "",
+      "Ketik KATALOG untuk melihat produk, PESANAN untuk melihat pesanan, atau BELI SKU JUMLAH QRIS untuk membuat pesanan."
+    ].join("\\n"), {
+      buttons: [
+        { label: "🛍️ Lihat Katalog", value: "catalog" },
+        { label: "📦 Pesanan Saya", value: "orders" },
+        { label: "💬 Bantuan", value: "help" }
+      ]
+    }));
     return { actions, mode: nextMode, state: conversationState, handoff: false };
   }
 
