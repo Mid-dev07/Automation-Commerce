@@ -53,6 +53,19 @@ export function normalizeInboundEvent(input) {
   };
 }
 
+export function parseMessagingChoice(rawChoiceId) {
+  const choice = clean(rawChoiceId, 80).toUpperCase();
+  const mapping = {
+    MENU: "MENU",
+    CATALOG: "CATALOG",
+    ORDERS: "ORDERS",
+    HELP: "MENU",
+    ADMIN: "HANDOFF",
+    HANDOFF: "HANDOFF"
+  };
+  return { kind: mapping[choice] || "UNKNOWN" };
+}
+
 export function parseMessagingCommand(rawText) {
   const text = clean(rawText, 2000);
   const normalized = text.toUpperCase();
@@ -323,7 +336,7 @@ export async function processMessagingEvent(env, input, services) {
     ).bind(event.tenantId, event.channel, event.conversationId).first();
 
     const command = event.eventType === "choice"
-      ? { kind: clean(event.choiceId, 40).toUpperCase() }
+      ? parseMessagingChoice(event.choiceId)
       : parseMessagingCommand(event.text);
     const routed = await routeMessagingCommand(
       event, command, conversation?.mode || "BOT", services
