@@ -272,7 +272,7 @@ async function handleTelegram(request, env, ctx) {
       }
       if (!(await messagingHandoffSchemaReady(env))) {
         await sendTelegram(env, chatId,
-          "⚠️ Fitur pengelolaan bantuan belum aktif. Pastikan migrasi D1 0004 dan 0005 sudah diterapkan.");
+          "⚠️ Fitur pengelolaan bantuan belum aktif. Pastikan migrasi D1 0004, 0005, dan 0006 sudah diterapkan.");
         return;
       }
       try {
