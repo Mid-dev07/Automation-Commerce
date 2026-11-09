@@ -2927,6 +2927,7 @@ function createMessagingServices(env) {
       const found = await findOrderById(env, orderId);
       if (!found) return null;
       const row = found.row;
+      const stored = found.order;
       return {
         orderId: String(row[0] || ""),
         customerId: String(row[3] || ""),
@@ -2937,7 +2938,8 @@ function createMessagingServices(env) {
         shipping: Number(row[9] || 0),
         total: Number(row[10] || 0),
         paymentMethod: String(row[11] || ""),
-        status: String(row[12] || "")
+        status: String(row[12] || ""),
+        items: Array.isArray(stored?.items) ? stored.items : []
       };
     },
     async getCart(channel,customerId) {
