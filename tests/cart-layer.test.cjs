@@ -88,6 +88,14 @@ function checkoutInput(items, idempotencyKey, customerId = "1001") {
   };
 }
 
+let createCartOrderD1;
+let cartInventoryReleaseStatements;
+test.before(async () => {
+  const cartModule = await import("../cart-layer.mjs");
+  createCartOrderD1 = cartModule.createCartOrderD1;
+  cartInventoryReleaseStatements = cartModule.cartInventoryReleaseStatements;
+});
+
 test("multi-item checkout creates one parent and one child row per SKU", async () => {
   const { sqlite, db } = createDatabase();
   try {
@@ -249,11 +257,3 @@ test("checkout rejects malformed methods, duplicate rows, and unsafe totals", as
   }
 });
 
-let cartModule;
-test.before(async () => {
-  cartModule = await import("../cart-layer.mjs");
-  createCartOrderD1 = cartModule.createCartOrderD1;
-  cartInventoryReleaseStatements = cartModule.cartInventoryReleaseStatements;
-});
-let createCartOrderD1;
-let cartInventoryReleaseStatements;
