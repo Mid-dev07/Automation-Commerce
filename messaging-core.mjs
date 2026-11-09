@@ -265,7 +265,7 @@ export async function routeMessagingCommand(event, command, mode, services) {
     }
   } else if (command.kind === "CART_ADD") {
     await services.addCartItem(command.sku,command.quantity,event);
-    const cart = await services.getCart();
+    const cart = await services.getCart(event.channel,event.senderId);
     actions.push(textAction(
       "✅ " + command.sku + " berhasil ditambahkan. Isi keranjang sekarang: " +
       cart.length + " jenis produk. Ketik KERANJANG untuk melihat rinciannya."
