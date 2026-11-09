@@ -174,6 +174,11 @@ async function mirrorTransactionalProduct(env, product) {
 
 export default {
   async scheduled(controller, env) {
+    try {
+      await pruneAdminLoginAttempts(env);
+    } catch {
+      console.warn(JSON.stringify({ level:"warn", event:"admin_login_attempt_cleanup_failed" }));
+    }
     if (await messagingCoreReady(env)) {
       const messaging = await dispatchTelegramMessagingOutbox(env, 20);
       if (messaging.claimed) {
@@ -1374,13 +1379,156 @@ async function createWebAdminSessionToken(env) {
   const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("SEITON_ADMIN_DASHBOARD_V1." + payload));
   return payload + "." + base64urlBytes(new Uint8Array(sig));
 }
-async function handleAdminLogin(request, env) {
-  if (request.method !== "POST" || !env.ADMIN_WEB_PASSWORD) return json({ ok:false, error:"Login dashboard belum dikonfigurasi." }, 503);
-  let body; try { body = await request.json(); } catch { return json({ok:false,error:"Format login tidak valid."},400); }
-  if (!constantTimeEqual(String(body.password || ""), String(env.ADMIN_WEB_PASSWORD))) {
-    return json({ ok:false, error:"Password admin tidak sesuai." }, 401);
+const ADMIN_LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const ADMIN_LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
+const ADMIN_LOGIN_MAX_FAILURES = 5;
+
+async function adminLoginClientKey(request, env) {
+  const clientIp = String(request.headers.get("CF-Connecting-IP") || "").trim();
+  if (!clientIp || !env.TELEGRAM_WEBHOOK_SECRET) {
+    throw new Error("ADMIN_LOGIN_CLIENT_ID_UNAVAILABLE");
   }
-  return json({ ok:true, token:await createWebAdminSessionToken(env), expires_in:28800 });
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode("SEITON_ADMIN_LOGIN_CLIENT_V1." + clientIp)
+  );
+  return base64urlBytes(new Uint8Array(signature));
+}
+
+async function getAdminLoginLockout(env, clientKey, now = Date.now()) {
+  const row = await env.DB.prepare(
+    "SELECT blocked_until_ms FROM admin_login_attempts WHERE client_key = ? LIMIT 1"
+  ).bind(clientKey).first();
+  const blockedUntil = Number(row?.blocked_until_ms || 0);
+  return {
+    blocked: blockedUntil > now,
+    retryAfterSeconds: blockedUntil > now ? Math.max(1, Math.ceil((blockedUntil - now) / 1000)) : 0
+  };
+}
+
+async function recordAdminLoginFailure(env, clientKey, now = Date.now()) {
+  const cutoff = now - ADMIN_LOGIN_FAILURE_WINDOW_MS;
+  return env.DB.prepare(`
+    INSERT INTO admin_login_attempts (
+      client_key, window_started_ms, failed_attempts, blocked_until_ms, updated_at_ms
+    ) VALUES (?, ?, 1, 0, ?)
+    ON CONFLICT(client_key) DO UPDATE SET
+      window_started_ms = CASE
+        WHEN admin_login_attempts.window_started_ms <= ? THEN excluded.window_started_ms
+        ELSE admin_login_attempts.window_started_ms
+      END,
+      failed_attempts = CASE
+        WHEN admin_login_attempts.window_started_ms <= ? THEN 1
+        ELSE MIN(admin_login_attempts.failed_attempts + 1, ?)
+      END,
+      blocked_until_ms = CASE
+        WHEN (
+          CASE
+            WHEN admin_login_attempts.window_started_ms <= ? THEN 1
+            ELSE MIN(admin_login_attempts.failed_attempts + 1, ?)
+          END
+        ) >= ? THEN excluded.updated_at_ms + ?
+        ELSE 0
+      END,
+      updated_at_ms = excluded.updated_at_ms
+    RETURNING failed_attempts, blocked_until_ms
+  `).bind(
+    clientKey,
+    now,
+    now,
+    cutoff,
+    cutoff,
+    ADMIN_LOGIN_MAX_FAILURES,
+    cutoff,
+    ADMIN_LOGIN_MAX_FAILURES,
+    ADMIN_LOGIN_MAX_FAILURES,
+    ADMIN_LOGIN_LOCKOUT_MS
+  ).first();
+}
+
+async function clearAdminLoginFailures(env, clientKey) {
+  await env.DB.prepare(
+    "DELETE FROM admin_login_attempts WHERE client_key = ?"
+  ).bind(clientKey).run();
+}
+
+async function pruneAdminLoginAttempts(env) {
+  if (!env.DB) return;
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  await env.DB.prepare(
+    "DELETE FROM admin_login_attempts WHERE updated_at_ms < ?"
+  ).bind(cutoff).run();
+}
+
+function adminLoginRateLimited(retryAfterSeconds) {
+  const retry = Math.max(1, Math.ceil(Number(retryAfterSeconds) || 60));
+  const response = json({
+    ok: false,
+    error: "Terlalu banyak percobaan login. Silakan coba kembali setelah jeda."
+  }, 429);
+  const headers = new Headers(response.headers);
+  headers.set("Retry-After", String(retry));
+  return new Response(response.body, { status: 429, headers });
+}
+
+async function handleAdminLogin(request, env) {
+  if (request.method !== "POST" || !env.ADMIN_WEB_PASSWORD) {
+    return json({ ok:false, error:"Login dashboard belum dikonfigurasi." }, 503);
+  }
+  if (!env.DB || !env.ADMIN_LOGIN_RATE_LIMITER || !env.TELEGRAM_WEBHOOK_SECRET) {
+    return json({ ok:false, error:"Login sementara tidak tersedia." }, 503);
+  }
+
+  try {
+    const clientKey = await adminLoginClientKey(request, env);
+    const rate = await env.ADMIN_LOGIN_RATE_LIMITER.limit({ key: clientKey });
+    if (!rate.success) {
+      console.warn(JSON.stringify({ level:"warn", event:"admin_login_rate_limited", source:"cloudflare" }));
+      return adminLoginRateLimited(60);
+    }
+
+    const now = Date.now();
+    const lockout = await getAdminLoginLockout(env, clientKey, now);
+    if (lockout.blocked) {
+      console.warn(JSON.stringify({ level:"warn", event:"admin_login_rate_limited", source:"failed_attempt_lockout" }));
+      return adminLoginRateLimited(lockout.retryAfterSeconds);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ok:false,error:"Format login tidak valid."},400);
+    }
+    const password = typeof body?.password === "string" ? body.password : "";
+    if (password.length > 1024 || !constantTimeEqual(password, String(env.ADMIN_WEB_PASSWORD))) {
+      const failure = await recordAdminLoginFailure(env, clientKey, now);
+      const blockedUntil = Number(failure?.blocked_until_ms || 0);
+      if (blockedUntil > now) {
+        console.warn(JSON.stringify({ level:"warn", event:"admin_login_rate_limited", source:"failed_attempt_lockout" }));
+        return adminLoginRateLimited(Math.ceil((blockedUntil - now) / 1000));
+      }
+      return json({ ok:false, error:"Kredensial tidak valid." }, 401);
+    }
+
+    await clearAdminLoginFailures(env, clientKey);
+    return json({ ok:true, token:await createWebAdminSessionToken(env), expires_in:28800 });
+  } catch {
+    console.error(JSON.stringify({
+      level:"error",
+      event:"admin_login_security_dependency",
+      message:"Login security dependency unavailable"
+    }));
+    return json({ ok:false, error:"Login sementara tidak tersedia." }, 503);
+  }
 }
 async function handleAdminPaymentAction(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
