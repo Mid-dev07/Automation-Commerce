@@ -29,7 +29,9 @@
     }
   },
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": [
+      "*/5 * * * *"
+    ]
   },
   "observability": {
     "enabled": true,
@@ -42,5 +44,15 @@
     "traces": {
       "enabled": false
     }
-  }
+  },
+  "ratelimits": [
+    {
+      "name": "ADMIN_LOGIN_RATE_LIMITER",
+      "namespace_id": "2026110901",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    }
+  ]
 }
