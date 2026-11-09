@@ -9,7 +9,10 @@ on:
       - "messaging-core.mjs"
       - "migrations/**"
       - "tests/**"
+      - "wrangler.jsonc"
+      - "wrangler.toml"
       - "docs/PHASE-3-R2-PRODUCT-MEDIA.md"
+      - "docs/PHASE-4-WRANGLER-CONSOLIDATION.md"
       - ".github/workflows/cart-regression.yml"
   workflow_dispatch:
 

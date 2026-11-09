@@ -4,11 +4,15 @@
   "main": "worker.js",
   "compatibility_date": "2026-11-03",
   "workers_dev": true,
+  "vars": {
+    "GOOGLE_SHEETS_ID": "137aLgWekyqy0cbdsPkVIgszm6oMKAKeZ-coK5knMwic"
+  },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "seiton-transactions-prod",
-      "database_id": "35483d1c-58e9-4b44-a6cd-648041c5e244"
+      "database_id": "35483d1c-58e9-4b44-a6cd-648041c5e244",
+      "migrations_dir": "migrations"
     }
   ],
   "r2_buckets": [
