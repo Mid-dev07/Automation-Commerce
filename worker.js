@@ -2875,6 +2875,27 @@ function telegramMessagingEvent(update, message, textOverride = null) {
 function createMessagingServices(env) {
   return {
     async listProducts() {
+      const state = await transactionReadiness(env);
+      if (state.ready) {
+        const rows = await listProductsTransactional(env,true);
+        return rows.map(product => {
+          const price = Number(product.price);
+          const stock = product.stock == null ? null : Number(product.stock);
+          const priceValid = Number.isSafeInteger(price) && price >= 0;
+          const stockValid = stock == null || (Number.isSafeInteger(stock) && stock >= 0);
+          return {
+            sku: String(product.sku),
+            name: String(product.name || ""),
+            price,
+            stock,
+            active: Boolean(product.active),
+            priceValid,
+            stockValid,
+            photoUrl: String(product.photo_url || ""),
+            description: String(product.description || "")
+          };
+        }).filter(product => product.active && product.priceValid && product.stockValid);
+      }
       const rows = await readCatalogRows(env);
       return rows.map(parseCatalogProduct).filter(product =>
         product.active && product.priceValid && product.stockValid
