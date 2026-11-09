@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const test = require("node:test");
+const vm = require("node:vm");
 const assert = require("node:assert/strict");
 
 const root = path.resolve(__dirname, "..");
@@ -68,4 +69,23 @@ test("audit and active-session endpoints require an authenticated session", () =
   assert.ok(worker.includes('if(u.pathname==="/api/admin/audit"&&req.method==="GET")'));
   assert.ok(worker.includes('if(u.pathname==="/api/admin/sessions"&&req.method==="GET")'));
   assert.ok(worker.includes("const session=await activeSession(req,env)"));
+});
+
+test("owner admin audit and session controls are visible in the panel", () => {
+  assert.ok(worker.includes("id='auditList'"));
+  assert.ok(worker.includes("id='sessionList'"));
+  assert.ok(worker.includes("data-revoke-session"));
+  assert.ok(worker.includes("loadAudit()"));
+  assert.ok(worker.includes("loadSessions()"));
+});
+
+test("owner admin inline dashboard JavaScript parses", () => {
+  const start=worker.indexOf("function page(){");
+  const end=worker.indexOf("export default",start);
+  assert.ok(start>=0&&end>start);
+  const pageFn=worker.slice(start,end);
+  const html=vm.runInNewContext(pageFn+"\\npage();");
+  const script=html.match(/<script>\\s*([\\s\\S]*?)\\s*<\\/script>/);
+  assert.ok(script);
+  new vm.Script(script[1],{filename:"site-admin-inline.js"});
 });
