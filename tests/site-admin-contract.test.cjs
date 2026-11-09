@@ -91,3 +91,11 @@ test("owner admin inline dashboard JavaScript parses", () => {
   const inlineScript=html.slice(scriptStart+8,scriptEnd);
   new vm.Script(inlineScript,{filename:"site-admin-inline.js"});
 });
+
+test("owner admin session revocation is propagated to bot D1 registry before local revocation", () => {
+  assert.ok(worker.includes("/api/admin/session/revoke"));
+  assert.ok(worker.includes("async function revokeBackendWebSession"));
+  assert.ok(worker.includes('JSON.stringify({token_hash:targetTokenHash})'));
+  assert.ok(worker.includes("revokeBackendWebSession(env,session.token,target.token_hash)"));
+  assert.ok(worker.includes("revokeBackendWebSession(env,token,tokenHash)"));
+});
