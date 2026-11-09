@@ -36,6 +36,8 @@ test("Worker Preview binds only isolated D1 and R2 resources", () => {
   assert.equal(preview.triggers, undefined, "cron triggers must not run for Preview deployments");
   assert.equal(preview.routes, undefined, "Preview must not attach production routes");
   assert.equal(preview.services, undefined, "Preview must not call production service bindings");
+
+  assert.notEqual(workerConfig.preview_urls, true, "Preview URLs must not be enabled from source before Access is ready");
 });
 
 test("Preview config contains no production secrets or Google Sheets target", () => {
