@@ -226,6 +226,12 @@ async function cleanupOrphanProductMedia(env, maxPages = 2) {
       if (!result.truncated || !cursor) break;
     }
   } catch(error) {
+    try {
+      await env.DB.prepare(
+        "INSERT INTO app_meta(key,value,updated_at) VALUES('product_media_gc_cursor','',?) " +
+        "ON CONFLICT(key) DO UPDATE SET value='',updated_at=excluded.updated_at"
+      ).bind(new Date().toISOString()).run();
+    } catch {}
     console.warn(JSON.stringify({
       level:"warn",event:"product_media_gc_failed",
       pages,scanned,deleted,message:String(error?.message||error).slice(0,240)
@@ -1945,8 +1951,11 @@ async function handleAdminProductPhotoUpload(request, env) {
     };
     const originalSku = String(form.get("original_sku") || "").trim();
     const bytes = new Uint8Array(await image.arrayBuffer());
+    const declaredMime = String(image.type || "").toLowerCase() === "application/octet-stream"
+      ? ""
+      : (image.type || "");
     const persisted = await uploadThenPersistProductImage(
-      env.PRODUCT_MEDIA,bytes,image.type || "","admin",
+      env.PRODUCT_MEDIA,bytes,declaredMime,"admin",
       key => saveCatalogProduct(env,{...product,photo_url:key},originalSku)
     );
     uploaded = persisted.uploaded;
