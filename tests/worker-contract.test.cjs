@@ -105,9 +105,9 @@ test("catalog parser distinguishes unlimited stock from malformed stock", () => 
 
 test("CSV cells neutralize formula prefixes, including whitespace-prefixed formulas", () => {
   assert.equal(csvCell('=HYPERLINK("https://bad.example")'), '"\'=HYPERLINK(""https://bad.example"")"');
-  assert.equal(csvCell("  =1+1"), "\"'  =1+1\"");
-  assert.equal(csvCell("@SUM(A1:A2)"), "\"'@SUM(A1:A2)\"");
-  assert.equal(csvCell("-25000"), "\"-25000\"");
+  assert.equal(csvCell("  =1+1"), '"\'  =1+1"');
+  assert.equal(csvCell("@SUM(A1:A2)"), '"\'@SUM(A1:A2)"');
+  assert.equal(csvCell("-25000"), '"-25000"');
 });
 
 test("order and catalog append paths use RAW input", () => {
@@ -152,4 +152,14 @@ test("dashboard protects formula exports and avoids overlapping refresh calls", 
   assert.match(worker, /function csvCell\(value\)[\s\S]{0,250}\\u0000-\\u001f/);
   assert.match(worker, /refreshInFlight/);
   assert.match(worker, /chart\.js@4\.6\.1/);
+});
+
+test("production observability captures logs, redacts query strings, and keeps traces disabled", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8"));
+  assert.equal(config.observability?.enabled, true);
+  assert.equal(config.observability?.redact_query_string, true);
+  assert.equal(config.observability?.logs?.enabled, true);
+  assert.equal(config.observability?.logs?.invocation_logs, true);
+  assert.equal(config.observability?.logs?.head_sampling_rate, 1);
+  assert.equal(config.observability?.traces?.enabled, false);
 });
