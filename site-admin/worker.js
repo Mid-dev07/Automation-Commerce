@@ -16,7 +16,15 @@ async function activeSession(req,env){
     const row=await env.SITE_DB.prepare("SELECT session_id,client_hash,created_at_ms,last_seen_at_ms,expires_at_ms,revoked_at_ms FROM site_admin_sessions WHERE token_hash=? LIMIT 1").bind(tokenHash).first();
     if(!row||row.revoked_at_ms!==null&&row.revoked_at_ms!==undefined||Number(row.expires_at_ms)<=now)return null;
     const response=await env.ORDER_BACKEND.fetch(new Request("https://internal/api/admin/data",{headers:{Authorization:"Bearer "+token}}));
-    if(!response.ok)return null;
+    if(!response.ok){
+      if(response.status===401){
+        await env.SITE_DB.batch([
+          env.SITE_DB.prepare("UPDATE site_admin_sessions SET revoked_at_ms=? WHERE session_id=? AND revoked_at_ms IS NULL").bind(now,row.session_id),
+          newAuditStatement(env,{action:"SESSION_REVOKED",resource:"admin_session",summary:{session_id:row.session_id,reason:"backend_session_invalid"},clientHash:row.client_hash,now})
+        ]);
+      }
+      return null;
+    }
     if(now-Number(row.last_seen_at_ms)>=300000){
       await env.SITE_DB.prepare("UPDATE site_admin_sessions SET last_seen_at_ms=? WHERE session_id=? AND revoked_at_ms IS NULL AND expires_at_ms>?").bind(now,row.session_id,now).run();
       row.last_seen_at_ms=now;
@@ -173,6 +181,9 @@ if(u.pathname==="/api/login"&&req.method==="POST"){
       newAuditStatement(env,{action:"LOGIN_SUCCEEDED",resource:"admin_session",summary:{session_id:sessionId,expires_at_ms:expiresAt},clientHash:g.id,now})
     ]);
   }catch(e){
+    try{await revokeBackendWebSession(env,result.token,tokenHash);}catch(revokeError){
+      console.error(JSON.stringify({event:"owner_admin_orphan_session_revoke_failed",error:String(revokeError&&revokeError.message||revokeError)}));
+    }
     console.error(JSON.stringify({event:"owner_admin_session_create_failed",error:String(e&&e.message||e)}));
     return secure(j({ok:false,error:"Sesi aman gagal dibuat. Silakan coba kembali."},503));
   }
