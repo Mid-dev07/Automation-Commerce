@@ -162,3 +162,51 @@ test("scheduled outbox dispatch handles both order and catalog mirrors", () => {
   assert.match(worker,/mirrorTransactionalProduct\(env, product\)/);
   assert.match(worker,/mirrorTransactionalOrder\(env, order, \{ recoverAppend: true \}\)/);
 });
+
+test("multi-item cart uses D1 child rows and keeps the parent order as payment unit", () => {
+  const cart = fs.readFileSync(path.join(root, "cart-layer.mjs"), "utf8");
+  const migration = fs.readFileSync(path.join(root, "migrations/0002_multi_item_cart.sql"), "utf8");
+  assert.match(cart, /await db\.batch\(statements\)/);
+  assert.match(cart, /INSERT INTO order_items/);
+  assert.match(cart, /INSERT INTO order_item_inventory_movements/);
+  assert.match(cart, /idempotency_key/);
+  assert.match(cart, /sku: "MULTI"/);
+  assert.match(migration, /UNIQUE\(order_id, sku, movement_type\)/);
+  assert.match(migration, /RAISE\(ABORT, 'INSUFFICIENT_STOCK'\)/);
+  assert.match(migration, /WHEN NEW\.movement_type = 'RESERVE'/);
+});
+
+test("cart checkout and operations are serialized by the durable coordinator", () => {
+  assert.match(layer, /from "\.\/cart-layer\.mjs"/);
+  for (const method of [
+    "getCartTransactional", "addCartItemTransactional", "updateCartItemTransactional",
+    "removeCartItemTransactional", "clearCartTransactional", "checkoutCartTransactional"
+  ]) assert.ok(layer.includes("export async function " + method));
+
+  assert.match(layer, /getByName\("cart:"\+/);
+  assert.match(layer, /CREATE TABLE IF NOT EXISTS cart_items/);
+  assert.match(layer, /CREATE TABLE IF NOT EXISTS cart_meta/);
+  assert.match(layer, /CREATE TABLE IF NOT EXISTS cart_mutations/);
+  assert.match(layer, /transactionSync\(\(\)=>/);
+  assert.match(layer, /async checkoutCart\(input\)/);
+  assert.match(layer, /createCartOrderD1\(this\.env\.DB/);
+});
+
+test("cancelling a multi-item order releases all child SKU reservations atomically", () => {
+  const start=layer.indexOf("async function setOrderStatusD1");
+  const end=layer.indexOf("\nasync function markPickedUpD1",start);
+  const code=layer.slice(start,end);
+  assert.match(code, /String\(o\.sku \|\| ""\)\.toUpperCase\(\) === "MULTI"/);
+  assert.match(code, /cartInventoryReleaseStatements\(db,id,at\)/);
+  const cart = fs.readFileSync(path.join(root, "cart-layer.mjs"), "utf8");
+  assert.match(cart, /INSERT OR IGNORE INTO order_item_inventory_movements/);
+  assert.match(cart, /UPDATE orders SET stock_reserved=0/);
+  assert.match(code, /PAID_STATUSES\.has\(current\)/);
+});
+
+test("legacy single-SKU checkout path remains active alongside cart checkout", () => {
+  assert.match(layer, /async function createOrderD1\(db, input\)/);
+  assert.match(layer, /export async function createOrderTransactional\(env,input\)/);
+  assert.match(layer, /getByName\("sku:"\+sku\)/);
+  assert.match(layer, /inventory_movements\(order_id,sku,movement_type,quantity,created_at\)/);
+});

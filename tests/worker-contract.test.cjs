@@ -244,3 +244,35 @@ test("operational audit endpoint is authenticated and reads order events plus ad
   assert.match(worker, /FROM order_events WHERE event_type IN \('PAYMENT_APPROVED','PAYMENT_REJECTED','STATUS_CHANGED','PICKED_UP'\)/);
   assert.match(worker, /FROM admin_activity_audit ORDER BY created_at_ms DESC LIMIT \?/);
 });
+
+test("Telegram catalog reads D1 source-of-truth when transaction storage is ready", () => {
+  assert.match(worker, /async listProducts\(\)[\s\S]{0,220}transactionReadiness\(env\)/);
+  assert.match(worker, /if \(state\.ready\) \{[\s\S]{0,180}listProductsTransactional\(env,true\)/);
+  assert.match(worker, /photoUrl: String\(product\.photo_url \|\| ""\)/);
+});
+
+test("Telegram Worker services are bound to persisted, customer-scoped cart operations", () => {
+  const core = fs.readFileSync(path.join(root, "messaging-core.mjs"), "utf8");
+  for (const name of [
+    "getCartTransactional", "addCartItemTransactional", "updateCartItemTransactional",
+    "removeCartItemTransactional", "clearCartTransactional", "checkoutCartTransactional"
+  ]) assert.ok(worker.includes(name));
+
+  assert.match(worker, /async getCart\(channel,customerId\)/);
+  assert.match(worker, /addCartItemTransactional\([\s\S]{0,180}event\.channel,event\.senderId/);
+  assert.match(worker, /checkoutCartTransactional\(env,\{\.\.\.input,shipping\}\)/);
+  assert.match(core, /TAMBAH\|ADD/);
+  assert.match(core, /UBAH\|UPDATE/);
+  assert.match(core, /HAPUS\|REMOVE/);
+  assert.match(core, /CHECKOUT\\s\+\(QRIS\|TRANSFER\|COD\)/);
+  assert.match(core, /services\.getCart\(event\.channel,event\.senderId\)/);
+  assert.match(core, /services\.checkoutCart\(/);
+});
+
+test("customer order status includes child item details for multi-item orders", () => {
+  const core = fs.readFileSync(path.join(root, "messaging-core.mjs"), "utf8");
+  assert.match(worker, /items: Array\.isArray\(stored\?\.items\) \? stored\.items : \[\]/);
+  assert.match(core, /const itemLines = \(order\.items \|\| \[\]\)\.map/);
+  assert.match(core, /Rincian:/);
+  assert.match(worker, /checkoutCart\(env,input\)/);
+});

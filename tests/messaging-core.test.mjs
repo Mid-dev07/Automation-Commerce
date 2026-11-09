@@ -449,3 +449,133 @@ test("a help choice returns the menu instead of an empty response", async () => 
   assert.equal(result.actions.length, 1);
   assert.match(result.actions[0].text, /SELAMAT DATANG DI SEITON.ID/);
 });
+
+test("parses the complete customer cart command set without changing legacy BUY", () => {
+  assert.deepEqual(parseMessagingCommand("TAMBAH SEI-001 2"), {
+    kind: "CART_ADD", sku: "SEI-001", quantity: 2
+  });
+  assert.deepEqual(parseMessagingCommand("UBAH SEI-001 3"), {
+    kind: "CART_UPDATE", sku: "SEI-001", quantity: 3
+  });
+  assert.deepEqual(parseMessagingCommand("HAPUS SEI-001"), {
+    kind: "CART_REMOVE", sku: "SEI-001"
+  });
+  assert.deepEqual(parseMessagingCommand("KERANJANG"), { kind: "CART_LIST" });
+  assert.deepEqual(parseMessagingCommand("KOSONGKAN"), { kind: "CART_CLEAR" });
+  assert.deepEqual(parseMessagingCommand("CHECKOUT TRANSFER"), {
+    kind: "CHECKOUT", paymentMethod: "TRANSFER"
+  });
+  assert.deepEqual(parseMessagingCommand("BELI SEI-001 2 QRIS"), {
+    kind: "BUY", sku: "SEI-001", quantity: 2, paymentMethod: "QRIS"
+  });
+  assert.deepEqual(parseMessagingCommand("TAMBAH SEI-001 1001"), { kind: "UNKNOWN" });
+  assert.deepEqual(parseMessagingCommand("CHECKOUT GOPAY"), { kind: "UNKNOWN" });
+});
+
+test("routes cart mutations with the originating event identity", async () => {
+  const calls = [];
+  const cart = [{ sku: "SEI-001", name: "Produk A", quantity: 2, unitPrice: 25000, subtotal: 50000, available: true }];
+  const services = {
+    async getCart(channel, customerId) {
+      calls.push(["get", channel, customerId]);
+      return cart;
+    },
+    async addCartItem(sku, quantity, receivedEvent) {
+      calls.push(["add", sku, quantity, receivedEvent.eventId]);
+      cart[0].quantity += quantity;
+    },
+    async updateCartItem(sku, quantity, receivedEvent) {
+      calls.push(["update", sku, quantity, receivedEvent.eventId]);
+      cart[0].quantity = quantity;
+    },
+    async removeCartItem(sku, receivedEvent) {
+      calls.push(["remove", sku, receivedEvent.eventId]);
+      return { removed: true };
+    },
+    async clearCart(receivedEvent) {
+      calls.push(["clear", receivedEvent.eventId]);
+      return { cleared: true };
+    }
+  };
+
+  const add = await routeMessagingCommand(
+    event, parseMessagingCommand("TAMBAH SEI-001 1"), "BOT", services
+  );
+  assert.match(add.actions[0].text, /berhasil ditambahkan/);
+  assert.ok(calls.some(call => call[0] === "add" && call[3] === event.eventId));
+  assert.ok(calls.some(call => call[0] === "get" && call[1] === "telegram" && call[2] === "user-99"));
+
+  const update = await routeMessagingCommand(
+    event, parseMessagingCommand("UBAH SEI-001 4"), "BOT", services
+  );
+  assert.match(update.actions[0].text, /diperbarui/);
+  assert.ok(calls.some(call => call[0] === "update" && call[3] === event.eventId));
+
+  const remove = await routeMessagingCommand(
+    event, parseMessagingCommand("HAPUS SEI-001"), "BOT", services
+  );
+  assert.match(remove.actions[0].text, /dihapus/);
+
+  const clear = await routeMessagingCommand(
+    event, parseMessagingCommand("KOSONGKAN"), "BOT", services
+  );
+  assert.match(clear.actions[0].text, /dikosongkan/);
+});
+
+test("cart listing shows database-backed price and checkout instructions", async () => {
+  const result = await routeMessagingCommand(
+    event,
+    parseMessagingCommand("KERANJANG"),
+    "BOT",
+    {
+      getCart: async (channel, customerId) => {
+        assert.equal(channel, "telegram");
+        assert.equal(customerId, "user-99");
+        return [{
+          sku: "SEI-001", name: "Produk A", quantity: 2,
+          unitPrice: 25000, subtotal: 50000, available: true
+        }];
+      }
+    }
+  );
+  assert.match(result.actions[0].text, /Produk A/);
+  assert.match(result.actions[0].text, /Rp\s50\.000/);
+  assert.match(result.actions[0].text, /CHECKOUT QRIS/);
+});
+
+test("cart checkout returns every item and preserves the selected payment method", async () => {
+  let received;
+  const result = await routeMessagingCommand(
+    event,
+    parseMessagingCommand("CHECKOUT QRIS"),
+    "BOT",
+    {
+      async checkoutCart(input) {
+        received = input;
+        return {
+          orderId: "SEI-20261109-ABCD1234",
+          quantity: 3,
+          subtotal: 49000,
+          shipping: 5000,
+          total: 54000,
+          paymentMethod: "QRIS",
+          status: "MENUNGGU_PEMBAYARAN",
+          items: [
+            { sku: "SEI-001", name: "Produk A", quantity: 2, subtotal: 20000 },
+            { sku: "SEI-002", name: "Produk B", quantity: 1, subtotal: 29000 }
+          ]
+        };
+      },
+      getPaymentInstructions: () => "Instruksi QRIS tersedia."
+    }
+  );
+  assert.equal(received.channel, "telegram");
+  assert.equal(received.customerId, "user-99");
+  assert.equal(received.operationId, event.eventId);
+  assert.equal(received.paymentMethod, "QRIS");
+  assert.match(result.actions[0].text, /Produk A/);
+  assert.match(result.actions[0].text, /Produk B/);
+  assert.match(result.actions[0].text, /Total: Rp\s54\.000/);
+  assert.match(result.actions[0].text, /Instruksi QRIS tersedia/);
+});
+
