@@ -1487,8 +1487,10 @@ async function handleAdminLogin(request, env) {
     return json({ ok:false, error:"Login sementara tidak tersedia." }, 503);
   }
 
+  let stage = "client_key";
   try {
     const clientKey = await adminLoginClientKey(request, env);
+    stage = "cloudflare_rate_limit";
     const rate = await env.ADMIN_LOGIN_RATE_LIMITER.limit({ key: clientKey });
     if (!rate.success) {
       console.warn(JSON.stringify({ level:"warn", event:"admin_login_rate_limited", source:"cloudflare" }));
@@ -1496,6 +1498,7 @@ async function handleAdminLogin(request, env) {
     }
 
     const now = Date.now();
+    stage = "d1_lockout_lookup";
     const lockout = await getAdminLoginLockout(env, clientKey, now);
     if (lockout.blocked) {
       console.warn(JSON.stringify({ level:"warn", event:"admin_login_rate_limited", source:"failed_attempt_lockout" }));
@@ -1503,6 +1506,7 @@ async function handleAdminLogin(request, env) {
     }
 
     let body;
+    stage = "parse_login_body";
     try {
       body = await request.json();
     } catch {
@@ -1510,6 +1514,7 @@ async function handleAdminLogin(request, env) {
     }
     const password = typeof body?.password === "string" ? body.password : "";
     if (password.length > 1024 || !constantTimeEqual(password, String(env.ADMIN_WEB_PASSWORD))) {
+      stage = "d1_record_failure";
       const failure = await recordAdminLoginFailure(env, clientKey, now);
       const blockedUntil = Number(failure?.blocked_until_ms || 0);
       if (blockedUntil > now) {
@@ -1519,12 +1524,16 @@ async function handleAdminLogin(request, env) {
       return json({ ok:false, error:"Kredensial tidak valid." }, 401);
     }
 
+    stage = "d1_clear_failures";
     await clearAdminLoginFailures(env, clientKey);
+    stage = "create_admin_session";
     return json({ ok:true, token:await createWebAdminSessionToken(env), expires_in:28800 });
-  } catch {
+  } catch (error) {
     console.error(JSON.stringify({
       level:"error",
       event:"admin_login_security_dependency",
+      stage,
+      error_name: error instanceof Error ? error.name : "UnknownError",
       message:"Login security dependency unavailable"
     }));
     return json({ ok:false, error:"Login sementara tidak tersedia." }, 503);
