@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seiton-site-admin",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-04",
+  "workers_dev": false,
+  "services": [
+    {
+      "binding": "ORDER_BACKEND",
+      "service": "seiton-order-bot",
+      "environment": "production"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "SITE_DB",
+      "database_name": "seiton-site-content-prod",
+      "database_id": "2ccef282-fb8b-4ea6-b71d-b74a5b43ee95"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": false
+    }
+  }
+}
