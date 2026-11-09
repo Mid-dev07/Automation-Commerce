@@ -25,7 +25,8 @@ import {
 } from "./messaging-core.mjs";
 import {
   MAX_PRODUCT_IMAGE_BYTES, isProductMediaKey, productMediaPublicUrl,
-  storeProductImage, deleteProductMediaObject, serveProductMedia
+  storeProductImage, deleteProductMediaObject, serveProductMedia,
+  uploadThenPersistProductImage
 } from "./product-media.mjs";
 export { OrderCoordinator };
 /**
@@ -607,8 +608,15 @@ async function saveCatalogProduct(env, product, originalSku = "") {
         }));
       }
     }
-    const stored = await findProductTransactional(env,sku);
-    await mirrorTransactionalProduct(env,stored);
+    try {
+      const stored = await findProductTransactional(env,sku);
+      await mirrorTransactionalProduct(env,stored);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        level:"warn",event:"product_media_post_commit_mirror_failed",
+        sku,message:String(error?.message||error).slice(0,240)
+      }));
+    }
     return result;
   }
 
@@ -1839,22 +1847,12 @@ async function handleAdminProductPhotoUpload(request, env) {
     };
     const originalSku = String(form.get("original_sku") || "").trim();
     const bytes = new Uint8Array(await image.arrayBuffer());
-    uploaded = await storeProductImage(env.PRODUCT_MEDIA,bytes,image.type || "","admin");
-    let result;
-    try {
-      result = await saveCatalogProduct(
-        env,{...product,photo_url:uploaded.key},originalSku
-      );
-    } catch (error) {
-      try { await deleteProductMediaObject(env.PRODUCT_MEDIA,uploaded.key); }
-      catch (cleanupError) {
-        console.warn(JSON.stringify({
-          level:"warn",event:"product_media_failed_save_cleanup",
-          key:uploaded.key,message:String(cleanupError?.message||cleanupError).slice(0,240)
-        }));
-      }
-      throw error;
-    }
+    const persisted = await uploadThenPersistProductImage(
+      env.PRODUCT_MEDIA,bytes,image.type || "","admin",
+      key => saveCatalogProduct(env,{...product,photo_url:key},originalSku)
+    );
+    uploaded = persisted.uploaded;
+    const result = persisted.result;
     await recordAdminActivity(env, {
       actorChannel:"web",actorId:"web-admin",
       action:"PRODUCT_IMAGE_UPDATED",resourceType:"product",resourceId:product.sku,
@@ -1962,26 +1960,16 @@ async function handleTelegramProductPhotoUpload(env,message,chatId,actorId,promp
   const product = await findProductTransactional(env,sku);
   if (!product) throw new Error("Produk tidak ditemukan.");
   const file = await downloadTelegramProductImage(env,message);
-  const uploaded = await storeProductImage(
-    env.PRODUCT_MEDIA,file.bytes,file.declaredMime,"telegram"
-  );
-  let result;
-  try {
-    result = await saveCatalogProduct(env,{
+  const persisted = await uploadThenPersistProductImage(
+    env.PRODUCT_MEDIA,file.bytes,file.declaredMime,"telegram",
+    key => saveCatalogProduct(env,{
       sku:product.sku,name:product.name,price:product.price,
       stock:product.stock,active:Boolean(product.active),
-      photo_url:uploaded.key,description:product.description || ""
-    },product.sku);
-  } catch(error) {
-    try { await deleteProductMediaObject(env.PRODUCT_MEDIA,uploaded.key); }
-    catch(cleanupError) {
-      console.warn(JSON.stringify({
-        level:"warn",event:"telegram_product_media_failed_save_cleanup",
-        key:uploaded.key,message:String(cleanupError?.message||cleanupError).slice(0,240)
-      }));
-    }
-    throw error;
-  }
+      photo_url:key,description:product.description || ""
+    },product.sku)
+  );
+  const uploaded = persisted.uploaded;
+  const result = persisted.result;
   await recordAdminActivity(env,{
     actorId,action:"PRODUCT_IMAGE_UPDATED",resourceType:"product",
     resourceId:sku,summary:{sku,content_type:uploaded.contentType,size:uploaded.size}
