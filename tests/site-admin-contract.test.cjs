@@ -99,3 +99,13 @@ test("owner admin session revocation is propagated to bot D1 registry before loc
   assert.ok(worker.includes("revokeBackendWebSession(env,session.token,target.token_hash)"));
   assert.ok(worker.includes("revokeBackendWebSession(env,token,tokenHash)"));
 });
+
+test("owner admin revokes orphaned backend sessions when its local registry write fails", () => {
+  assert.ok(worker.includes("owner_admin_orphan_session_revoke_failed"));
+  assert.ok(worker.includes("revokeBackendWebSession(env,result.token,tokenHash)"));
+});
+
+test("owner admin reconciles locally registered sessions after backend invalidation", () => {
+  assert.ok(worker.includes('reason:"backend_session_invalid"'));
+  assert.ok(worker.includes("UPDATE site_admin_sessions SET revoked_at_ms=? WHERE session_id=? AND revoked_at_ms IS NULL"));
+});
