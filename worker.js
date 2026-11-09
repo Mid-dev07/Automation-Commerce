@@ -698,14 +698,16 @@ async function saveCatalogProduct(env, product, originalSku = "") {
         }));
       }
     }
-    try {
-      const stored = await findProductTransactional(env,sku);
-      await mirrorTransactionalProduct(env,stored);
-    } catch (error) {
-      console.warn(JSON.stringify({
-        level:"warn",event:"product_media_post_commit_mirror_failed",
-        sku,message:String(error?.message||error).slice(0,240)
-      }));
+    if (env.APP_ENV !== "preview") {
+      try {
+        const stored = await findProductTransactional(env,sku);
+        await mirrorTransactionalProduct(env,stored);
+      } catch (error) {
+        console.warn(JSON.stringify({
+          level:"warn",event:"product_media_post_commit_mirror_failed",
+          sku,message:String(error?.message||error).slice(0,240)
+        }));
+      }
     }
     return result;
   }
@@ -738,8 +740,10 @@ async function deleteCatalogProduct(env, sku) {
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1 terlebih dahulu.");
   if (state.ready) {
     const result = await deleteProductTransactional(env,normalizedSku);
-    const stored = await findProductTransactional(env,normalizedSku);
-    await mirrorTransactionalProduct(env,stored);
+    if (env.APP_ENV !== "preview") {
+      const stored = await findProductTransactional(env,normalizedSku);
+      await mirrorTransactionalProduct(env,stored);
+    }
     return result;
   }
   const rows = await readCatalogRows(env);
@@ -2128,7 +2132,8 @@ async function handleAdminProductMutation(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
   let body; try { body=await request.json(); } catch { return json({ok:false,error:"Data produk tidak valid."},400); }
   try {
-    await ensureCatalogHeaders(env);
+    // Isolated Preview uses D1/R2 only; never read or write the Production Google Sheet.
+    if (env.APP_ENV !== "preview") await ensureCatalogHeaders(env);
     if (body.action === "delete") {
       const result = await deleteCatalogProduct(env, body.sku);
       await recordAdminActivity(env, { actorChannel: "web", actorId: "web-admin", action: "PRODUCT_DELETED", resourceType: "product", resourceId: result.sku, summary: { sku: result.sku } });
