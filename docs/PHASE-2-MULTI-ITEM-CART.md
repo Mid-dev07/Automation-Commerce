@@ -70,10 +70,10 @@ This keeps the customer-facing catalog, add-to-cart validation, and checkout pri
 
 GitHub Actions validation on the Phase 2 head completed successfully:
 
-- Worker audit (Node.js 22): syntax and regression suite passed on the preceding Phase 2 commit.
-- Cart regression workflow (Node.js 24.22.2): `node --check` for `worker.js`, `transaction-layer.js`, `cart-layer.mjs`, and `messaging-core.mjs` passed.
-- Cart regression workflow: `node --test tests/*.test.cjs` — 72 passed, 0 failed.
+- Cart regression workflow (Node.js 24.22.2): syntax checks for `worker.js`, `transaction-layer.js`, `cart-layer.mjs`, and `messaging-core.mjs` passed.
+- Cart regression workflow: `node --test tests/*.test.cjs` — 73 passed, 0 failed.
 - Messaging Core workflow: `node --test tests/messaging-core.test.mjs` — 26 passed, 0 failed.
+- The Worker audit workflow also passed on an earlier Phase 2 head before the final D1-backed catalog-read adjustment; the latest full test count above includes the final adjustment under Node.js 24.22.2.
 
 SQLite tests use an in-memory database, checked-in migrations, fake product rows, and a local transaction adapter. They cover successful multi-item checkout, insufficient stock rollback, duplicate checkout, concurrent checkouts for the final unit, exactly-once cancellation stock release, legacy single-SKU inventory, and invalid/safe-money inputs.
 
