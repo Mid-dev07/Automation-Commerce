@@ -84,8 +84,11 @@ test("owner admin inline dashboard JavaScript parses", () => {
   const end=worker.indexOf("export default",start);
   assert.ok(start>=0&&end>start);
   const pageFn=worker.slice(start,end);
-  const html=vm.runInNewContext(pageFn+"\\npage();");
-  const script=html.match(/<script>\\s*([\\s\\S]*?)\\s*<\\/script>/);
+  const html=vm.runInNewContext(pageFn+"\npage();");
+  const scriptStart=html.indexOf("<script>");
+  const scriptEnd=html.indexOf("</script>",scriptStart);
+  assert.ok(scriptStart>=0&&scriptEnd>scriptStart);
+  const inlineScript=html.slice(scriptStart+8,scriptEnd);
   assert.ok(script);
-  new vm.Script(script[1],{filename:"site-admin-inline.js"});
+  new vm.Script(inlineScript,{filename:"site-admin-inline.js"});
 });
