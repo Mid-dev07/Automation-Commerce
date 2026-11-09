@@ -179,6 +179,11 @@ export default {
     } catch {
       console.warn(JSON.stringify({ level:"warn", event:"admin_login_attempt_cleanup_failed" }));
     }
+    try {
+      await pruneAdminWebSessions(env);
+    } catch {
+      console.warn(JSON.stringify({ level:"warn", event:"admin_web_session_cleanup_failed" }));
+    }
     if (await messagingCoreReady(env)) {
       const messaging = await dispatchTelegramMessagingOutbox(env, 20);
       if (messaging.claimed) {
@@ -1340,6 +1345,14 @@ async function createDashboardAccessToken(env, chatId) {
     "HMAC", key, new TextEncoder().encode("SEITON_ADMIN_DASHBOARD_V1." + payload)
   );
   return payload + "." + base64urlBytes(new Uint8Array(signature));
+}
+async function pruneAdminWebSessions(env) {
+  if (!env.DB) return;
+  const now = Date.now();
+  const cutoff = now - 30 * 24 * 60 * 60 * 1000;
+  await env.DB.prepare(
+    "DELETE FROM admin_web_sessions WHERE expires_at_ms <= ? OR (revoked_at_ms IS NOT NULL AND revoked_at_ms < ?)"
+  ).bind(now, cutoff).run();
 }
 async function adminWebSessionTokenHash(token) {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("site-owner-session:" + String(token)));
