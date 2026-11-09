@@ -18,6 +18,22 @@ function dateStamp(value) {
 function clean(value, max = 500) {
   return String(value ?? "").trim().slice(0, max);
 }
+function adminActivityAuditStatement(db, actor, action, resourceId, summary, at, sourceKey) {
+  const actorValue = clean(actor, 128);
+  const actorChannel = actorValue.startsWith("telegram") ? "telegram" : "web";
+  const actorId = actorValue.startsWith("telegram:") ? actorValue.slice("telegram:".length) : actorValue;
+  const createdAtMs = Date.parse(at);
+  if (!actorId || !Number.isFinite(createdAtMs)) return null;
+  return db.prepare(
+    "INSERT INTO admin_activity_audit(audit_id,actor_channel,actor_id,action,resource_type,resource_id,summary_json,created_at_ms) " +
+    "SELECT ?,?,?,?,?,?,?,? WHERE EXISTS (" +
+      "SELECT 1 FROM order_events WHERE order_id=? AND event_type=? AND source_key=?" +
+    ")"
+  ).bind(
+    crypto.randomUUID(), actorChannel, actorId, action, "order", String(resourceId),
+    JSON.stringify(summary || {}), createdAtMs, String(resourceId), action, sourceKey
+  );
+}
 function asSafeMoney(value, label) {
   const n = Number(value);
   if (!Number.isSafeInteger(n) || n < 0) throw new Error(label + " tidak valid.");
@@ -309,6 +325,7 @@ async function approvePaymentD1(db,id,actor="admin") {
     return { ...o, alreadyApproved: true };
   }
   const at=nowJakarta(), code="SEI-"+dateStamp(at)+"-"+crypto.randomUUID().slice(0,6).toUpperCase();
+  const sourceKey = "approve:" + code;
   const results=await db.batch([
     db.prepare(`UPDATE orders SET status='DIBAYAR',payment_confirmation_status='DISETUJUI',
       payment_confirmed_at=?,receipt_code=?,pickup_status='BELUM_DIAMBIL',updated_at=?
@@ -316,9 +333,10 @@ async function approvePaymentD1(db,id,actor="admin") {
         AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')`).bind(at,code,at,id),
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'PAYMENT_APPROVED',?,'DIBAYAR',?,?, '{}',? FROM orders
-      WHERE order_id=? AND receipt_code=?`).bind(o.status,clean(actor,128),"approve:"+code,at,id,code),
+      WHERE order_id=? AND receipt_code=?`).bind(o.status,clean(actor,128),sourceKey,at,id,code),
+    adminActivityAuditStatement(db,actor,"PAYMENT_APPROVED",id,{from_status:String(o.status||""),to_status:"DIBAYAR",transition_type:"order_status"},at,sourceKey),
     sheetMirrorStatement(db,id,at)
-  ]);
+  ].filter(Boolean));
   checkChanges(results[0],"Permintaan pembayaran sudah diproses atau status pesanan tidak memenuhi syarat.");
   return getOrderD1(db,id);
 }
@@ -327,6 +345,7 @@ async function rejectPaymentD1(db,id,actor="admin") {
   const o=await getOrderD1(db,id);
   if(!o)throw new Error("Pesanan tidak ditemukan.");
   const at=nowJakarta();
+  const sourceKey = "reject:" + at;
   const results=await db.batch([
     db.prepare(`UPDATE orders SET payment_confirmation_status='DITOLAK',updated_at=?
       WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI'
@@ -334,9 +353,10 @@ async function rejectPaymentD1(db,id,actor="admin") {
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'PAYMENT_REJECTED','MENUNGGU_VERIFIKASI','DITOLAK',?,?, '{}',?
       FROM orders WHERE order_id=? AND payment_confirmation_status='DITOLAK' AND updated_at=?`)
-      .bind(clean(actor,128),"reject:"+at,at,id,at),
+      .bind(clean(actor,128),sourceKey,at,id,at),
+    adminActivityAuditStatement(db,actor,"PAYMENT_REJECTED",id,{from_status:"MENUNGGU_VERIFIKASI",to_status:"DITOLAK",transition_type:"payment_confirmation"},at,sourceKey),
     sheetMirrorStatement(db,id,at)
-  ]);
+  ].filter(Boolean));
   checkChanges(results[0],"Permintaan pembayaran sudah diproses.");
   return getOrderD1(db,id);
 }
@@ -348,6 +368,7 @@ async function setOrderStatusD1(db,id,status,actor="admin") {
   if (CANCELLED_STATUSES.has(current)) {
     throw new Error("Pesanan yang sudah dibatalkan tidak dapat dibuka kembali. Buat pesanan baru.");
   }
+  if (current === String(status).toUpperCase()) return { ...o, noStatusChange: true };
   const progress = ["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DITOLAK","DIBAYAR","DIPROSES","DIKIRIM","SELESAI"];
   const currentRank = progress.indexOf(current);
   const nextRank = progress.indexOf(String(status).toUpperCase());
@@ -375,18 +396,25 @@ async function setOrderStatusD1(db,id,status,actor="admin") {
       WHERE order_id=? AND status='DIBATALKAN' AND stock_reserved=1
         AND EXISTS(SELECT 1 FROM inventory_movements WHERE order_id=? AND movement_type='RELEASE')`).bind(at,id,id));
   }
+  const sourceKey = "status:" + crypto.randomUUID();
   stmts.push(db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
     SELECT order_id,'STATUS_CHANGED',?,?,?,?,?,? FROM orders
     WHERE order_id=? AND status=? AND updated_at=?`)
-    .bind(o.status,status,clean(actor,128),"status:"+crypto.randomUUID(),"{}",at,id,status,at));
+    .bind(o.status,status,clean(actor,128),sourceKey,"{}",at,id,status,at));
+  stmts.push(adminActivityAuditStatement(db,actor,"STATUS_CHANGED",id,{
+    from_status:String(o.status||""),to_status:String(status).toUpperCase(),transition_type:"order_status"
+  },at,sourceKey));
   stmts.push(sheetMirrorStatement(db,id,at));
-  const results=await db.batch(stmts);
+  const results=await db.batch(stmts.filter(Boolean));
   checkChanges(results[0],"Status pesanan berubah di proses lain. Muat ulang data terlebih dahulu.");
   return getOrderD1(db,id);
 }
 async function markPickedUpD1(db,id,actor="admin") {
   await requireReady(db);
+  const before = await getOrderD1(db,id);
+  if (!before) throw new Error("Pesanan tidak ditemukan.");
   const at=nowJakarta();
+  const sourceKey = "pickup:" + at;
   const results=await db.batch([
     db.prepare(`UPDATE orders SET status='SELESAI',pickup_status='DIAMBIL',updated_at=?
       WHERE order_id=? AND payment_confirmation_status='DISETUJUI'
@@ -394,10 +422,13 @@ async function markPickedUpD1(db,id,actor="admin") {
         AND status IN ('DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED')
         AND pickup_status<>'DIAMBIL'`).bind(at,id),
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
-      SELECT order_id,'PICKED_UP',status,'SELESAI',?,?, '{}',? FROM orders
-      WHERE order_id=? AND pickup_status='DIAMBIL' AND updated_at=?`).bind(clean(actor,128),"pickup:"+at,at,id,at),
+      SELECT order_id,'PICKED_UP',?,'SELESAI',?,?, '{}',? FROM orders
+      WHERE order_id=? AND pickup_status='DIAMBIL' AND updated_at=?`).bind(String(before.status||""),clean(actor,128),sourceKey,at,id,at),
+    adminActivityAuditStatement(db,actor,"PICKED_UP",id,{
+      from_status:String(before.status||""),to_status:"SELESAI",pickup_status:"DIAMBIL",transition_type:"order_status"
+    },at,sourceKey),
     sheetMirrorStatement(db,id,at)
-  ]);
+  ].filter(Boolean));
   checkChanges(results[0],"Resi tidak valid, pembayaran belum disetujui, atau pesanan sudah diambil.");
   return getOrderD1(db,id);
 }
