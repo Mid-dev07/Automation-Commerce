@@ -62,5 +62,43 @@
         "period": 60
       }
     }
-  ]
+  ],
+  "previews": {
+    "vars": {
+      "APP_ENV": "preview"
+    },
+    "d1_databases": [
+      {
+        "binding": "DB",
+        "database_name": "seiton-preview-transactions-20261109",
+        "database_id": "c98e9147-8a53-4fb1-bee2-d33e966baeb7"
+      }
+    ],
+    "r2_buckets": [
+      {
+        "binding": "PRODUCT_MEDIA",
+        "bucket_name": "seiton-preview-product-media-20261109"
+      }
+    ],
+    "durable_objects": {
+      "bindings": [
+        {
+          "name": "ORDER_COORDINATOR",
+          "class_name": "OrderCoordinator"
+        }
+      ]
+    },
+    "observability": {
+      "enabled": true,
+      "redact_query_string": true,
+      "logs": {
+        "enabled": true,
+        "invocation_logs": true,
+        "head_sampling_rate": 1
+      },
+      "traces": {
+        "enabled": false
+      }
+    }
+  }
 }
