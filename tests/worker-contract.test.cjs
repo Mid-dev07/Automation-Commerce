@@ -200,3 +200,9 @@ test("web admin bearer tokens require an active D1 registry entry", () => {
   assert.match(worker, /handleAdminWebSessionRevoke/);
   assert.match(worker, /\\/api\\/admin\\/session\\/revoke/);
 });
+
+test("expired and long-revoked owner web sessions are pruned by the scheduled Worker", () => {
+  assert.match(worker, /async function pruneAdminWebSessions\(env\)/);
+  assert.match(worker, /DELETE FROM admin_web_sessions WHERE expires_at_ms <= \?/);
+  assert.match(worker, /admin_web_session_cleanup_failed/);
+});
