@@ -1803,6 +1803,198 @@ async function handleAdminPaymentAction(request, env) {
     return json({ok:false,error:"Aksi pembayaran tidak dikenal."},400);
   } catch(error) { return json({ok:false,error:error.message},400); }
 }
+async function handleAdminProductPhotoUpload(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) {
+    return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
+  }
+  const length = Number(request.headers.get("Content-Length") || 0);
+  if (length > MAX_PRODUCT_IMAGE_BYTES + 128 * 1024) {
+    return json({ok:false,error:"Ukuran gambar produk maksimal 5 MB."},413);
+  }
+  const state = await transactionReadiness(env);
+  if (!state.ready) {
+    return json({ok:false,error:"Upload foto R2 membutuhkan transaction store D1 berstatus READY."},503);
+  }
+  if (!env.PRODUCT_MEDIA) {
+    return json({ok:false,error:"Binding R2 PRODUCT_MEDIA belum tersedia."},503);
+  }
+  let uploaded = null;
+  try {
+    const form = await request.formData();
+    const image = form.get("image");
+    if (!image || typeof image.arrayBuffer !== "function" || !Number.isFinite(Number(image.size))) {
+      throw new Error("Pilih file gambar JPEG, PNG, atau WebP terlebih dahulu.");
+    }
+    if (Number(image.size) < 1 || Number(image.size) > MAX_PRODUCT_IMAGE_BYTES) {
+      throw new Error("Ukuran gambar produk maksimal 5 MB.");
+    }
+    const product = {
+      sku: String(form.get("sku") || "").trim(),
+      name: String(form.get("name") || "").trim(),
+      price: String(form.get("price") ?? "").trim(),
+      stock: String(form.get("stock") ?? "").trim(),
+      active: String(form.get("active") || "").toLowerCase() === "true",
+      description: String(form.get("description") || ""),
+      photo_url: ""
+    };
+    const originalSku = String(form.get("original_sku") || "").trim();
+    const bytes = new Uint8Array(await image.arrayBuffer());
+    uploaded = await storeProductImage(env.PRODUCT_MEDIA,bytes,image.type || "","admin");
+    let result;
+    try {
+      result = await saveCatalogProduct(
+        env,{...product,photo_url:uploaded.key},originalSku
+      );
+    } catch (error) {
+      try { await deleteProductMediaObject(env.PRODUCT_MEDIA,uploaded.key); }
+      catch (cleanupError) {
+        console.warn(JSON.stringify({
+          level:"warn",event:"product_media_failed_save_cleanup",
+          key:uploaded.key,message:String(cleanupError?.message||cleanupError).slice(0,240)
+        }));
+      }
+      throw error;
+    }
+    await recordAdminActivity(env, {
+      actorChannel:"web",actorId:"web-admin",
+      action:"PRODUCT_IMAGE_UPDATED",resourceType:"product",resourceId:product.sku,
+      summary:{sku:product.sku,content_type:uploaded.contentType,size:uploaded.size}
+    }).catch(error => console.warn(JSON.stringify({
+      level:"warn",event:"product_media_audit_failed",
+      message:String(error?.message||error).slice(0,200)
+    })));
+    return json({
+      ok:true,sku:product.sku,action:result,
+      photo_url:productMediaPublicUrl(uploaded.key,new URL(request.url).origin)
+    });
+  } catch(error) {
+    const status = /maksimal 5 MB|Ukuran gambar/i.test(error.message) ? 413 : 400;
+    return json({ok:false,error:error.message},status);
+  }
+}
+
+function telegramProductImageDescriptor(message) {
+  if (Array.isArray(message.photo) && message.photo.length) {
+    const photo = message.photo[message.photo.length - 1];
+    return {
+      fileId:String(photo.file_id || ""),
+      size:Number(photo.file_size || 0),
+      declaredMime:""
+    };
+  }
+  if (message.document?.file_id) {
+    const mime = String(message.document.mime_type || "").toLowerCase().split(";")[0].trim();
+    if (mime && !["image/jpeg","image/png","image/webp","application/octet-stream"].includes(mime)) {
+      throw new Error("Dokumen foto harus berupa JPEG, PNG, atau WebP.");
+    }
+    return {
+      fileId:String(message.document.file_id),
+      size:Number(message.document.file_size || 0),
+      declaredMime:mime.startsWith("image/") ? mime : ""
+    };
+  }
+  throw new Error("Kirim foto atau dokumen gambar JPEG, PNG, atau WebP.");
+}
+
+async function downloadTelegramProductImage(env,message) {
+  const descriptor = telegramProductImageDescriptor(message);
+  if (!descriptor.fileId) throw new Error("Telegram tidak memberikan identitas file gambar.");
+  if (descriptor.size > MAX_PRODUCT_IMAGE_BYTES) {
+    throw new Error("Ukuran gambar produk maksimal 5 MB.");
+  }
+  const metadataResponse = await fetch(
+    TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/getFile?file_id=" +
+    encodeURIComponent(descriptor.fileId)
+  );
+  const metadata = await metadataResponse.json().catch(()=>({}));
+  if (!metadataResponse.ok || !metadata.ok || !metadata.result?.file_path) {
+    throw new Error("Telegram tidak dapat menyiapkan file gambar produk.");
+  }
+  if (Number(metadata.result.file_size || 0) > MAX_PRODUCT_IMAGE_BYTES) {
+    throw new Error("Ukuran gambar produk maksimal 5 MB.");
+  }
+  const filePath = String(metadata.result.file_path);
+  const segments = filePath.split("/");
+  if (!filePath || filePath.startsWith("/") ||
+      segments.some(part => !part || part === "." || part === "..")) {
+    throw new Error("Lokasi file Telegram tidak valid.");
+  }
+  const encodedPath = segments.map(encodeURIComponent).join("/");
+  const fileResponse = await fetch(
+    "https://api.telegram.org/file/bot" + env.TELEGRAM_TOKEN + "/" + encodedPath
+  );
+  if (!fileResponse.ok) throw new Error("Gagal mengambil foto produk dari Telegram.");
+  const remoteLength = Number(fileResponse.headers.get("Content-Length") || 0);
+  if (remoteLength > MAX_PRODUCT_IMAGE_BYTES) throw new Error("Ukuran gambar produk maksimal 5 MB.");
+  const bytes = new Uint8Array(await fileResponse.arrayBuffer());
+  if (bytes.byteLength > MAX_PRODUCT_IMAGE_BYTES) throw new Error("Ukuran gambar produk maksimal 5 MB.");
+  const responseType = String(fileResponse.headers.get("Content-Type") || "")
+    .split(";")[0].trim().toLowerCase();
+  const declaredMime = descriptor.declaredMime || (
+    ["image/jpeg","image/png","image/webp"].includes(responseType) ? responseType : ""
+  );
+  return {bytes,declaredMime};
+}
+
+async function promptAdminProductPhoto(env,chatId,sku) {
+  const product = await findProductTransactional(env,sku);
+  if (!product) throw new Error("Produk tidak ditemukan.");
+  const text = [
+    "📷 UPLOAD FOTO PRODUK SEITON",
+    "SKU=" + String(product.sku),
+    "",
+    "Balas pesan ini dengan foto atau dokumen JPEG, PNG, atau WebP.",
+    "Ukuran maksimal 5 MB. File akan diperiksa dari signature aslinya sebelum disimpan ke R2.",
+    "Foto lama baru diganti setelah foto baru berhasil disimpan dan data produk diperbarui."
+  ].join("\n");
+  await sendTelegram(env,chatId,text,{
+    force_reply:true,input_field_placeholder:"Lampirkan foto produk"
+  });
+}
+
+async function handleTelegramProductPhotoUpload(env,message,chatId,actorId,prompt) {
+  if (!env.PRODUCT_MEDIA) throw new Error("Binding R2 PRODUCT_MEDIA belum tersedia.");
+  const state = await transactionReadiness(env);
+  if (!state.ready) throw new Error("Upload foto produk membutuhkan transaction store D1 yang aktif.");
+  const match = String(prompt || "").match(/SKU=([A-Za-z0-9._-]{1,40})/);
+  if (!match) throw new Error("Instruksi upload foto tidak valid. Buka ulang katalog admin.");
+  const sku = match[1].toUpperCase();
+  const product = await findProductTransactional(env,sku);
+  if (!product) throw new Error("Produk tidak ditemukan.");
+  const file = await downloadTelegramProductImage(env,message);
+  const uploaded = await storeProductImage(
+    env.PRODUCT_MEDIA,file.bytes,file.declaredMime,"telegram"
+  );
+  let result;
+  try {
+    result = await saveCatalogProduct(env,{
+      sku:product.sku,name:product.name,price:product.price,
+      stock:product.stock,active:Boolean(product.active),
+      photo_url:uploaded.key,description:product.description || ""
+    },product.sku);
+  } catch(error) {
+    try { await deleteProductMediaObject(env.PRODUCT_MEDIA,uploaded.key); }
+    catch(cleanupError) {
+      console.warn(JSON.stringify({
+        level:"warn",event:"telegram_product_media_failed_save_cleanup",
+        key:uploaded.key,message:String(cleanupError?.message||cleanupError).slice(0,240)
+      }));
+    }
+    throw error;
+  }
+  await recordAdminActivity(env,{
+    actorId,action:"PRODUCT_IMAGE_UPDATED",resourceType:"product",
+    resourceId:sku,summary:{sku,content_type:uploaded.contentType,size:uploaded.size}
+  }).catch(error=>console.warn(JSON.stringify({
+    level:"warn",event:"telegram_product_media_audit_failed",
+    message:String(error?.message||error).slice(0,200)
+  })));
+  await sendTelegram(env,chatId,
+    "✅ Foto produk " + sku + " berhasil disimpan ke R2. Foto lama sudah diganti setelah data produk berhasil diperbarui.",
+    adminMenuKeyboard()
+  );
+}
+
 async function handleAdminProductMutation(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
   let body; try { body=await request.json(); } catch { return json({ok:false,error:"Data produk tidak valid."},400); }
