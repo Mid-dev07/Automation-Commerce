@@ -13,11 +13,10 @@ test("owner admin Worker parses", () => {
 });
 
 test("owner admin signs the per-client identity before service-binding login", () => {
-  assert.ok(worker.includes("async function signLoginClientId"));
-  assert.ok(worker.includes("SITE_ADMIN_LOGIN_SHARED_SECRET"));
-  assert.ok(worker.includes("X-Seiton-Login-Client"));
-  assert.ok(worker.includes("X-Seiton-Login-Signature"));
-  assert.ok(worker.includes("SEITON_SITE_ADMIN_LOGIN_V1."));
+  assert.ok(worker.includes('"CF-Connecting-IP":g.clientIp'));
+  assert.ok(worker.includes('"X-Real-IP":g.clientIp'));
+  assert.ok(worker.includes("async function loginGate"));
+  assert.ok(worker.includes("reason:\"CLIENT_IP_UNAVAILABLE\""));
 });
 
 test("owner admin does not merge missing client IPs into an unknown shared identity", () => {
