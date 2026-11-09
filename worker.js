@@ -1342,7 +1342,7 @@ async function createDashboardAccessToken(env, chatId) {
   return payload + "." + base64urlBytes(new Uint8Array(signature));
 }
 async function adminWebSessionTokenHash(token) {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(token)));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("site-owner-session:" + String(token)));
   return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, "0")).join("");
 }
 function webAdminPayloadFromRequest(request) {
