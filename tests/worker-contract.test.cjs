@@ -163,3 +163,29 @@ test("production observability captures logs, redacts query strings, and keeps t
   assert.equal(config.observability?.logs?.head_sampling_rate, 1);
   assert.equal(config.observability?.traces?.enabled, false);
 });
+
+
+test("admin login uses Cloudflare rate limiting and a per-client D1 lockout", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8"));
+  const limiter = config.ratelimits?.find(item => item.name === "ADMIN_LOGIN_RATE_LIMITER");
+  assert.ok(limiter, "admin login rate limiter binding exists");
+  assert.equal(limiter.simple?.limit, 10);
+  assert.equal(limiter.simple?.period, 60);
+
+  assert.match(worker, /ADMIN_LOGIN_RATE_LIMITER\.limit\(\{ key: clientKey \}\)/);
+  assert.match(worker, /CF-Connecting-IP/);
+  assert.match(worker, /SEITON_ADMIN_LOGIN_CLIENT_V1\./);
+  assert.match(worker, /crypto\.subtle\.sign\([\s\S]{0,100}HMAC/);
+  assert.match(worker, /ON CONFLICT\(client_key\) DO UPDATE/);
+  assert.match(worker, /ADMIN_LOGIN_MAX_FAILURES = 5/);
+  assert.match(worker, /ADMIN_LOGIN_FAILURE_WINDOW_MS = 15 \* 60 \* 1000/);
+  assert.match(worker, /ADMIN_LOGIN_LOCKOUT_MS = 15 \* 60 \* 1000/);
+  assert.match(worker, /Retry-After/);
+  assert.match(worker, /DELETE FROM admin_login_attempts WHERE client_key = \?/);
+
+  const migration = fs.readFileSync(path.join(root, "migrations", "0007_admin_login_security.sql"), "utf8");
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS admin_login_attempts/);
+  assert.match(migration, /client_key TEXT PRIMARY KEY/);
+  assert.match(migration, /updated_at_ms INTEGER NOT NULL/);
+  assert.doesNotMatch(migration, /ip_address|client_ip/i);
+});
