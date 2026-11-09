@@ -53,7 +53,7 @@ export function inspectProductImage(value, declaredMime = "") {
   ) {
     extension = "webp";
   } else {
-    throw new Error("Signature gambar tidak valid. Gunakan JPEG, PNG, atau WebP.");
+    throw new Error("signature gambar tidak valid. Gunakan JPEG, PNG, atau WebP.");
   }
 
   const contentType = MIME_BY_EXTENSION[extension];
