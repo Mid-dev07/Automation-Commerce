@@ -105,6 +105,20 @@ export function parseMessagingCommand(rawText) {
   if (/^\/?(?:MENU|HELP|BANTUAN)(?:\s|$)/.test(normalized)) return { kind: "MENU" };
   if (/^\/?(?:KATALOG|PRODUK|CATALOG)(?:\s|$)/.test(normalized)) return { kind: "CATALOG" };
   if (/^\/?(?:PESANAN|ORDERS)(?:\s|$)/.test(normalized)) return { kind: "ORDERS" };
+  if (/^\/?(?:KERANJANG|CART)(?:\s|$)/.test(normalized)) return { kind: "CART_LIST" };
+  if (/^\/?(?:KOSONGKAN|CLEARCART)(?:\s|$)/.test(normalized)) return { kind: "CART_CLEAR" };
+  const cartAdd = normalized.match(/^\/?(?:TAMBAH|ADD)\s+([A-Z0-9._-]{1,40})\s+([1-9]\d{0,3})$/);
+  if (cartAdd && Number(cartAdd[2]) <= 1000) {
+    return { kind: "CART_ADD", sku: cartAdd[1], quantity: Number(cartAdd[2]) };
+  }
+  const cartUpdate = normalized.match(/^\/?(?:UBAH|UPDATE)\s+([A-Z0-9._-]{1,40})\s+([1-9]\d{0,3})$/);
+  if (cartUpdate && Number(cartUpdate[2]) <= 1000) {
+    return { kind: "CART_UPDATE", sku: cartUpdate[1], quantity: Number(cartUpdate[2]) };
+  }
+  const cartRemove = normalized.match(/^\/?(?:HAPUS|REMOVE)\s+([A-Z0-9._-]{1,40})$/);
+  if (cartRemove) return { kind: "CART_REMOVE", sku: cartRemove[1] };
+  const checkout = normalized.match(/^\/?CHECKOUT\s+(QRIS|TRANSFER|COD)$/);
+  if (checkout) return { kind: "CHECKOUT", paymentMethod: checkout[1] };
   if (/^\/?ADMIN(?:\s|$)/.test(normalized)) return { kind: "HANDOFF" };
 
   const statusMatch = normalized.match(/^STATUS\s+([A-Z0-9._-]{4,80})$/);
@@ -166,7 +180,7 @@ export async function routeMessagingCommand(event, command, mode, services) {
     actions.push(textAction([
       "✅ Layanan otomatis Seiton diaktifkan kembali.",
       "",
-      "Ketik KATALOG untuk melihat produk, PESANAN untuk melihat pesanan, atau BELI SKU JUMLAH QRIS untuk membuat pesanan."
+      "Ketik KATALOG untuk melihat produk, TAMBAH SKU JUMLAH untuk memasukkan produk ke keranjang, KERANJANG untuk melihat isi, lalu CHECKOUT QRIS/TRANSFER/COD untuk membayar. Perintah BELI SKU JUMLAH METODE tetap tersedia untuk pesanan satu produk."
     ].join("\\n"), {
       buttons: [
         { label: "🛍️ Lihat Katalog", value: "catalog" },
@@ -188,11 +202,17 @@ export async function routeMessagingCommand(event, command, mode, services) {
       "Ketik salah satu perintah:",
       "KATALOG — melihat produk dan harga",
       "PESANAN — melihat pesanan terakhir",
+      "TAMBAH SKU JUMLAH — menambahkan produk ke keranjang",
+      "KERANJANG — melihat isi keranjang",
+      "UBAH SKU JUMLAH — mengubah jumlah item",
+      "HAPUS SKU — menghapus item",
+      "KOSONGKAN — mengosongkan keranjang",
+      "CHECKOUT QRIS / TRANSFER / COD — membuat pesanan dari keranjang",
+      "BELI SKU JUMLAH METODE — pesanan satu produk (format lama)",
       "STATUS ID_PESANAN — memeriksa satu pesanan",
-      "BELI SKU JUMLAH METODE — membuat pesanan",
       "ADMIN — meminta bantuan admin",
       "",
-      "Contoh: BELI SEI-001 2 QRIS"
+      "Contoh: TAMBAH SEI-001 2 lalu CHECKOUT QRIS"
     ].join("\n")));
   } else if (command.kind === "CATALOG") {
     const products = await services.listProducts();
@@ -215,9 +235,89 @@ export async function routeMessagingCommand(event, command, mode, services) {
       });
       actions.push(textAction(
         "🛍️ KATALOG SEITON\n\n" + lines.join("\n\n") +
-        "\n\nUntuk memesan: BELI SKU JUMLAH QRIS / TRANSFER / COD"
+        "\n\nUntuk keranjang: TAMBAH SKU JUMLAH, lalu ketik KERANJANG dan CHECKOUT QRIS / TRANSFER / COD. Format BELI SKU JUMLAH METODE tetap tersedia."
       ));
     }
+  } else if (command.kind === "CART_LIST") {
+    const cart = await services.getCart();
+    if (!cart.length) {
+      actions.push(textAction("🛒 Keranjang Anda masih kosong. Ketik TAMBAH SKU JUMLAH untuk mulai berbelanja."));
+    } else {
+      const lines = cart.map(item => {
+        if (!item.available) {
+          return "⚠️ " + item.sku + " — " + item.name + " × " + item.quantity + " (tidak tersedia / stok berubah)";
+        }
+        return item.sku + " — " + item.name + " × " + item.quantity +
+          " = " + formatPrice(item.subtotal);
+      });
+      const total = cart.reduce((sum,item)=>sum+(Number(item.subtotal)||0),0);
+      const unavailable = cart.some(item=>!item.available);
+      actions.push(textAction([
+        "🛒 KERANJANG SEITON",
+        "",
+        ...lines,
+        "",
+        "Estimasi total produk: " + formatPrice(total),
+        unavailable ? "⚠️ Periksa item yang tidak tersedia sebelum checkout." :
+          "Ketik CHECKOUT QRIS, CHECKOUT TRANSFER, atau CHECKOUT COD untuk melanjutkan.",
+        "UBAH SKU JUMLAH · HAPUS SKU · KOSONGKAN"
+      ].join("\n")));
+    }
+  } else if (command.kind === "CART_ADD") {
+    await services.addCartItem(command.sku,command.quantity,event);
+    const cart = await services.getCart();
+    actions.push(textAction(
+      "✅ " + command.sku + " berhasil ditambahkan. Isi keranjang sekarang: " +
+      cart.length + " jenis produk. Ketik KERANJANG untuk melihat rinciannya."
+    ));
+  } else if (command.kind === "CART_UPDATE") {
+    await services.updateCartItem(command.sku,command.quantity,event);
+    actions.push(textAction(
+      "✅ Jumlah " + command.sku + " diperbarui menjadi " + command.quantity + ". Ketik KERANJANG untuk melihat total."
+    ));
+  } else if (command.kind === "CART_REMOVE") {
+    const result = await services.removeCartItem(command.sku,event);
+    actions.push(textAction(result.removed
+      ? "✅ " + command.sku + " dihapus dari keranjang."
+      : "ℹ️ " + command.sku + " tidak ditemukan di keranjang."
+    ));
+  } else if (command.kind === "CART_CLEAR") {
+    const result = await services.clearCart(event);
+    actions.push(textAction(result.cleared
+      ? "✅ Keranjang berhasil dikosongkan."
+      : "ℹ️ Keranjang memang sudah kosong."
+    ));
+  } else if (command.kind === "CHECKOUT") {
+    const order = await services.checkoutCart({
+      paymentMethod: command.paymentMethod,
+      channel: event.channel,
+      customerId: event.senderId,
+      customerName: event.customerName,
+      operationId: event.eventId
+    });
+    const itemLines = (order.items || []).map(item =>
+      "• " + item.name + " (" + item.sku + ") × " + item.quantity +
+      " — " + formatPrice(item.subtotal)
+    );
+    const paymentInstructions = services.getPaymentInstructions
+      ? services.getPaymentInstructions(order,event)
+      : "";
+    actions.push(textAction([
+      order.duplicate ? "ℹ️ CHECKOUT SUDAH TERCATAT" : "✅ PESANAN KERANJANG TERCATAT",
+      "ID: " + order.orderId,
+      "",
+      ...(itemLines.length ? itemLines : ["Detail item tersimpan di pesanan."]),
+      "",
+      "Jumlah item: " + order.quantity,
+      "Subtotal: " + formatPrice(order.subtotal),
+      "Ongkir: " + formatPrice(order.shipping),
+      "Total: " + formatPrice(order.total),
+      "Metode: " + order.paymentMethod,
+      "Status: " + order.status,
+      paymentInstructions
+    ].filter(Boolean).join("\n"), {
+      buttons: [{ label: "📦 Pesanan Saya", value: "orders" }]
+    }));
   } else if (command.kind === "ORDERS") {
     const orders = await services.listOrders(event.senderId, event.channel);
     const mine = (orders || []).slice(0, 5);
