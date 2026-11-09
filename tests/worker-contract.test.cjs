@@ -318,6 +318,21 @@ test("product images render through the Worker media route in Telegram and admin
   assert.match(worker, /\/api\/admin\/products\/photo/);
 });
 
+test("admin catalog removal uses an in-panel confirmation and accurately describes soft delete", () => {
+  const start=worker.indexOf("async function deleteProduct(sku)");
+  const end=worker.indexOf("async function changeStatus",start);
+  assert.ok(start >= 0 && end > start);
+  const handler=worker.slice(start,end);
+  assert.match(handler,/openModal\('Hapus dari katalog\?'/);
+  assert.match(handler,/id="cancelDelete"/);
+  assert.match(handler,/id="confirmDelete"/);
+  assert.match(handler,/tidak lagi ditampilkan kepada pelanggan/);
+  assert.match(handler,/Riwayat pesanan dan referensi stok tetap dipertahankan/);
+  assert.match(handler,/action:'delete'/);
+  assert.match(handler,/Produk berhasil dinonaktifkan/);
+  assert.doesNotMatch(handler,/confirm\(/);
+});
+
 test("R2 object keys are not copied into the Google Sheets catalog mirror", () => {
   const start=worker.indexOf("async function mirrorTransactionalProduct");
   const end=worker.indexOf("\n}\n",start);
