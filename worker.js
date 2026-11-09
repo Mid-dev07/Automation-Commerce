@@ -1384,39 +1384,6 @@ const ADMIN_LOGIN_LOCKOUT_MS = 15 * 60 * 1000;
 const ADMIN_LOGIN_MAX_FAILURES = 5;
 
 async function adminLoginClientKey(request, env) {
-  const forwardedClientKey = String(request.headers.get("X-Seiton-Login-Client") || "").trim();
-  const forwardedSignature = String(request.headers.get("X-Seiton-Login-Signature") || "").trim();
-
-  if (forwardedClientKey || forwardedSignature) {
-    if (
-      !/^[a-f0-9]{64}$/i.test(forwardedClientKey) ||
-      !/^[a-f0-9]{64}$/i.test(forwardedSignature) ||
-      !env.SITE_ADMIN_LOGIN_SHARED_SECRET
-    ) {
-      throw new Error("ADMIN_LOGIN_TRUSTED_CLIENT_INVALID");
-    }
-
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(env.SITE_ADMIN_LOGIN_SHARED_SECRET),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"]
-    );
-    const signatureBytes = Uint8Array.from(
-      forwardedSignature.match(/.{2}/g),
-      value => Number.parseInt(value, 16)
-    );
-    const valid = await crypto.subtle.verify(
-      "HMAC",
-      key,
-      signatureBytes,
-      new TextEncoder().encode("SEITON_SITE_ADMIN_LOGIN_V1." + forwardedClientKey)
-    );
-    if (!valid) throw new Error("ADMIN_LOGIN_TRUSTED_CLIENT_INVALID");
-    return forwardedClientKey;
-  }
-
   const clientIp = String(request.headers.get("CF-Connecting-IP") || "").trim();
   if (!clientIp || !env.TELEGRAM_WEBHOOK_SECRET) {
     throw new Error("ADMIN_LOGIN_CLIENT_ID_UNAVAILABLE");
