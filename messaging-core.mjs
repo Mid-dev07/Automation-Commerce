@@ -239,7 +239,7 @@ export async function routeMessagingCommand(event, command, mode, services) {
       ));
     }
   } else if (command.kind === "CART_LIST") {
-    const cart = await services.getCart();
+    const cart = await services.getCart(event.channel,event.senderId);
     if (!cart.length) {
       actions.push(textAction("🛒 Keranjang Anda masih kosong. Ketik TAMBAH SKU JUMLAH untuk mulai berbelanja."));
     } else {
