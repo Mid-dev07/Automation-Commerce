@@ -33,6 +33,16 @@ function newAuditStatement(env,{action,resource,summary,clientHash,now=Date.now(
   return env.SITE_DB.prepare("INSERT INTO site_admin_audit(audit_id,actor_id,action,resource,summary_json,client_hash,created_at_ms) VALUES(?,?,?,?,?,?,?)")
     .bind(crypto.randomUUID(),actor,action,resource,JSON.stringify(summary||{}),clientHash||null,now);
 }
+async function revokeBackendWebSession(env,currentToken,targetTokenHash){
+  if(!env.ORDER_BACKEND||!currentToken)throw new Error("Backend sesi tidak tersedia.");
+  const response=await env.ORDER_BACKEND.fetch(new Request("https://internal/api/admin/session/revoke",{
+    method:"POST",
+    headers:{"Authorization":"Bearer "+currentToken,"Content-Type":"application/json"},
+    body:JSON.stringify({token_hash:targetTokenHash})
+  }));
+  const result=await response.json().catch(()=>({}));
+  return {response,result};
+}
 function cookieHead(v,age){return COOKIE+"="+v+"; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age="+age;}
 async function digest(v){const d=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(v));return [...new Uint8Array(d)].map(x=>x.toString(16).padStart(2,"0")).join("");}
 async function loginGate(req,env){const clientIp=String(req.headers.get("CF-Connecting-IP")||"").trim();if(!clientIp)return {ok:false,id:"",reason:"CLIENT_IP_UNAVAILABLE"};const id=await digest("seiton-owner-panel:"+clientIp),now=Date.now();const r=await env.SITE_DB.prepare("SELECT attempts,window_started,blocked_until FROM site_login_attempts WHERE ip_hash=?").bind(id).first();if(r&&r.blocked_until>now)return {ok:false,id,reason:"LOCKED"};if(!r||now-r.window_started>900000)await env.SITE_DB.prepare("INSERT INTO site_login_attempts(ip_hash,attempts,window_started,blocked_until) VALUES(?,0,?,0) ON CONFLICT(ip_hash) DO UPDATE SET attempts=0,window_started=excluded.window_started,blocked_until=0").bind(id,now).run();return {ok:true,id,clientIp};}
@@ -177,6 +187,16 @@ if(u.pathname==="/api/logout"&&req.method==="POST"){
     const tokenHash=await digest("site-owner-session:"+token);
     const session=await env.SITE_DB.prepare("SELECT session_id,client_hash FROM site_admin_sessions WHERE token_hash=? AND revoked_at_ms IS NULL LIMIT 1").bind(tokenHash).first();
     if(session){
+      try{
+        const backend=await revokeBackendWebSession(env,token,tokenHash);
+        if(!backend.response.ok&&![401,404].includes(backend.response.status)){
+          console.error(JSON.stringify({event:"owner_admin_backend_logout_revoke_failed",status:backend.response.status}));
+          return secure(j({ok:false,error:"Sesi backend belum berhasil dicabut. Silakan coba kembali."},503));
+        }
+      }catch(e){
+        console.error(JSON.stringify({event:"owner_admin_backend_logout_revoke_failed",error:String(e&&e.message||e)}));
+        return secure(j({ok:false,error:"Sesi backend belum berhasil dicabut. Silakan coba kembali."},503));
+      }
       await env.SITE_DB.batch([
         env.SITE_DB.prepare("UPDATE site_admin_sessions SET revoked_at_ms=? WHERE session_id=? AND revoked_at_ms IS NULL").bind(now,session.session_id),
         newAuditStatement(env,{action:"SESSION_REVOKED",resource:"admin_session",summary:{session_id:session.session_id,reason:"logout"},clientHash:session.client_hash,now})
@@ -202,8 +222,18 @@ if(u.pathname==="/api/admin/sessions/revoke"&&req.method==="POST"){
   let body;try{body=await req.json()}catch{return secure(j({ok:false,error:"Format permintaan tidak valid."},400))}
   const targetId=String(body?.session_id||"").trim();
   if(!/^[0-9a-f-]{36}$/i.test(targetId))return secure(j({ok:false,error:"ID sesi tidak valid."},400));
-  const now=Date.now(),target=await env.SITE_DB.prepare("SELECT session_id,client_hash FROM site_admin_sessions WHERE session_id=? AND revoked_at_ms IS NULL AND expires_at_ms>? LIMIT 1").bind(targetId,now).first();
+  const now=Date.now(),target=await env.SITE_DB.prepare("SELECT session_id,token_hash,client_hash FROM site_admin_sessions WHERE session_id=? AND revoked_at_ms IS NULL AND expires_at_ms>? LIMIT 1").bind(targetId,now).first();
   if(!target)return secure(j({ok:false,error:"Sesi tidak ditemukan atau sudah dicabut."},404));
+  try{
+    const backend=await revokeBackendWebSession(env,session.token,target.token_hash);
+    if(!backend.response.ok&&backend.response.status!==404){
+      console.error(JSON.stringify({event:"owner_admin_backend_session_revoke_failed",status:backend.response.status}));
+      return secure(j({ok:false,error:"Sesi backend belum berhasil dicabut. Silakan coba kembali."},503));
+    }
+  }catch(e){
+    console.error(JSON.stringify({event:"owner_admin_backend_session_revoke_failed",error:String(e&&e.message||e)}));
+    return secure(j({ok:false,error:"Sesi backend belum berhasil dicabut. Silakan coba kembali."},503));
+  }
   await env.SITE_DB.batch([
     env.SITE_DB.prepare("UPDATE site_admin_sessions SET revoked_at_ms=? WHERE session_id=? AND revoked_at_ms IS NULL").bind(now,targetId),
     newAuditStatement(env,{action:"SESSION_REVOKED",resource:"admin_session",summary:{session_id:targetId,reason:"revoked_by_owner"},clientHash:session.client_hash,now})
