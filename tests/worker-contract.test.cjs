@@ -191,11 +191,12 @@ test("admin login uses Cloudflare rate limiting and a per-client D1 lockout", ()
 });
 
 test("web admin bearer tokens require an active D1 registry entry", () => {
-  assert.match(worker, /CREATE TABLE IF NOT EXISTS admin_web_sessions/);
-  assert.match(worker, /adminWebSessionTokenHash\(token\)/);
-  assert.match(worker, /FROM admin_web_sessions WHERE token_hash = \?/);
+  const migration = fs.readFileSync(path.join(root, "migrations", "0008_admin_web_sessions.sql"), "utf8");
+  assert.match(migration, /CREATE TABLE IF NOT EXISTS admin_web_sessions/);
+  assert.match(worker, /adminWebSessionTokenHash\\(token\\)/);
+  assert.match(worker, /FROM admin_web_sessions WHERE token_hash = \\?/);
   assert.match(worker, /revoked_at_ms/);
   assert.match(worker, /INSERT INTO admin_web_sessions/);
   assert.match(worker, /handleAdminWebSessionRevoke/);
-  assert.match(worker, /\/api\/admin\/session\/revoke/);
+  assert.match(worker, /\\/api\\/admin\\/session\\/revoke/);
 });
