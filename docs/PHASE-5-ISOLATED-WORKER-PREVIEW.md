@@ -1,7 +1,7 @@
 # Phase 5 — Isolated Worker Preview
 
 Date: 2026-11-09  
-Status: **Preview deployed and protected by Preview-only Cloudflare Access. Runtime app validation is pending one authenticated Access browser session.**
+Status: **Preview deployed and protected by Preview-only Cloudflare Access. Runtime health, admin session, dashboard, and catalog create/update smoke tests passed. Native-confirm delete UI test remains inconclusive; all synthetic rows were cleaned.**
 
 Latest successful GitHub Actions run before the docs-only status update: Worker/cart regression **93/93 passed**, Messaging Core **26/26 passed**. Preview URL opt-in is covered by a regression test.
 
@@ -75,53 +75,91 @@ No production Access application or production Access policy was added.
 
 ## 5. Preview deployment
 
-A Preview named `phase-5-isolated-preview` was created:
+A Preview named `phase-5-isolated-preview` is active:
 
 - Preview ID: `65581d90e03c42e286c033d07861e1b4`
-- Latest deployment number: `2`
-- Deployment ID: `213b28ea-c161-44e4-95d4-83d19d6a9eb2`
-- Source commit: `4f8787046741bbdcc94deedf0c9190ea3c1ace0b`
+- Latest deployment number: **4**
+- Latest deployment ID: `5e9333cd-4539-4b4c-8bf1-acfd4be5034a`
+- Source commit: `2883f78012bee8b36c0c4d2071f0a02e16d3a465`
 - Uploaded modules: `worker.js`, `transaction-layer.js`, `cart-layer.mjs`, `messaging-core.mjs`, `product-media.mjs`
 
-Stable Preview URLs (both protected by the `preview_worker` Access application):
+Stable Preview URLs:
 
 - `https://phase-5-isolated-preview.automate-bot.seiton.biz.id`
 - `https://phase-5-isolated-preview-seiton-order-bot.midzpribadi.workers.dev`
 
 Latest deployment URLs:
 
-- `https://213b28ea.automate-bot.seiton.biz.id`
-- `https://213b28ea-seiton-order-bot.midzpribadi.workers.dev`
+- `https://5e9333cd.automate-bot.seiton.biz.id`
+- `https://5e9333cd-seiton-order-bot.midzpribadi.workers.dev`
 
-The latest deployment's bindings were verified:
+Latest deployment bindings were re-checked after deployment #4:
 
 | Binding | Preview target |
 | --- | --- |
 | `DB` | Preview D1 `c98e9147-8a53-4fb1-bee2-d33e966baeb7` |
 | `PRODUCT_MEDIA` | Preview R2 `seiton-preview-product-media-20261109` |
-| `ORDER_COORDINATOR` | Preview-specific SQLite Durable Object namespace |
+| `ORDER_COORDINATOR` | Preview-specific SQLite Durable Object namespace `2bae989dc0364fef855fd80d3fc0cf4c` |
 | `ADMIN_LOGIN_RATE_LIMITER` | Preview-only namespace `2026110902` |
 | `APP_ENV` | `preview` |
 
-For admin login verification, `ADMIN_WEB_PASSWORD` and `TELEGRAM_WEBHOOK_SECRET` were explicitly overridden with fresh, Preview-only random secret values. Their values are not stored in Git or this document. No production secret values were copied into the Preview. No Telegram bot token, Google service-account key, Google Sheets identifier, or production admin chat ID is included.
+Both `ADMIN_WEB_PASSWORD` and `TELEGRAM_WEBHOOK_SECRET` remain attached as secret bindings. Deployment #4 was created using a JSON Merge Patch that changed the code modules and annotations only; omitted bindings were inherited from the latest Preview deployment. Secret values were not read, copied, or changed in this patch.
 
-The initial deployment number 1 was deleted after an audit found an unexpected secret binding in its returned metadata. Deployment number 2 is the only remaining deployment and has explicit Preview-only secret overrides.
+The Preview deployment does not contain `GOOGLE_SHEETS_ID`, `GOOGLE_SERVICE_ACCOUNT_KEY`, or `TELEGRAM_TOKEN`. Production secret values and Production resource bindings were not copied into this Preview.
+
+Deployment #1 was deleted after an audit found an unexpected secret binding in its metadata. Deployments #2 and #3 are earlier Preview revisions; deployment #4 is the latest active version.
 
 ## 6. Runtime validation status
 
-The first browser check opened `/health` and `/` on the stable Preview URL. Both were redirected to the Cloudflare Access login page before reaching the Worker application.
+The account owner completed the Cloudflare Access sign-in in a dedicated Browser Context Profile. Subsequent browser checks passed through the Preview-only Access application without presenting another Access login screen. The application admin session remained active across deployment #4.
 
-This verifies that Cloudflare Access intercepts and protects Preview requests. It does **not** yet verify the application-level `/health` response or render of the Seiton admin login UI, because the browser profile does not yet have an authenticated session for the Zero Trust Access login domain.
+### Health and dashboard
 
-Runtime checks still pending an authenticated Access browser session:
+- `GET /health` returned HTTP **200**.
+- Health JSON reported `ok: true`, service `seiton-order-bot`, and `transaction_store: READY`.
+- The root admin dashboard loaded and showed the expected navigation: Ringkasan, Pesanan, Verifikasi Pembayaran, Produk & Katalog, and Laporan.
+- Dashboard metrics loaded without visible errors. With an empty transaction database, verified revenue, orders, and pending verification were all zero.
 
-- `GET /health`
-- Render the root admin login page
-- Admin login/session flow using the Preview-only test credentials
-- D1-backed catalog/cart/checkout flow with synthetic data and cleanup
-- R2 product-media upload/read/delete with synthetic image bytes and cleanup
+### D1 initialization and isolation
 
-Telegram end-to-end messaging remains untested. No live Telegram token, live admin chat ID, Google service-account key, or production Sheets destination is configured.
+The repository migration files had created the schema, but the application readiness marker was initially absent. The normal `/migrasi_d1` Telegram command reads Google Sheets to import historical catalog/order data. That command was deliberately not run in Preview because doing so would require a Production Sheets credential and could import real Production data.
+
+Instead, Preview was initialized with an empty legacy import marker and `transaction_store_state=READY`. This did not import any Production rows. Two synthetic catalog fixtures were inserted only for the browser display test.
+
+After testing, all synthetic catalog fixtures and their pending catalog-mirror outbox rows were removed. Before cleanup, D1 was checked for references in `orders`, `order_items`, and `inventory_movements`; all counts were zero. Post-cleanup verification:
+
+| Preview D1 table/state | Count/value |
+| --- | ---: |
+| `catalog_products` | 0 |
+| `orders` | 0 |
+| `order_items` | 0 |
+| `inventory_movements` | 0 |
+| `app_meta.transaction_store_state` | `READY` |
+
+### Catalog CRUD smoke test
+
+Deployment #2 exposed a Preview-specific problem: the product mutation handler called `ensureCatalogHeaders()` and attempted a Google Sheets operation before saving to D1. Preview intentionally has no Production Google Sheets ID or service-account key.
+
+Commit `2883f78012bee8b36c0c4d2071f0a02e16d3a465` fixes that boundary:
+
+- `APP_ENV=preview` skips the Google Sheets catalog-header preflight.
+- Preview catalog save/delete paths skip Google Sheets mirroring.
+- Non-Preview behavior is unchanged.
+
+The fix was deployed as Preview deployment #4. Browser smoke tests then confirmed:
+
+- **Create:** synthetic SKU `PH5-CRUD-CHECK` was created successfully.
+- **Update:** its price changed from Rp 12.345 to Rp 12.346 and stock from 3 to 4 successfully.
+- **Delete:** the browser automation clicked the Hapus control but did not complete the native browser `confirm()` interaction. A D1 check showed the SKU remained active; therefore the delete endpoint was not confirmed by this test. The synthetic SKU and the two catalog fixtures were subsequently cleaned directly from the isolated Preview D1 after verifying that no order or inventory references existed.
+
+The implementation's current delete path is a **soft delete** (sets `active=0`) to preserve catalog references/history, rather than physically removing the row. The UI's native confirmation behavior and the soft-delete endpoint still need a dedicated interactive check in a normal browser.
+
+### Remaining untested areas
+
+- R2 product-photo upload/read/delete with synthetic image bytes.
+- Full cart/checkout/order lifecycle in Preview.
+- Telegram end-to-end messaging. No Telegram bot token is configured in Preview.
+- Production Google Sheets mirror behavior. It is intentionally not configured in Preview.
 
 ## 7. Regression coverage
 
@@ -139,14 +177,15 @@ GitHub Actions also runs the existing Worker/cart regression and Messaging Core 
 
 ## 8. Safety status
 
-- Only the dedicated Preview D1 and R2 resources were created for this phase.
-- A Preview-only Access application targets the exact `seiton-order-bot` Preview deployments.
-- Preview URLs are enabled for `seiton-order-bot` only after the Access policy was verified.
-- Only deployment number 2 remains; the initial deployment was deleted.
-- Eight D1 migrations and stock-flow smoke tests were performed against Preview D1 only.
+- Preview D1, Preview R2, and the Preview-specific Durable Object namespace are isolated from Production resources.
+- The Preview-only Cloudflare Access application targets the exact `seiton-order-bot` Preview.
+- Preview URLs are protected by the owner-only Access policy.
+- Preview D1 migrations were applied only to `seiton-preview-transactions-20261109`.
+- Preview was initialized with an empty legacy import; no Production catalog or order rows were imported.
+- Synthetic catalog fixtures and their catalog-mirror outbox rows were removed after testing. Preview D1 has zero catalog products, orders, order items, and inventory movements; readiness remains `READY`.
+- Preview catalog CRUD changes are guarded by `APP_ENV=preview`; Google Sheets preflight and mirroring are skipped only for Preview.
 - No Production Worker deployment or update was performed.
 - No Production D1 or R2 resource was modified.
 - No Production secret values were read or copied.
 - No Production bindings, routes, cron triggers, Sheets destination, bot token, or admin chat ID were changed.
-- `main` was not updated; the source is the approved Phase 3 feature branch.
-- Application runtime validation remains pending an authenticated Cloudflare Access browser session.
+- Work remains on `feat/phase-3-r2-product-media-2026-11-09`; no merge to `main` was performed.
