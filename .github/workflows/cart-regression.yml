@@ -31,6 +31,7 @@ jobs:
           node --check worker.js
           node --check transaction-layer.js
           node --check cart-layer.mjs
+          node --check product-media.mjs
           node --check messaging-core.mjs
       - name: Run SQLite and Worker contract regression tests
         run: node --test tests/*.test.cjs
