@@ -189,3 +189,13 @@ test("admin login uses Cloudflare rate limiting and a per-client D1 lockout", ()
   assert.match(migration, /updated_at_ms INTEGER NOT NULL/);
   assert.doesNotMatch(migration, /ip_address|client_ip/i);
 });
+
+
+test("admin login verifies signed owner-panel client identity for service bindings", () => {
+  assert.match(worker, /X-Seiton-Login-Client/);
+  assert.match(worker, /X-Seiton-Login-Signature/);
+  assert.match(worker, /SITE_ADMIN_LOGIN_SHARED_SECRET/);
+  assert.match(worker, /SEITON_SITE_ADMIN_LOGIN_V1\\./);
+  assert.match(worker, /crypto\\.subtle\\.verify/);
+  assert.match(worker, /ADMIN_LOGIN_TRUSTED_CLIENT_INVALID/);
+});
