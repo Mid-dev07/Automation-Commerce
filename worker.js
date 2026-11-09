@@ -23,6 +23,10 @@ import {
   declineMessagingHandoff,
   queueMessagingHandoffReply
 } from "./messaging-core.mjs";
+import {
+  MAX_PRODUCT_IMAGE_BYTES, isProductMediaKey, productMediaPublicUrl,
+  storeProductImage, deleteProductMediaObject, serveProductMedia
+} from "./product-media.mjs";
 export { OrderCoordinator };
 /**
  * ============================================================================
@@ -163,8 +167,9 @@ async function mirrorTransactionalProduct(env, product) {
     const range = "Katalog_Produk!A2:G";
     const rows = await readSheet(env, range);
     const index = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === String(product.sku).toUpperCase());
+    const photoForSheet = isProductMediaKey(product.photo_url) ? "" : (product.photo_url || "");
     const values = [[product.sku,product.name,product.price,product.stock == null ? "" : product.stock,
-      Boolean(product.active),product.photo_url || "",product.description || ""]];
+      Boolean(product.active),photoForSheet,product.description || ""]];
     if (index >= 0) await updateSheetRange(env,"Katalog_Produk!A"+(index+2)+":G"+(index+2),values);
     else await appendSheetRows(env,"Katalog_Produk!A:G",values);
     return true;
@@ -210,7 +215,14 @@ export default {
     if (request.method === "POST" && url.pathname === "/api/admin/login") return handleAdminLogin(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/session/revoke") return handleAdminWebSessionRevoke(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/payment") return handleAdminPaymentAction(request, env);
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname.startsWith("/media/")) {
+      let key;
+      try { key = decodeURIComponent(url.pathname.slice("/media/".length)); }
+      catch { return new Response("Not Found", { status: 404 }); }
+      return serveProductMedia(request,env.PRODUCT_MEDIA,key);
+    }
     if (request.method === "POST" && url.pathname === "/api/admin/products") return handleAdminProductMutation(request, env);
+    if (request.method === "POST" && url.pathname === "/api/admin/products/photo") return handleAdminProductPhotoUpload(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/order-status") return handleAdminOrderStatus(request, env);
     if (request.method === "GET" && url.pathname === "/api/admin/proof") return handleAdminPaymentProof(request, env);
     if (request.method === "GET" && url.pathname === "/api/admin/data") {
@@ -551,7 +563,7 @@ async function saveCatalogProduct(env, product, originalSku = "") {
   const priceText = product.price == null ? "" : String(product.price).trim();
   const stockText = product.stock == null ? "" : String(product.stock).trim();
   const price = Number(priceText), stock = stockText === "" ? null : Number(stockText);
-  const photo = String(product.photo_url || "").trim();
+  const photoInput = String(product.photo_url || "").trim();
   const description = String(product.description || "").trim();
 
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU hanya boleh berisi huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
@@ -561,13 +573,40 @@ async function saveCatalogProduct(env, product, originalSku = "") {
     throw new Error("Harga harus valid dan stok harus bilangan bulat nol atau lebih.");
   }
   if (typeof product.active !== "boolean") throw new Error("Status aktif harus boolean.");
-  if (photo && (!/^https:\/\//i.test(photo) || photo.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS.");
+  if (photoInput && !["__KEEP__", "__REMOVE__"].includes(photoInput) &&
+      !isProductMediaKey(photoInput) &&
+      (!/^https:\/\//i.test(photoInput) || photoInput.length > 1000)) {
+    throw new Error("Foto harus berupa URL HTTPS, key foto R2 yang valid, atau pilihan tetap/hapus.");
+  }
   if (description.length > 500) throw new Error("Deskripsi maksimal 500 karakter.");
 
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1 terlebih dahulu.");
   if (state.ready) {
-    const result = await saveProductTransactional(env,{sku,name,price,stock,active:product.active,photo_url:photo,description},originalSku);
+    const lookupSku = originalSku || sku;
+    const previous = await findProductTransactional(env,lookupSku);
+    const previousPhoto = String(previous?.photo_url || "");
+    const photo = photoInput === "__KEEP__"
+      ? previousPhoto
+      : photoInput === "__REMOVE__"
+        ? ""
+        : photoInput;
+    if (isProductMediaKey(photo) && !env.PRODUCT_MEDIA) {
+      throw new Error("Binding R2 PRODUCT_MEDIA belum tersedia.");
+    }
+    const result = await saveProductTransactional(env,{
+      sku,name,price,stock,active:product.active,photo_url:photo,description
+    },originalSku);
+    if (isProductMediaKey(previousPhoto) && previousPhoto !== photo) {
+      try {
+        await deleteProductMediaObject(env.PRODUCT_MEDIA,previousPhoto);
+      } catch (error) {
+        console.warn(JSON.stringify({
+          level:"warn",event:"product_media_old_object_cleanup_failed",
+          sku,message:String(error?.message||error).slice(0,240)
+        }));
+      }
+    }
     const stored = await findProductTransactional(env,sku);
     await mirrorTransactionalProduct(env,stored);
     return result;
@@ -582,6 +621,9 @@ async function saveCatalogProduct(env, product, originalSku = "") {
   if (editing && index < 0) throw new Error("Produk yang akan diedit tidak ditemukan.");
   if (!editing && index >= 0) throw new Error("SKU sudah digunakan. Gunakan SKU lain atau pilih Atur Produk.");
 
+  const previousPhoto = editing ? String(rows[index][5] || "") : "";
+  const photo = photoInput === "__KEEP__" ? previousPhoto : photoInput === "__REMOVE__" ? "" : photoInput;
+  if (isProductMediaKey(photo)) throw new Error("Upload foto R2 memerlukan lapisan transaksi D1 yang aktif.");
   const values = [[sku, name, price, stock, product.active, photo, description]];
   if (editing) {
     await updateSheetRange(env, "Katalog_Produk!A" + (index + 2) + ":G" + (index + 2), values);
@@ -1840,6 +1882,15 @@ async function handleAdminDashboardData(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ ok: false, error: "Akses dashboard tidak valid atau sudah kedaluwarsa. Buka kembali dari bot Telegram admin." }, 401);
   try {
     const data = await loadAdminDashboardData(env);
+    const origin = new URL(request.url).origin;
+    data.products = (data.products || []).map(product => {
+      const key = isProductMediaKey(product.photo_url);
+      return {
+        ...product,
+        photo_r2: key,
+        photo_url: key ? productMediaPublicUrl(product.photo_url,origin) : (product.photo_url || "")
+      };
+    });
     return json({ ok: true, ...data });
   } catch (error) {
     console.error(JSON.stringify({ level: "error", event: "dashboard_data", message: error.message }));
