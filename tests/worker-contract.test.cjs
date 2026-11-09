@@ -245,6 +245,12 @@ test("operational audit endpoint is authenticated and reads order events plus ad
   assert.match(worker, /FROM admin_activity_audit ORDER BY created_at_ms DESC LIMIT \?/);
 });
 
+test("Telegram catalog reads D1 source-of-truth when transaction storage is ready", () => {
+  assert.match(worker, /async listProducts\(\)[\s\S]{0,220}transactionReadiness\(env\)/);
+  assert.match(worker, /if \(state\.ready\) \{[\s\S]{0,180}listProductsTransactional\(env,true\)/);
+  assert.match(worker, /photoUrl: String\(product\.photo_url \|\| ""\)/);
+});
+
 test("Telegram Worker services are bound to persisted, customer-scoped cart operations", () => {
   const core = fs.readFileSync(path.join(root, "messaging-core.mjs"), "utf8");
   for (const name of [
