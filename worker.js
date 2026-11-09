@@ -1,5 +1,7 @@
 import {
   bootstrapTransactions, createOrderTransactional, transactionReadiness,
+  getCartTransactional, addCartItemTransactional, updateCartItemTransactional,
+  removeCartItemTransactional, clearCartTransactional, checkoutCartTransactional,
   findOrderTransactional, findOrderByLegacyRow, listOrdersTransactional,
   listProductsTransactional, findProductTransactional, saveProductTransactional,
   deleteProductTransactional, setLegacyRowTransactional, updateProofTransactional,
@@ -2371,6 +2373,30 @@ function parseOrderText(text) {
   };
 }
 
+async function checkoutCart(env,input) {
+  const state = await transactionReadiness(env);
+  if (!state.ready) {
+    throw new Error("Keranjang multi-produk membutuhkan lapisan transaksi D1 yang sudah aktif.");
+  }
+  const shipping = env.DEFAULT_SHIPPING == null || env.DEFAULT_SHIPPING === "" ? 0 : Number(env.DEFAULT_SHIPPING);
+  if (!Number.isSafeInteger(shipping) || shipping < 0) {
+    throw new Error("DEFAULT_SHIPPING harus berupa bilangan Rupiah nol atau lebih.");
+  }
+  const order = await checkoutCartTransactional(env,{...input,shipping});
+  if (!order.duplicate) {
+    try {
+      const stored = await findOrderTransactional(env,order.orderId);
+      await mirrorTransactionalOrder(env,stored);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        level:"warn",event:"cart_order_sheet_mirror_read",
+        order_id:order.orderId,message:error.message
+      }));
+    }
+  }
+  return order;
+}
+
 async function createOrder(env, input) {
   const transactionState = await transactionReadiness(env);
   if (transactionState.configured && !transactionState.ready) {
@@ -2913,6 +2939,34 @@ function createMessagingServices(env) {
         paymentMethod: String(row[11] || ""),
         status: String(row[12] || "")
       };
+    },
+    async getCart(channel,customerId) {
+      const state = await transactionReadiness(env);
+      if (!state.ready) throw new Error("Lapisan transaksi D1 belum aktif untuk keranjang.");
+      return getCartTransactional(env,channel,customerId);
+    },
+    async addCartItem(sku,quantity,event) {
+      return addCartItemTransactional(
+        env,event.channel,event.senderId,sku,quantity,event.eventId
+      );
+    },
+    async updateCartItem(sku,quantity,event) {
+      return updateCartItemTransactional(
+        env,event.channel,event.senderId,sku,quantity,event.eventId
+      );
+    },
+    async removeCartItem(sku,event) {
+      return removeCartItemTransactional(
+        env,event.channel,event.senderId,sku,event.eventId
+      );
+    },
+    async clearCart(event) {
+      return clearCartTransactional(
+        env,event.channel,event.senderId,event.eventId
+      );
+    },
+    async checkoutCart(input) {
+      return checkoutCart(env,input);
     },
     createOrder(input) {
       return createOrder(env, input);
