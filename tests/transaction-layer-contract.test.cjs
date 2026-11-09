@@ -210,3 +210,11 @@ test("legacy single-SKU checkout path remains active alongside cart checkout", (
   assert.match(layer, /getByName\("sku:"\+sku\)/);
   assert.match(layer, /inventory_movements\(order_id,sku,movement_type,quantity,created_at\)/);
 });
+
+test("D1 catalog accepts only generated R2 product media keys or HTTPS photo URLs", () => {
+  const match=layer.match(/const storedProductMediaKey = (.*);/);
+  assert.ok(match,"stored product media key validation exists");
+  assert.match(match[1], /products/);
+  assert.match(match[1], /UUID|[0-9a-f]/i);
+  assert.match(layer, /!storedProductMediaKey && !\/\^https:\\\/\\//);
+});
