@@ -10,9 +10,11 @@ on:
       - "migrations/**"
       - "tests/**"
       - "wrangler.jsonc"
+      - "wrangler.preview-migrations.jsonc"
       - "wrangler.toml"
       - "docs/PHASE-3-R2-PRODUCT-MEDIA.md"
       - "docs/PHASE-4-WRANGLER-CONSOLIDATION.md"
+      - "docs/PHASE-5-ISOLATED-WORKER-PREVIEW.md"
       - ".github/workflows/cart-regression.yml"
   workflow_dispatch:
 
