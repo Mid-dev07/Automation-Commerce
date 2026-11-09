@@ -1,0 +1,38 @@
+name: Cart regression checks
+
+on:
+  pull_request:
+    paths:
+      - "cart-layer.mjs"
+      - "transaction-layer.js"
+      - "worker.js"
+      - "messaging-core.mjs"
+      - "migrations/**"
+      - "tests/**"
+      - ".github/workflows/cart-regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cart-regression:
+    name: Cart, worker, and messaging regression
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check Worker and cart module syntax
+        run: |
+          node --check worker.js
+          node --check transaction-layer.js
+          node --check cart-layer.mjs
+          node --check messaging-core.mjs
+      - name: Run SQLite and Worker contract regression tests
+        run: node --test tests/*.test.cjs
+      - name: Run Messaging Core unit tests
+        run: node --test tests/messaging-core.test.mjs
