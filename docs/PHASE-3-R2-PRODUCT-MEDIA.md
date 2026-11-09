@@ -81,6 +81,12 @@ The product editor now accepts a JPEG/PNG/WebP file and posts multipart data to 
 
 ## 7. Tests and verification scope
 
+GitHub Actions on the current Phase 3 head completed successfully:
+
+- Worker/cart regression (Node.js 24.22.2): syntax checks for `worker.js`, `transaction-layer.js`, `cart-layer.mjs`, `messaging-core.mjs`, and `product-media.mjs` passed.
+- `node --test tests/*.test.cjs`: 90 passed, 0 failed.
+- `node --test tests/messaging-core.test.mjs`: 26 passed, 0 failed.
+
 The new `tests/product-media.test.cjs` covers:
 
 - JPEG, PNG, and WebP signature recognition.
