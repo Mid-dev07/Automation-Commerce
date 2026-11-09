@@ -864,6 +864,7 @@ export class OrderCoordinator extends DurableObject {
   async checkoutCart(input) {
     return this.enqueue(async()=>{
       const operationId=clean(input.operationId,180);
+      if(!operationId)throw new Error("Identitas checkout tidak valid.");
       const duplicateOperation=this.cartMutation(operationId);
       if(duplicateOperation)return {...duplicateOperation,duplicate:true};
       const rows=this.cartRows();
