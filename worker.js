@@ -981,8 +981,8 @@ async function handleTelegramCallback(env, query) {
     ] };
     await updateTelegramMessage(env, message, {
       text: productText,
-      photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
-      clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
+      photo: productMediaPublicUrl(p[5]) || null,
+      clearMedia: !productMediaPublicUrl(p[5]),
       replyMarkup: productKeyboard
     });
     return;
