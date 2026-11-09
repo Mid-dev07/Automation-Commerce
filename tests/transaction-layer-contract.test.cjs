@@ -87,7 +87,32 @@ test("Google Sheets is only a best-effort mirror after transactional checkout", 
 
 test("payment approval event records the actual previous status", () => {
   assert.match(layer, /SELECT order_id,'PAYMENT_APPROVED',\?,'DIBAYAR'/);
-  assert.match(layer, /\.bind\(o\.status,clean\(actor,128\),\"approve:\"\+code/);
+  assert.match(layer, /\.bind\(o\.status,clean\(actor,128\),sourceKey/);
+  assert.match(layer, /const sourceKey = \"approve:\" \+ code/);
+});
+
+test("order lifecycle transitions are atomically mirrored into the admin activity audit", () => {
+  assert.match(layer, /function adminActivityAuditStatement\(db, actor, action, resourceId, summary, at, sourceKey\)/);
+  assert.match(layer, /INSERT INTO admin_activity_audit\(audit_id,actor_channel,actor_id,action,resource_type,resource_id,summary_json,created_at_ms\)/);
+  assert.match(layer, /WHERE EXISTS \([\s\S]{0,180}FROM order_events WHERE order_id=\? AND event_type=\? AND source_key=\?/);
+
+  const cases = [
+    ["async function approvePaymentD1", "async function rejectPaymentD1", "PAYMENT_APPROVED"],
+    ["async function rejectPaymentD1", "async function setOrderStatusD1", "PAYMENT_REJECTED"],
+    ["async function setOrderStatusD1", "async function markPickedUpD1", "STATUS_CHANGED"],
+    ["async function markPickedUpD1", "export async function bootstrapTransactions", "PICKED_UP"]
+  ];
+  for (const [startMarker, endMarker, action] of cases) {
+    const start = layer.indexOf(startMarker);
+    const end = layer.indexOf(endMarker, start + startMarker.length);
+    assert.notEqual(start, -1, startMarker);
+    assert.notEqual(end, -1, endMarker);
+    assert.match(layer.slice(start, end), new RegExp("adminActivityAuditStatement\\(db,actor,\"" + action + "\""));
+  }
+
+  assert.match(layer, /if \(current === String\(status\)\.toUpperCase\(\)\) return \{ \.\.\.o, noStatusChange: true \}/);
+  assert.match(layer, /SELECT order_id,'PICKED_UP',\?,'SELESAI'/);
+  assert.match(layer, /String\(before\.status\|\|\"\"\)/);
 });
 
 test("coordinator audit is best-effort and bounded", () => {

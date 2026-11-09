@@ -230,6 +230,14 @@ test("Telegram admin actions create a content-safe activity trail", () => {
   assert.doesNotMatch(worker, /summary:\s*\{[^}]*message:\s*handoffCommand\.message/);
 });
 
+test("Telegram admin access is recorded and lifecycle activity is de-duplicated", () => {
+  assert.match(worker, /action: "ADMIN_MENU_OPENED"/);
+  assert.match(worker, /const auditedOrderEvents = new Set\(\)/);
+  assert.match(worker, /auditedOrderEvents\.has\(orderAuditKey\(/);
+  assert.match(worker, /adminAuditRows\.add|for \(const row of adminAuditRows\)/);
+  assert.match(worker, /transition_type: action === "PAYMENT_REJECTED" \? "payment_confirmation" : "order_status"/);
+});
+
 test("operational audit endpoint is authenticated and reads order events plus admin activity", () => {
   assert.match(worker, /url\.pathname === "\/api\/admin\/activity-audit"/);
   assert.match(worker, /if \(!\(await verifyDashboardAccess\(request, env\)\)\)/);

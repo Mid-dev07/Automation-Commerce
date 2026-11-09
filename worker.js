@@ -392,6 +392,10 @@ async function handleTelegram(request, env, ctx) {
       const admin = isAdmin(chatId, env);
       if (admin) {
         await sendTelegram(env, chatId, adminMenuText(), adminMenuKeyboard());
+        await recordAdminActivity(env, {
+          actorId: customerId, action: "ADMIN_MENU_OPENED", resourceType: "admin_menu",
+          summary: { entry_point: text.startsWith("/start") ? "start" : "help" }
+        });
         return;
       }
       if (message.chat.type && message.chat.type !== "private") return;
@@ -1408,31 +1412,58 @@ async function handleAdminActivityAudit(request, env) {
         "FROM admin_activity_audit ORDER BY created_at_ms DESC LIMIT ?"
       ).bind(limit).all()
     ]);
-    const items = (orderEvents.results || []).map(row => {
+    const adminAuditRows = adminActivities.results || [];
+    const orderAuditKey = (action, resourceId, actorChannel, actorId, fromStatus, toStatus, timestamp) =>
+      JSON.stringify([action, resourceId, actorChannel, actorId, fromStatus, toStatus, timestamp]);
+    const auditedOrderEvents = new Set();
+    for (const row of adminAuditRows) {
+      if (String(row.resource_type || "") !== "order") continue;
+      const action = String(row.action || "");
+      if (!["PAYMENT_APPROVED", "PAYMENT_REJECTED", "STATUS_CHANGED", "PICKED_UP"].includes(action)) continue;
+      let summary = {};
+      try { summary = JSON.parse(row.summary_json || "{}"); } catch {}
+      auditedOrderEvents.add(orderAuditKey(
+        action, String(row.resource_id || ""), String(row.actor_channel || "web"),
+        String(row.actor_id || ""), String(summary.from_status || ""),
+        String(summary.to_status || ""), Number(row.created_at_ms || 0)
+      ));
+    }
+    const items = (orderEvents.results || []).flatMap(row => {
       const actor = String(row.actor || "");
+      const actorChannel = actor.startsWith("telegram") ? "telegram" : "web";
+      const actorId = actor.startsWith("telegram:") ? actor.slice("telegram:".length) : actor;
+      const timestamp = Date.parse(row.created_at || "");
+      const timestampMs = Number.isFinite(timestamp) ? timestamp : 0;
+      const action = String(row.event_type || "ORDER_EVENT");
+      const resourceId = String(row.order_id || "");
+      const fromStatus = String(row.from_status || "");
+      const toStatus = String(row.to_status || "");
+      if (auditedOrderEvents.has(orderAuditKey(
+        action, resourceId, actorChannel, actorId, fromStatus, toStatus, timestampMs
+      ))) return [];
       const fromTelegram = actor.startsWith("telegram:") || actor === "telegram-admin";
       const actorLabel = actor.startsWith("telegram:")
         ? "Telegram · " + actor.slice("telegram:".length)
         : actor === "telegram-admin" ? "Telegram Admin (riwayat lama)"
         : actor === "web-admin" ? "Panel Web" : actor || "Admin (tidak diketahui)";
-      const timestamp = Date.parse(row.created_at || "");
-      return {
+      return [{
         id: "order-event:" + row.id,
         actor: actorLabel,
         actor_id: actor,
-        action: String(row.event_type || "ORDER_EVENT"),
+        action,
         resource: "order",
-        resource_id: String(row.order_id || ""),
+        resource_id: resourceId,
         source: fromTelegram ? "Telegram" : actor === "web-admin" ? "Panel Web" : "Admin/Legacy",
         summary: {
-          event_type: String(row.event_type || ""),
-          from_status: String(row.from_status || ""),
-          to_status: String(row.to_status || "")
+          event_type: action,
+          from_status: fromStatus,
+          to_status: toStatus,
+          transition_type: action === "PAYMENT_REJECTED" ? "payment_confirmation" : "order_status"
         },
-        created_at_ms: Number.isFinite(timestamp) ? timestamp : 0
-      };
+        created_at_ms: timestampMs
+      }];
     });
-    for (const row of adminActivities.results || []) {
+    for (const row of adminAuditRows) {
       let summary = {};
       try { summary = JSON.parse(row.summary_json || "{}"); } catch {}
       items.push({
