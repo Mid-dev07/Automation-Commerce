@@ -283,6 +283,16 @@ async function handleTelegram(request, env, ctx) {
       await handlePaymentProofUpload(env, message, chatId, customerId);
       return;
     }
+    if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📷 UPLOAD FOTO PRODUK SEITON")) {
+      try {
+        await handleTelegramProductPhotoUpload(
+          env,message,chatId,customerId,message.reply_to_message.text
+        );
+      } catch(error) {
+        await sendTelegram(env,chatId,"⚠️ "+error.message+"\nSilakan kirim ulang foto yang valid.");
+      }
+      return;
+    }
     if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
       try { await handleAdminProductForm(env, chatId, customerId, text, message.reply_to_message.text); }
       catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
@@ -531,14 +541,15 @@ async function promptAdminProduct(env, chatId, mode, sku = "") {
     const rows = await readCatalogRows(env);
     const product = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!product) throw new Error("Produk tidak ditemukan.");
-    current = "DATA SAAT INI:\n" + [product[0] || "", product[1] || "", product[2] ?? 0, product[3] ?? 0, product[4] ?? "TRUE", product[5] || "", product[6] || ""].join(" | ") + "\n\n";
+    const currentPhoto = isProductMediaKey(product[5]) ? "__KEEP__" : (product[5] || "");
+    current = "DATA SAAT INI:\n" + [product[0] || "", product[1] || "", product[2] ?? 0, product[3] ?? 0, product[4] ?? "TRUE", currentPhoto, product[6] || ""].join(" | ") + "\n\n";
   }
   const guide = [
     intro,
     current + "Kirim satu pesan dengan 7 kolom dipisahkan tanda |",
-    "SKU | Nama Produk | Harga | Stok | Aktif(TRUE/FALSE) | URL_FOTO(https://...) | Deskripsi",
-    mode === "ADD" ? "Contoh: SEI-002 | Kaos Seiton | 99000 | 20 | TRUE | https://contoh.com/foto.jpg | Kaos cotton combed" :
-      "Salin data saat ini lalu ubah bagian yang diperlukan. SKU harus tetap sama. URL foto boleh dikosongkan untuk menghapus foto.",
+    "SKU | Nama Produk | Harga | Stok | Aktif(TRUE/FALSE) | URL_FOTO / __KEEP__ / __REMOVE__ | Deskripsi",
+    mode === "ADD" ? "Contoh: SEI-002 | Kaos Seiton | 99000 | 20 | TRUE |  | Kaos cotton combed" :
+      "Salin data saat ini lalu ubah bagian yang diperlukan. SKU harus tetap sama. Gunakan __KEEP__ untuk mempertahankan foto R2, __REMOVE__ untuk menghapus, atau URL HTTPS untuk foto eksternal. Upload foto baru melalui tombol Upload Foto pada katalog admin.",
     "Gunakan angka 0 untuk stok habis. Deskripsi maksimal 500 karakter dan tanpa tanda |."
   ].join("\n");
   await sendTelegram(env, chatId, guide, { force_reply: true, input_field_placeholder: "SKU | Nama | Harga | Stok | TRUE/FALSE | URL foto | Deskripsi" });
@@ -548,7 +559,11 @@ async function handleAdminProductForm(env, chatId, actorId, input, prompt) {
   if (parts.length !== 7) throw new Error("Format produk harus berisi tepat 7 kolom dipisahkan tanda |");
   const [sku, name, price, stock, activeText, photoUrl, description] = parts;
   if (!["TRUE","FALSE","YA","TIDAK","1","0","AKTIF","NONAKTIF"].includes(activeText.toUpperCase())) throw new Error("Status aktif harus TRUE atau FALSE.");
-  if (photoUrl && (!/^https:\/\//i.test(photoUrl) || photoUrl.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS.");
+  if (photoUrl && !["__KEEP__","__REMOVE__"].includes(photoUrl) &&
+      !isProductMediaKey(photoUrl) &&
+      (!/^https:\/\//i.test(photoUrl) || photoUrl.length > 1000)) {
+    throw new Error("Foto harus berupa URL HTTPS atau __KEEP__/__REMOVE__.");
+  }
   const result = await saveCatalogProduct(env, {
     sku, name, price, stock,
     active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()),
@@ -1074,6 +1089,19 @@ async function handleTelegramCallback(env, query) {
     }
   }
 
+  if (data.startsWith("prod:photo:")) {
+    if (!admin) {
+      await updateTelegramMessage(env,message,{
+        text:"⛔ Upload foto produk khusus admin.",replyMarkup:null,clearMedia:true
+      });
+      return;
+    }
+    const sku = data.slice("prod:photo:".length).trim();
+    if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU produk tidak valid.");
+    await promptAdminProductPhoto(env,chatId,sku);
+    return;
+  }
+
   if (data.startsWith("prod:edit:")) {
     if (!admin) {
       await updateTelegramMessage(env, message, { text: "⛔ Menu ini khusus admin.", replyMarkup: null });
@@ -1306,8 +1334,8 @@ async function showCustomerCatalogPage(env, message, page = 0) {
   ] };
   await updateTelegramMessage(env, message, {
     text: caption,
-    photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
-    clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
+    photo: productMediaPublicUrl(p[5]) || null,
+    clearMedia: !productMediaPublicUrl(p[5]),
     replyMarkup: keyboard
   });
 }
@@ -1336,6 +1364,7 @@ async function showAdminCatalogPage(env, message, page = 0) {
   if (current < pageCount - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "adm:catalog:" + (current + 1) });
   const keyboard = { inline_keyboard: [
     [{ text: "✏️ Atur Produk", callback_data: "prod:edit:" + sku }, { text: "🗑️ Hapus", callback_data: "prod:delete:" + sku }],
+    [{ text: "📷 Upload Foto", callback_data: "prod:photo:" + sku }],
     ...(nav.length ? [nav] : []),
     [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
     [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
