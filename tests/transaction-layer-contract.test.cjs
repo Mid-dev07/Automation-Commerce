@@ -198,7 +198,9 @@ test("cancelling a multi-item order releases all child SKU reservations atomical
   const code=layer.slice(start,end);
   assert.match(code, /String\(o\.sku \|\| ""\)\.toUpperCase\(\) === "MULTI"/);
   assert.match(code, /cartInventoryReleaseStatements\(db,id,at\)/);
-  assert.match(code, /order_item_inventory_movements/);
+  const cart = fs.readFileSync(path.join(root, "cart-layer.mjs"), "utf8");
+  assert.match(cart, /INSERT OR IGNORE INTO order_item_inventory_movements/);
+  assert.match(cart, /UPDATE orders SET stock_reserved=0/);
   assert.match(code, /PAID_STATUSES\.has\(current\)/);
 });
 
