@@ -9,6 +9,7 @@ on:
       - "messaging-core.mjs"
       - "migrations/**"
       - "tests/**"
+      - "docs/PHASE-3-R2-PRODUCT-MEDIA.md"
       - ".github/workflows/cart-regression.yml"
   workflow_dispatch:
 
