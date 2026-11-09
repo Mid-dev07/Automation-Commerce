@@ -292,7 +292,8 @@ test("R2 product media uses the verified bucket binding and public GET/HEAD rout
 test("product image uploads require authenticated admin and store to R2 before D1 save", () => {
   assert.match(worker, /async function handleAdminProductPhotoUpload\(request, env\)/);
   assert.match(worker, /verifyDashboardAccess\(request, env\)/);
-  assert.match(worker, /storeProductImage\(env\.PRODUCT_MEDIA/);
+  assert.match(worker, /uploadThenPersistProductImage\(\s*env\.PRODUCT_MEDIA/);
+  assert.match(worker, /storeProductImage/);
   assert.match(worker, /uploadThenPersistProductImage\([\s\S]{0,260}saveCatalogProduct/);
   assert.match(worker, /DELETE|deleteProductMediaObject/);
   assert.match(worker, /MAX_PRODUCT_IMAGE_BYTES/);
