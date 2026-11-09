@@ -173,10 +173,12 @@ async function mirrorTransactionalProduct(env, product) {
 }
 
 export default {
-  async scheduled(controller, env, ctx) {
-    ctx.waitUntil(pruneAdminLoginAttempts(env).catch(() => {
+  async scheduled(controller, env) {
+    try {
+      await pruneAdminLoginAttempts(env);
+    } catch {
       console.warn(JSON.stringify({ level:"warn", event:"admin_login_attempt_cleanup_failed" }));
-    }));
+    }
     if (await messagingCoreReady(env)) {
       const messaging = await dispatchTelegramMessagingOutbox(env, 20);
       if (messaging.claimed) {
