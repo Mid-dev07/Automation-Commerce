@@ -89,6 +89,5 @@ test("owner admin inline dashboard JavaScript parses", () => {
   const scriptEnd=html.indexOf("</script>",scriptStart);
   assert.ok(scriptStart>=0&&scriptEnd>scriptStart);
   const inlineScript=html.slice(scriptStart+8,scriptEnd);
-  assert.ok(script);
   new vm.Script(inlineScript,{filename:"site-admin-inline.js"});
 });
