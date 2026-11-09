@@ -1992,6 +1992,39 @@ function telegramProductImageDescriptor(message) {
   throw new Error("Kirim foto atau dokumen gambar JPEG, PNG, atau WebP.");
 }
 
+async function readStreamWithinLimit(stream,maxBytes) {
+  if (!stream || typeof stream.getReader !== "function") {
+    throw new Error("Telegram tidak mengembalikan isi gambar.");
+  }
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      const chunk = part.value instanceof Uint8Array
+        ? part.value
+        : new Uint8Array(part.value);
+      total += chunk.byteLength;
+      if (total > maxBytes) {
+        try { await reader.cancel(); } catch {}
+        throw new Error("Ukuran gambar produk maksimal 5 MB.");
+      }
+      chunks.push(chunk);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk,offset);
+    offset += chunk.byteLength;
+  }
+  return output;
+}
+
 async function downloadTelegramProductImage(env,message) {
   const descriptor = telegramProductImageDescriptor(message);
   if (!descriptor.fileId) throw new Error("Telegram tidak memberikan identitas file gambar.");
@@ -2022,8 +2055,9 @@ async function downloadTelegramProductImage(env,message) {
   if (!fileResponse.ok) throw new Error("Gagal mengambil foto produk dari Telegram.");
   const remoteLength = Number(fileResponse.headers.get("Content-Length") || 0);
   if (remoteLength > MAX_PRODUCT_IMAGE_BYTES) throw new Error("Ukuran gambar produk maksimal 5 MB.");
-  const bytes = new Uint8Array(await fileResponse.arrayBuffer());
-  if (bytes.byteLength > MAX_PRODUCT_IMAGE_BYTES) throw new Error("Ukuran gambar produk maksimal 5 MB.");
+  const bytes = await readStreamWithinLimit(
+    fileResponse.body,MAX_PRODUCT_IMAGE_BYTES
+  );
   const responseType = String(fileResponse.headers.get("Content-Type") || "")
     .split(";")[0].trim().toLowerCase();
   const declaredMime = descriptor.declaredMime || (
