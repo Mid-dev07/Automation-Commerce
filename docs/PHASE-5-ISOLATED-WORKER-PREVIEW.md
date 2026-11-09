@@ -1,20 +1,20 @@
 # Phase 5 — Isolated Worker Preview
 
 Date: 2026-11-09  
-Status: Preview D1/R2 resources provisioned; eight D1 migrations and stock-flow smoke tests passed; Worker Preview deployment held until Preview-only Access is initialized.
+Status: **Preview deployed and protected by Preview-only Cloudflare Access. Runtime app validation is pending one authenticated Access browser session.**
 
 Latest successful GitHub Actions run before the docs-only status update: Worker/cart regression **93/93 passed**, Messaging Core **26/26 passed**. Preview URL opt-in is covered by a regression test.
 
 ## 1. Isolated resources provisioned
 
-The Cloudflare account now has dedicated, empty Preview resources in APAC:
+The Cloudflare account has dedicated Preview resources in APAC:
 
 | Resource | Name | Identifier |
 | --- | --- | --- |
 | D1 | `seiton-preview-transactions-20261109` | `c98e9147-8a53-4fb1-bee2-d33e966baeb7` |
 | R2 | `seiton-preview-product-media-20261109` | Bucket name |
 
-The D1 database was created with read replication disabled. The new D1 database reported zero tables at creation time. The R2 bucket uses the Standard storage class. Neither resource is the production D1 database or production R2 bucket.
+The D1 database was created with read replication disabled. The R2 bucket uses the Standard storage class. Neither resource is the production D1 database or production R2 bucket.
 
 ## 2. Preview configuration
 
@@ -25,9 +25,11 @@ The root `wrangler.jsonc` includes a dedicated `previews` block:
 - `ORDER_COORDINATOR` is configured for the Preview runtime. Cloudflare provisions separate Durable Object namespace/storage for each Preview.
 - `APP_ENV=preview` is set.
 - Production cron triggers, routes, and service bindings are not copied into the Preview block.
-- No production secrets, Telegram credentials, Google service account, or Google Sheets identifier are configured for Preview. The Preview must not send Telegram messages or mirror into the production Sheet unless a separate test-only integration is intentionally configured.
+- Production Google Sheets ID, Google service account, Telegram bot token, and admin chat ID are not configured in the Preview deployment.
 
 A separate `wrangler.preview-migrations.jsonc` points D1 migrations directly at the isolated Preview database. This avoids accidentally applying migrations to the production database named in the top-level Wrangler config.
+
+The direct Preview deployment also includes a Preview-only rate-limit binding under namespace `2026110902`; the production namespace is not reused.
 
 ## 3. Preview D1 migrations and smoke tests
 
@@ -51,54 +53,75 @@ Verification confirmed all eight entries, the expected application tables, index
 
 All synthetic smoke-test rows were deleted in the same batch after the checks. Follow-up counts for synthetic products, orders, and both movement tables were all zero. No customer/test orders remain in the Preview database.
 
-## 4. Why Preview deployment is currently blocked
+## 4. Preview-only Cloudflare Access
 
-Cloudflare documents that Preview URLs are public by default unless protected by Cloudflare Access. Both the Access API read and a scoped attempt to create a `preview_worker` Access application returned `access.api.error.not_enabled`. The saved browser profile available to this session has no recorded Cloudflare sign-in, so the dashboard's initial Access activation still requires the owner to authenticate interactively.
+Cloudflare Zero Trust Free has been activated by the account owner.
 
-A read-only Workers subdomain check returned `enabled=true` and `previews_enabled=false`: the production `workers.dev` route is enabled, but Preview URLs remain disabled. No Access application was created. No Preview deployment or URL was published.
+An Access application was created and verified:
 
-Do not enable Preview URLs or run the Preview command until Cloudflare Access protects **Preview URLs only** on `seiton-order-bot`, with an Allow policy for the owner's sign-in identity. Do not enable Access for production traffic or all Workers.
+- Application: `Seiton Worker Preview Access`
+- Application ID: `b3929527-97e2-4307-8319-52963331e8e6`
+- Destination type: `preview_worker`
+- Target Worker ID: `ebc1b01e36104524b9f8e62a3576dc28`
+- Policy: one `Allow` policy for the owner identity, with a one-hour session.
+- No `worker`, `all_workers`, or account-wide Preview destination was configured.
 
-Dashboard sequence:
+Only after verifying the exact Preview-only destination and owner policy, the Worker subdomain setting was updated to:
 
-1. Open **Workers & Pages** and select `seiton-order-bot`.
-2. Open **Settings → Domains & Routes** and enable Cloudflare Access for **Preview URLs only**.
-3. Configure the Access allow policy for the owner's sign-in identity.
-4. Open the Worker's **Domains** tab. Under **Worker URL**, enable **Preview** only after Access protection is active.
-5. Confirm the Preview URL is protected before creating the Preview.
+- `enabled=true` — existing Production `workers.dev` setting, unchanged.
+- `previews_enabled=true` — Preview URLs enabled for `seiton-order-bot`.
 
-The repository intentionally does not set `preview_urls: true`; a regression test prevents enabling Preview URLs from source before the Access gate is completed.
+No production Access application or production Access policy was added.
 
-Cloudflare documentation:
-- https://developers.cloudflare.com/workers/previews/
-- https://developers.cloudflare.com/workers/configuration/cloudflare-access/
-- https://developers.cloudflare.com/workers/previews/resources/
+## 5. Preview deployment
 
-## 5. Controlled Preview commands
+A Preview named `phase-5-isolated-preview` was created:
 
-The eight migrations have already been applied to the Preview D1 database via the Cloudflare D1 API because the saved session did not allow interactive Wrangler CLI execution. The equivalent Wrangler config is pinned to the same Preview database ID. Do not re-run the migrations blindly: first check `d1_migrations` or use the read-only list command below.
+- Preview ID: `65581d90e03c42e286c033d07861e1b4`
+- Latest deployment number: `2`
+- Deployment ID: `213b28ea-c161-44e4-95d4-83d19d6a9eb2`
+- Source commit: `4f8787046741bbdcc94deedf0c9190ea3c1ace0b`
+- Uploaded modules: `worker.js`, `transaction-layer.js`, `cart-layer.mjs`, `messaging-core.mjs`, `product-media.mjs`
 
-```sh
-npx --yes wrangler@4.135.0 d1 migrations list seiton-preview-transactions-20261109 --config wrangler.preview-migrations.jsonc --remote
-```
+Stable Preview URLs (both protected by the `preview_worker` Access application):
 
-After Preview-only Access is active, create the Preview from this branch:
+- `https://phase-5-isolated-preview.automate-bot.seiton.biz.id`
+- `https://phase-5-isolated-preview-seiton-order-bot.midzpribadi.workers.dev`
 
-```sh
-npx --yes wrangler@4.135.0 preview --name phase-5-isolated-preview --ignore-base-config --json
-```
+Latest deployment URLs:
 
-Worker Previews require Wrangler 4.135.0 or later. Continue to use `wrangler.preview-migrations.jsonc` for any D1 migration commands; it targets the isolated Preview database, never the production database.
+- `https://213b28ea.automate-bot.seiton.biz.id`
+- `https://213b28ea-seiton-order-bot.midzpribadi.workers.dev`
 
-## 6. Test-only secrets
+The latest deployment's bindings were verified:
 
-Do not copy production secrets into Preview. For browser-admin tests, configure a new test-only password for this Preview using Wrangler's interactive prompt:
+| Binding | Preview target |
+| --- | --- |
+| `DB` | Preview D1 `c98e9147-8a53-4fb1-bee2-d33e966baeb7` |
+| `PRODUCT_MEDIA` | Preview R2 `seiton-preview-product-media-20261109` |
+| `ORDER_COORDINATOR` | Preview-specific SQLite Durable Object namespace |
+| `ADMIN_LOGIN_RATE_LIMITER` | Preview-only namespace `2026110902` |
+| `APP_ENV` | `preview` |
 
-```sh
-npx --yes wrangler@4.135.0 preview secret put ADMIN_WEB_PASSWORD --name phase-5-isolated-preview
-```
+For admin login verification, `ADMIN_WEB_PASSWORD` and `TELEGRAM_WEBHOOK_SECRET` were explicitly overridden with fresh, Preview-only random secret values. Their values are not stored in Git or this document. No production secret values were copied into the Preview. No Telegram bot token, Google service-account key, Google Sheets identifier, or production admin chat ID is included.
 
-For Telegram end-to-end testing, use a separate test bot and test chat only. Do not use the live Seiton bot token, live admin chat ID, Google service-account key, or production Sheets identifier. No test Telegram credentials are configured here, so Telegram send/webhook tests remain unexecuted.
+The initial deployment number 1 was deleted after an audit found an unexpected secret binding in its returned metadata. Deployment number 2 is the only remaining deployment and has explicit Preview-only secret overrides.
+
+## 6. Runtime validation status
+
+The first browser check opened `/health` and `/` on the stable Preview URL. Both were redirected to the Cloudflare Access login page before reaching the Worker application.
+
+This verifies that Cloudflare Access intercepts and protects Preview requests. It does **not** yet verify the application-level `/health` response or render of the Seiton admin login UI, because the browser profile does not yet have an authenticated session for the Zero Trust Access login domain.
+
+Runtime checks still pending an authenticated Access browser session:
+
+- `GET /health`
+- Render the root admin login page
+- Admin login/session flow using the Preview-only test credentials
+- D1-backed catalog/cart/checkout flow with synthetic data and cleanup
+- R2 product-media upload/read/delete with synthetic image bytes and cleanup
+
+Telegram end-to-end messaging remains untested. No live Telegram token, live admin chat ID, Google service-account key, or production Sheets destination is configured.
 
 ## 7. Regression coverage
 
@@ -110,15 +133,20 @@ For Telegram end-to-end testing, use a separate test bot and test chat only. Do 
 - Durable Object binding is present.
 - Preview does not declare cron triggers, production routes, or service bindings.
 - Production secret names and the Google Sheets target are absent from Preview configuration.
+- Preview URLs are not enabled in repository config before the explicit Access gate.
 
 GitHub Actions also runs the existing Worker/cart regression and Messaging Core suites. Passing CI validates repository contracts, not the remote Preview runtime.
 
 ## 8. Safety status
 
-- Created only the two dedicated Preview resources listed above.
-- No production Worker deployment or update was performed.
-- No Preview deployment or public Preview URL was created. The live Worker subdomain setting still reports `previews_enabled=false`.
-- Eight D1 migrations were applied to Preview only; production D1 was not modified.
-- No production rows or secrets were read or written.
-- No production binding, R2 bucket, bot token, Sheets destination, cron, or route was changed.
-- Preview runtime smoke testing remains pending Preview-only Cloudflare Access protection.
+- Only the dedicated Preview D1 and R2 resources were created for this phase.
+- A Preview-only Access application targets the exact `seiton-order-bot` Preview deployments.
+- Preview URLs are enabled for `seiton-order-bot` only after the Access policy was verified.
+- Only deployment number 2 remains; the initial deployment was deleted.
+- Eight D1 migrations and stock-flow smoke tests were performed against Preview D1 only.
+- No Production Worker deployment or update was performed.
+- No Production D1 or R2 resource was modified.
+- No Production secret values were read or copied.
+- No Production bindings, routes, cron triggers, Sheets destination, bot token, or admin chat ID were changed.
+- `main` was not updated; the source is the approved Phase 3 feature branch.
+- Application runtime validation remains pending an authenticated Cloudflare Access browser session.
