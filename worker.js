@@ -1534,6 +1534,11 @@ async function handleAdminLogin(request, env) {
       event:"admin_login_security_dependency",
       stage,
       error_name: error instanceof Error ? error.name : "UnknownError",
+      error_code: error instanceof Error && /^[A-Z0-9_:-]{1,80}$/.test(error.message) ? error.message : "UNEXPECTED",
+      client_ip_header_present: Boolean(request.headers.get("CF-Connecting-IP")),
+      real_ip_header_present: Boolean(request.headers.get("X-Real-IP")),
+      forwarded_for_header_present: Boolean(request.headers.get("X-Forwarded-For")),
+      webhook_secret_configured: Boolean(env.TELEGRAM_WEBHOOK_SECRET),
       message:"Login security dependency unavailable"
     }));
     return json({ ok:false, error:"Login sementara tidak tersedia." }, 503);
