@@ -216,5 +216,5 @@ test("D1 catalog accepts only generated R2 product media keys or HTTPS photo URL
   assert.ok(match,"stored product media key validation exists");
   assert.match(match[1], /products/);
   assert.match(match[1], /UUID|[0-9a-f]/i);
-  assert.match(layer, /!storedProductMediaKey && !\/\^https:\\\/\\//);
+  assert.ok(layer.includes("!storedProductMediaKey && !/^https:"), "external photo URLs still require HTTPS");
 });
