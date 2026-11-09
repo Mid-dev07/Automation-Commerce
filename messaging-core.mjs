@@ -342,10 +342,14 @@ export async function routeMessagingCommand(event, command, mode, services) {
         (order.channel && String(order.channel) !== String(event.channel))) {
       actions.push(textAction("Pesanan tidak ditemukan untuk akun ini."));
     } else {
+      const itemLines = (order.items || []).map(item =>
+        "• " + item.name + " (" + item.sku + ") × " + item.quantity +
+        " — " + formatPrice(item.subtotal)
+      );
       actions.push(textAction([
         "📦 STATUS PESANAN",
         "ID: " + order.orderId,
-        "Produk: " + order.product,
+        ...(itemLines.length ? ["Rincian:", ...itemLines] : ["Produk: " + order.product]),
         "Jumlah: " + order.quantity,
         "Total: " + formatPrice(order.total),
         "Pembayaran: " + order.paymentMethod,
