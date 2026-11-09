@@ -100,6 +100,27 @@ export async function storeProductImage(bucket, value, declaredMime = "", source
   return { key, contentType: image.contentType, size: image.size, etag: stored.httpEtag || stored.etag || "" };
 }
 
+export async function uploadThenPersistProductImage(bucket, value, declaredMime, source, persist) {
+  if (typeof persist !== "function") throw new TypeError("Fungsi penyimpanan metadata produk wajib tersedia.");
+  const uploaded = await storeProductImage(bucket,value,declaredMime,source);
+  try {
+    const result = await persist(uploaded.key);
+    return { uploaded, result };
+  } catch (error) {
+    try {
+      await deleteProductMediaObject(bucket,uploaded.key);
+    } catch (cleanupError) {
+      console.warn(JSON.stringify({
+        level:"warn",
+        event:"product_media_orphan_cleanup_deferred",
+        key:uploaded.key,
+        message:String(cleanupError?.message||cleanupError).slice(0,240)
+      }));
+    }
+    throw error;
+  }
+}
+
 export async function deleteProductMediaObject(bucket, key) {
   if (!isProductMediaKey(key)) return false;
   if (!bucket || typeof bucket.delete !== "function") {
