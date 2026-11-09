@@ -1,7 +1,9 @@
 # Phase 5 — Isolated Worker Preview
 
 Date: 2026-11-09  
-Status: preview resources provisioned and branch configuration prepared; runtime deployment held until Preview URL access is protected.
+Status: Preview resources and branch configuration prepared; runtime deployment held until Preview URL access is protected.
+
+Latest GitHub Actions run before this documentation update: Worker/cart regression **93/93 passed**, Messaging Core **26/26 passed**. The subsequent test hardening explicitly asserts that `preview_urls` is not enabled in source.
 
 ## 1. Isolated resources provisioned
 
@@ -31,15 +33,19 @@ A separate `wrangler.preview-migrations.jsonc` points D1 migrations directly at 
 
 Cloudflare documents that Preview URLs are public by default unless protected by Cloudflare Access. An account-level Access API read returned `access.api.error.not_enabled`. Access is not enabled on this account at present.
 
-No Preview deployment was created and no Preview URL was published. Do not run the Preview command until Access protection has been enabled for **Preview URLs only** on the `seiton-order-bot` Worker, with an allow policy for the owner. Do not enable protection for production traffic or all Workers as a side effect.
+A read-only Workers subdomain check returned `enabled=true` and `previews_enabled=false`: the production `workers.dev` route is enabled, but Preview URLs are currently disabled. The Access applications API also returned `access.api.error.not_enabled`. No Preview deployment was created and no Preview URL was published.
 
-Dashboard path:
+Do not enable Preview URLs or run the Preview command until Cloudflare Access protects **Preview URLs only** on `seiton-order-bot`, with an allow policy for the owner. Do not enable Access for production traffic or all Workers as a side effect.
+
+Dashboard sequence:
 
 1. Open **Workers & Pages** and select `seiton-order-bot`.
-2. Open **Settings → Domains & Routes**.
-3. Enable Cloudflare Access for **Preview URLs only**.
-4. Set the allow policy to the owner's sign-in identity.
+2. Open **Settings → Domains & Routes** and enable Cloudflare Access for **Preview URLs only**.
+3. Configure the Access allow policy for the owner's sign-in identity.
+4. Open the Worker's **Domains** tab. Under **Worker URL**, enable **Preview** only after Access protection is active.
 5. Confirm the Preview URL is protected before creating the Preview.
+
+The repository intentionally does not set `preview_urls: true`; a regression test prevents enabling Preview URLs from source before the Access gate is completed.
 
 Cloudflare documentation:
 - https://developers.cloudflare.com/workers/previews/
@@ -97,7 +103,7 @@ GitHub Actions also runs the existing Worker/cart regression and Messaging Core 
 
 - Created only the two dedicated Preview resources listed above.
 - No production Worker deployment or update was performed.
-- No Preview deployment or public Preview URL was created.
+- No Preview deployment or public Preview URL was created. The live Worker subdomain setting still reports `previews_enabled=false`.
 - No D1 migration was applied to production or Preview.
 - No production rows or secrets were read or written.
 - No production binding, R2 bucket, bot token, Sheets destination, cron, or route was changed.
