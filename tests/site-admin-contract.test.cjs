@@ -13,21 +13,24 @@ test("owner admin Worker parses", () => {
 });
 
 test("owner admin signs the per-client identity before service-binding login", () => {
-  assert.match(worker, /async function signLoginClientId/);
-  assert.match(worker, /SITE_ADMIN_LOGIN_SHARED_SECRET/);
-  assert.match(worker, /X-Seiton-Login-Client/);
-  assert.match(worker, /X-Seiton-Login-Signature/);
-  assert.match(worker, /SEITON_SITE_ADMIN_LOGIN_V1\\./);
+  assert.ok(worker.includes("async function signLoginClientId"));
+  assert.ok(worker.includes("SITE_ADMIN_LOGIN_SHARED_SECRET"));
+  assert.ok(worker.includes("X-Seiton-Login-Client"));
+  assert.ok(worker.includes("X-Seiton-Login-Signature"));
+  assert.ok(worker.includes("SEITON_SITE_ADMIN_LOGIN_V1."));
 });
 
 test("owner admin does not merge missing client IPs into an unknown shared identity", () => {
-  assert.match(worker, /if\(!clientIp\)return \{ok:false,id:"",reason:"CLIENT_IP_UNAVAILABLE"\}/);
+  assert.ok(worker.includes('if(!clientIp)return {ok:false,id:"",reason:"CLIENT_IP_UNAVAILABLE"}'));
 });
 
 test("only an upstream credential rejection counts as a failed password", () => {
-  assert.match(worker, /if\(upstream\.status===401\)\{await failLogin\(env,g\.id\)/);
-  assert.match(worker, /if\(upstream\.status===429\)\{return secure\(j/);
-  assert.match(worker, /if\(!upstream\.ok\)\{console\.error/);
-  assert.match(worker, /owner_admin_login_upstream_unavailable/);
-  assert.doesNotMatch(worker, /if\(!upstream\.ok\|\|!result\.ok\|\|!result\.token\)\{await failLogin/);
+  assert.ok(worker.includes("if(upstream.status===401){await failLogin(env,g.id)"));
+  assert.ok(worker.includes("if(upstream.status===429){return secure(j"));
+  assert.ok(worker.includes("if(!upstream.ok){console.error"));
+  assert.ok(worker.includes("owner_admin_login_upstream_unavailable"));
+  assert.equal(
+    worker.includes("if(!upstream.ok||!result.ok||!result.token){await failLogin(env,g.id)"),
+    false
+  );
 });
