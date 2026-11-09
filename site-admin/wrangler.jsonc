@@ -15,7 +15,8 @@
     {
       "binding": "SITE_DB",
       "database_name": "seiton-site-content-prod",
-      "database_id": "2ccef282-fb8b-4ea6-b71d-b74a5b43ee95"
+      "database_id": "2ccef282-fb8b-4ea6-b71d-b74a5b43ee95",
+      "migrations_dir": "migrations"
     }
   ],
   "observability": {

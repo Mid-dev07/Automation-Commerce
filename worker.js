@@ -179,6 +179,11 @@ export default {
     } catch {
       console.warn(JSON.stringify({ level:"warn", event:"admin_login_attempt_cleanup_failed" }));
     }
+    try {
+      await pruneAdminWebSessions(env);
+    } catch {
+      console.warn(JSON.stringify({ level:"warn", event:"admin_web_session_cleanup_failed" }));
+    }
     if (await messagingCoreReady(env)) {
       const messaging = await dispatchTelegramMessagingOutbox(env, 20);
       if (messaging.claimed) {
@@ -201,6 +206,7 @@ export default {
       return new Response(ADMIN_DASHBOARD_HTML, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'self' https://cdn.jsdelivr.net; img-src 'self' https: blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'" } });
     }
     if (request.method === "POST" && url.pathname === "/api/admin/login") return handleAdminLogin(request, env);
+    if (request.method === "POST" && url.pathname === "/api/admin/session/revoke") return handleAdminWebSessionRevoke(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/payment") return handleAdminPaymentAction(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/products") return handleAdminProductMutation(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/order-status") return handleAdminOrderStatus(request, env);
@@ -1340,6 +1346,31 @@ async function createDashboardAccessToken(env, chatId) {
   );
   return payload + "." + base64urlBytes(new Uint8Array(signature));
 }
+async function pruneAdminWebSessions(env) {
+  if (!env.DB) return;
+  const now = Date.now();
+  const cutoff = now - 30 * 24 * 60 * 60 * 1000;
+  await env.DB.prepare(
+    "DELETE FROM admin_web_sessions WHERE expires_at_ms <= ? OR (revoked_at_ms IS NOT NULL AND revoked_at_ms < ?)"
+  ).bind(now, cutoff).run();
+}
+async function adminWebSessionTokenHash(token) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("site-owner-session:" + String(token)));
+  return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, "0")).join("");
+}
+function webAdminPayloadFromRequest(request) {
+  const authorization = request.headers.get("Authorization") || "";
+  if (!authorization.startsWith("Bearer ")) return null;
+  const parts = authorization.slice(7).trim().split(".");
+  if (parts.length !== 2) return null;
+  try {
+    const encoded = parts[0].replace(/-/g, "+").replace(/_/g, "/");
+    const decoded = atob(encoded + "=".repeat((4 - encoded.length % 4) % 4));
+    return JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+}
 async function verifyDashboardAccess(request, env) {
   const auth = request.headers.get("Authorization") || "";
   if (!auth.startsWith("Bearer ") || !env.TELEGRAM_WEBHOOK_SECRET) return false;
@@ -1359,10 +1390,17 @@ async function verifyDashboardAccess(request, env) {
     const decoded = atob(encodedPayload + "=".repeat((4 - encodedPayload.length % 4) % 4));
     const payload = JSON.parse(decoded);
     const validTime = Number(payload.exp) > Math.floor(Date.now() / 1000);
-    return validTime && (
-      (payload.v === 1 && isAdmin(payload.sub, env)) ||
-      (payload.v === 2 && payload.scope === "admin-dashboard" && payload.sub === "web-admin")
-    );
+    if (!validTime) return false;
+    if (payload.v === 1) return isAdmin(payload.sub, env);
+    if (payload.v === 2 && payload.scope === "admin-dashboard" && payload.sub === "web-admin" && env.DB) {
+      const tokenHash = await adminWebSessionTokenHash(token);
+      const session = await env.DB.prepare(
+        "SELECT expires_at_ms, revoked_at_ms FROM admin_web_sessions WHERE token_hash = ? LIMIT 1"
+      ).bind(tokenHash).first();
+      return Boolean(session && Number(session.expires_at_ms) > Date.now() &&
+        (session.revoked_at_ms === null || session.revoked_at_ms === undefined));
+    }
+    return false;
   } catch {
     return false;
   }
@@ -1527,7 +1565,16 @@ async function handleAdminLogin(request, env) {
     stage = "d1_clear_failures";
     await clearAdminLoginFailures(env, clientKey);
     stage = "create_admin_session";
-    return json({ ok:true, token:await createWebAdminSessionToken(env), expires_in:28800 });
+    const token = await createWebAdminSessionToken(env);
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + 28800 * 1000;
+    const tokenHash = await adminWebSessionTokenHash(token);
+    const sessionId = crypto.randomUUID();
+    stage = "persist_admin_session";
+    await env.DB.prepare(
+      "INSERT INTO admin_web_sessions(session_id, token_hash, issued_at_ms, expires_at_ms) VALUES (?, ?, ?, ?)"
+    ).bind(sessionId, tokenHash, issuedAt, expiresAt).run();
+    return json({ ok:true, token, expires_in:28800 });
   } catch (error) {
     console.error(JSON.stringify({
       level:"error",
@@ -1543,6 +1590,28 @@ async function handleAdminLogin(request, env) {
     }));
     return json({ ok:false, error:"Login sementara tidak tersedia." }, 503);
   }
+}
+async function handleAdminWebSessionRevoke(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) {
+    return json({ ok:false, error:"Sesi admin tidak valid atau kedaluwarsa." }, 401);
+  }
+  const payload = webAdminPayloadFromRequest(request);
+  if (!payload || payload.v !== 2 || payload.scope !== "admin-dashboard" || payload.sub !== "web-admin") {
+    return json({ ok:false, error:"Hanya sesi panel pemilik yang dapat mencabut sesi web." }, 403);
+  }
+  let body;
+  try { body = await request.json(); }
+  catch { return json({ ok:false, error:"Format permintaan pencabutan sesi tidak valid." }, 400); }
+  const tokenHash = String(body?.token_hash || "").trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(tokenHash)) {
+    return json({ ok:false, error:"Fingerprint sesi tidak valid." }, 400);
+  }
+  const now = Date.now();
+  const revoked = await env.DB.prepare(
+    "UPDATE admin_web_sessions SET revoked_at_ms = ? WHERE token_hash = ? AND revoked_at_ms IS NULL AND expires_at_ms > ? RETURNING session_id"
+  ).bind(now, tokenHash, now).first();
+  if (!revoked) return json({ ok:false, error:"Sesi tidak ditemukan, kedaluwarsa, atau sudah dicabut." }, 404);
+  return json({ ok:true, revoked:true });
 }
 async function handleAdminPaymentAction(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);

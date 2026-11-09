@@ -189,3 +189,20 @@ test("admin login uses Cloudflare rate limiting and a per-client D1 lockout", ()
   assert.match(migration, /updated_at_ms INTEGER NOT NULL/);
   assert.doesNotMatch(migration, /ip_address|client_ip/i);
 });
+
+test("web admin bearer tokens require an active D1 registry entry", () => {
+  const migration = fs.readFileSync(path.join(root, "migrations", "0008_admin_web_sessions.sql"), "utf8");
+  assert.ok(migration.includes("CREATE TABLE IF NOT EXISTS admin_web_sessions"));
+  assert.ok(worker.includes("adminWebSessionTokenHash(token)"));
+  assert.ok(worker.includes("FROM admin_web_sessions WHERE token_hash = ?"));
+  assert.ok(worker.includes("revoked_at_ms"));
+  assert.ok(worker.includes("INSERT INTO admin_web_sessions"));
+  assert.ok(worker.includes("handleAdminWebSessionRevoke"));
+  assert.ok(worker.includes("/api/admin/session/revoke"));
+});
+
+test("expired and long-revoked owner web sessions are pruned by the scheduled Worker", () => {
+  assert.match(worker, /async function pruneAdminWebSessions\(env\)/);
+  assert.match(worker, /DELETE FROM admin_web_sessions WHERE expires_at_ms <= \?/);
+  assert.match(worker, /admin_web_session_cleanup_failed/);
+});
