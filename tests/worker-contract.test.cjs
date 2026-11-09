@@ -206,3 +206,33 @@ test("expired and long-revoked owner web sessions are pruned by the scheduled Wo
   assert.match(worker, /DELETE FROM admin_web_sessions WHERE expires_at_ms <= \?/);
   assert.match(worker, /admin_web_session_cleanup_failed/);
 });
+
+test("order status, payment and pickup events attribute Telegram and web actors", () => {
+  assert.match(worker, /setOrderStatusTransactional\(env,found\.order\.order_id,status,actor\)/);
+  assert.match(worker, /approvePaymentTransactional\(env,found\.order\.order_id,actor\)/);
+  assert.match(worker, /rejectPaymentTransactional\(env,found\.order\.order_id,actor\)/);
+  assert.match(worker, /markPickedUpTransactional\(env,found\.order\.order_id,actor\)/);
+  assert.match(worker, /"telegram:" \+ \(userId \|\| chatId\)/);
+  assert.match(worker, /"web-admin"/);
+});
+
+test("Telegram admin actions create a content-safe activity trail", () => {
+  assert.match(worker, /async function recordAdminActivity\(env, entry\)/);
+  assert.match(worker, /INSERT INTO admin_activity_audit/);
+  assert.match(worker, /HANDOFF_CLAIMED/);
+  assert.match(worker, /HANDOFF_REPLY_QUEUED/);
+  assert.match(worker, /HANDOFF_DECLINED/);
+  assert.match(worker, /PRODUCT_CREATED/);
+  assert.match(worker, /PRODUCT_UPDATED/);
+  assert.match(worker, /PRODUCT_DELETED/);
+  assert.match(worker, /REPORT_EXPORT_SENT/);
+  assert.match(worker, /message_characters: handoffCommand\.message\.length/);
+  assert.doesNotMatch(worker, /summary:\s*\{[^}]*message:\s*handoffCommand\.message/);
+});
+
+test("operational audit endpoint is authenticated and reads order events plus admin activity", () => {
+  assert.match(worker, /url\.pathname === "\/api\/admin\/activity-audit"/);
+  assert.match(worker, /if \(!\(await verifyDashboardAccess\(request, env\)\)\)/);
+  assert.match(worker, /FROM order_events WHERE event_type IN \('PAYMENT_APPROVED','PAYMENT_REJECTED','STATUS_CHANGED','PICKED_UP'\)/);
+  assert.match(worker, /FROM admin_activity_audit ORDER BY created_at_ms DESC LIMIT \?/);
+});

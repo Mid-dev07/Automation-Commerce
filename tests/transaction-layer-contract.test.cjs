@@ -57,9 +57,9 @@ test("Worker fails closed during migration and exposes admin-only bootstrap", ()
 });
 
 test("payment, status and pickup callbacks accept stable order IDs", () => {
-  assert.match(worker, /approvePaymentAndIssueTicket\(env, reference\)/);
-  assert.match(worker, /rejectPaymentRequest\(env, reference\)/);
-  assert.match(worker, /markOrderPickedUp\(env, reference\)/);
+  assert.match(worker, /approvePaymentAndIssueTicket\(env, reference, "telegram:" \+ \(userId \|\| chatId\)\)/);
+  assert.match(worker, /rejectPaymentRequest\(env, reference, "telegram:" \+ \(userId \|\| chatId\)\)/);
+  assert.match(worker, /markOrderPickedUp\(env, reference, "telegram:" \+ \(userId \|\| chatId\)\)/);
   assert.match(worker, /resolveOrderReference\(env,reference\)/);
 });
 
