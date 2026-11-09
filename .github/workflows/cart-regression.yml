@@ -9,6 +9,7 @@ on:
       - "messaging-core.mjs"
       - "migrations/**"
       - "tests/**"
+      - "docs/PHASE-3-R2-PRODUCT-MEDIA.md"
       - ".github/workflows/cart-regression.yml"
   workflow_dispatch:
 
@@ -31,6 +32,7 @@ jobs:
           node --check worker.js
           node --check transaction-layer.js
           node --check cart-layer.mjs
+          node --check product-media.mjs
           node --check messaging-core.mjs
       - name: Run SQLite and Worker contract regression tests
         run: node --test tests/*.test.cjs

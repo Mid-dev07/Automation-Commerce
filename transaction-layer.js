@@ -241,7 +241,10 @@ async function saveProductD1(db, product, originalSku = "") {
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU produk tidak valid.");
   if (!name) throw new Error("Nama produk wajib diisi.");
   if (typeof product.active !== "boolean") throw new Error("Status aktif harus boolean.");
-  if (photo && !/^https:\/\//i.test(photo)) throw new Error("URL foto harus HTTPS.");
+  const storedProductMediaKey = /^products\/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(?:jpg|png|webp)$/i.test(photo);
+  if (photo && !storedProductMediaKey && !/^https:\/\//i.test(photo)) {
+    throw new Error("Foto harus berupa URL HTTPS atau object key R2 produk yang valid.");
+  }
   const editing = Boolean(originalSku);
   if (editing && sku.toUpperCase() !== String(originalSku).toUpperCase()) throw new Error("SKU tidak boleh diubah saat mengedit produk.");
   const old = await getProductD1(db, editing ? originalSku : sku);
