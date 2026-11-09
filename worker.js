@@ -214,6 +214,9 @@ export default {
     if (request.method === "GET" && url.pathname === "/api/admin/data") {
       return handleAdminDashboardData(request, env);
     }
+    if (request.method === "GET" && url.pathname === "/api/admin/activity-audit") {
+      return handleAdminActivityAudit(request, env);
+    }
     if (request.method === "GET" && url.pathname === "/api/admin/export") {
       return handleAdminDashboardExport(request, env);
     }
@@ -266,7 +269,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
-      try { await handleAdminProductForm(env, chatId, text, message.reply_to_message.text); }
+      try { await handleAdminProductForm(env, chatId, customerId, text, message.reply_to_message.text); }
       catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
       return;
     }
@@ -293,6 +296,7 @@ async function handleTelegram(request, env, ctx) {
         }
         if (handoffCommand.kind === "HANDOFF_CLAIM") {
           const result = await claimMessagingHandoff(env, handoffCommand.handoffId, chatId);
+          if (result.ok && !result.alreadyClaimed) await recordAdminActivity(env, { actorId: customerId, action: "HANDOFF_CLAIMED", resourceType: "support_handoff", resourceId: handoffCommand.handoffId, summary: { handoff_id: handoffCommand.handoffId } });
           if (result.ok) {
             await sendTelegram(env, chatId,
               (result.alreadyClaimed ? "ℹ️ Kasus ini sudah diambil oleh Anda." : "✅ Kasus berhasil diambil.") +
@@ -325,6 +329,7 @@ async function handleTelegram(request, env, ctx) {
             await sendTelegram(env, chatId, "⚠️ " + (messageByReason[result.reason] || "Balasan tidak dapat diantrikan."));
             return;
           }
+          await recordAdminActivity(env, { actorId: customerId, action: "HANDOFF_REPLY_QUEUED", resourceType: "support_handoff", resourceId: handoffCommand.handoffId, summary: { handoff_id: handoffCommand.handoffId, message_characters: handoffCommand.message.length } });
           await dispatchTelegramMessagingOutbox(env, 50);
           await sendTelegram(env, chatId,
             "✅ Balasan admin dimasukkan ke antrean pengiriman Telegram untuk pelanggan " +
@@ -333,6 +338,7 @@ async function handleTelegram(request, env, ctx) {
         }
         if (handoffCommand.kind === "HANDOFF_CLOSE") {
           const result = await closeMessagingHandoff(env, handoffCommand.handoffId, chatId);
+          if (result.ok && !result.alreadyClosed) await recordAdminActivity(env, { actorId: customerId, action: "HANDOFF_RESOLVED", resourceType: "support_handoff", resourceId: handoffCommand.handoffId, summary: { handoff_id: handoffCommand.handoffId, resolution: "RESOLVED" } });
           if (!result.ok) {
             const messageByReason = {
               NOT_FOUND: "Kasus bantuan tidak ditemukan.",
@@ -368,6 +374,7 @@ async function handleTelegram(request, env, ctx) {
         readSheet(env,"Pesanan!A2:T")
       ]);
       const result = await bootstrapTransactions(env.DB,catalogRows,orderRows);
+      await recordAdminActivity(env, { actorId: customerId, action: "D1_MIGRATION_COMPLETED", resourceType: "transaction_store", summary: { catalog_imported: result.catalog, historical_orders_imported: result.orders } });
       await sendTelegram(env,chatId,
         "✅ Migrasi transaksi D1 selesai.\nProduk diimpor: "+result.catalog+
         "\nOrder historis diimpor: "+result.orders+
@@ -377,6 +384,7 @@ async function handleTelegram(request, env, ctx) {
     if (text.startsWith("/laporan")) {
       if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const report = await buildAdminReport(env);
+      await recordAdminActivity(env, { actorId: customerId, action: "REPORT_GENERATED", resourceType: "sales_report", summary: { report_type: "sales_summary" } });
       await sendTelegram(env, chatId, report);
       return;
     }
@@ -516,7 +524,7 @@ async function promptAdminProduct(env, chatId, mode, sku = "") {
   ].join("\n");
   await sendTelegram(env, chatId, guide, { force_reply: true, input_field_placeholder: "SKU | Nama | Harga | Stok | TRUE/FALSE | URL foto | Deskripsi" });
 }
-async function handleAdminProductForm(env, chatId, input, prompt) {
+async function handleAdminProductForm(env, chatId, actorId, input, prompt) {
   const parts = String(input || "").split("|").map(v => v.trim());
   if (parts.length !== 7) throw new Error("Format produk harus berisi tepat 7 kolom dipisahkan tanda |");
   const [sku, name, price, stock, activeText, photoUrl, description] = parts;
@@ -527,6 +535,7 @@ async function handleAdminProductForm(env, chatId, input, prompt) {
     active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()),
     photo_url: photoUrl, description
   }, prompt.includes(" — EDIT — ") ? prompt.split(" — EDIT — ").pop().trim() : "");
+  await recordAdminActivity(env, { actorId, action: result === "updated" ? "PRODUCT_UPDATED" : "PRODUCT_CREATED", resourceType: "product", resourceId: sku, summary: { sku, name: String(name).slice(0, 100), price: Number(price), stock: stock === "" ? null : Number(stock), active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()) } });
   await sendTelegram(env, chatId, "✅ Produk " + sku + (result === "updated" ? " berhasil diperbarui." : " berhasil ditambahkan."), adminMenuKeyboard());
 }
 
@@ -754,6 +763,10 @@ async function handleTelegramCallback(env, query) {
       return;
     }
 
+    if (result.ok && !result.alreadyClosed && !(action === "take" && result.alreadyClaimed)) {
+      const actions = { take: "HANDOFF_CLAIMED", done: "HANDOFF_RESOLVED", decline: "HANDOFF_DECLINED" };
+      await recordAdminActivity(env, { actorId: userId, action: actions[action], resourceType: "support_handoff", resourceId: handoffId, summary: { handoff_id: handoffId, resolution: action === "decline" ? "DECLINED" : action === "done" ? "RESOLVED" : null } });
+    }
     if (result.ok) {
       if (action === "decline" && result.noticeQueued) {
         await dispatchTelegramMessagingOutbox(env, 50);
@@ -929,7 +942,9 @@ async function handleTelegramCallback(env, query) {
       return;
     }
     if (action === "report") {
-      await updateTelegramMessage(env, message, { text: await buildAdminReport(env), replyMarkup: adminMenuKeyboard(), clearMedia: true });
+      const report = await buildAdminReport(env);
+      await recordAdminActivity(env, { actorId: userId, action: "REPORT_GENERATED", resourceType: "sales_report", summary: { report_type: "sales_summary" } });
+      await updateTelegramMessage(env, message, { text: report, replyMarkup: adminMenuKeyboard(), clearMedia: true });
       return;
     }
     if (action === "paymentchecks" || action.startsWith("paymentchecks:")) {
@@ -943,6 +958,7 @@ async function handleTelegramCallback(env, query) {
     }
     if (action === "dashboard") {
       const accessToken = await createDashboardAccessToken(env, chatId);
+      await recordAdminActivity(env, { actorId: userId, action: "DASHBOARD_LINK_ISSUED", resourceType: "admin_dashboard", summary: { lifetime_minutes: 240 } });
       const link = "https://admin.seiton.biz.id/#access=" + encodeURIComponent(accessToken);
       await updateTelegramMessage(env, message, {
         text: "📈 Dashboard admin siap dibuka. Tautan akses berlaku selama 4 jam. Jangan teruskan tautan ini kepada orang lain.",
@@ -1033,7 +1049,9 @@ async function handleTelegramCallback(env, query) {
       await updateTelegramMessage(env, message, { text: "⛔ Menu ini khusus admin.", replyMarkup: null });
       return;
     }
-    await deleteCatalogProduct(env, data.slice("prod:delok:".length));
+    const deletedSku = data.slice("prod:delok:".length);
+    await deleteCatalogProduct(env, deletedSku);
+    await recordAdminActivity(env, { actorId: userId, action: "PRODUCT_DELETED", resourceType: "product", resourceId: deletedSku, summary: { sku: deletedSku } });
     await updateTelegramMessage(env, message, { text: "✅ Produk berhasil dihapus dari katalog.", replyMarkup: adminMenuKeyboard() });
     return;
   }
@@ -1052,6 +1070,7 @@ async function handleTelegramCallback(env, query) {
     for (const type of types) {
       await sendTelegramDocument(env, chatId, reports[type].csv, reports[type].filename, reports[type].caption);
     }
+    await recordAdminActivity(env, { actorId: userId, action: "REPORT_EXPORT_SENT", resourceType: "sales_export", summary: { report_types: types } });
     await updateTelegramMessage(env, message, { text: "✅ Laporan selesai dikirim.", replyMarkup: adminMenuKeyboard() });
     return;
   }
@@ -1090,7 +1109,7 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("payapprove:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
     const reference = data.slice("payapprove:".length);
-    const approved = await approvePaymentAndIssueTicket(env, reference);
+    const approved = await approvePaymentAndIssueTicket(env, reference, "telegram:" + (userId || chatId));
     let receiptSent = true;
     try { await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode); }
     catch(error) {
@@ -1110,7 +1129,7 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("payreject:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
     const reference = data.slice("payreject:".length);
-    const rejected = await rejectPaymentRequest(env, reference);
+    const rejected = await rejectPaymentRequest(env, reference, "telegram:" + (userId || chatId));
     await sendTelegram(env, String(rejected[3]), "⚠️ Permintaan verifikasi pembayaran untuk " + rejected[0] + " belum dapat disetujui. Periksa kembali nominal/bukti pembayaran dan ajukan ulang setelah benar.", {
       inline_keyboard: [[{ text: "🔁 Ajukan Verifikasi Ulang", callback_data: "pc:req:" + rejected[0] }]]
     });
@@ -1129,7 +1148,7 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("pickupdone:")) {
     if (!admin) throw new Error("Menu ini khusus admin.");
     const reference = data.slice("pickupdone:".length);
-    const order = await markOrderPickedUp(env, reference);
+    const order = await markOrderPickedUp(env, reference, "telegram:" + (userId || chatId));
     try { await sendTelegram(env, String(order[3]), "✅ Pengambilan pesanan " + order[0] + " telah dicatat. Terima kasih sudah berbelanja di Seiton.id!"); } catch {}
     await updateTelegramMessage(env, message, {
       text: "✅ Pesanan " + order[0] + " berhasil ditandai SUDAH DIAMBIL.",
@@ -1187,7 +1206,7 @@ async function handleTelegramCallback(env, query) {
     const parts = data.split(":"); const reference = parts[1]; const status = parts[2];
     const allowed = ["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
     if (!reference || !allowed.includes(status)) throw new Error("Pembaruan status tidak valid");
-    await setOrderStatus(env, reference, status);
+    await setOrderStatus(env, reference, status, "telegram:" + (userId || chatId));
     await updateTelegramMessage(env, message, {
       text: "✅ Status pesanan berhasil diperbarui menjadi " + status + ".",
       replyMarkup: adminMenuKeyboard()
@@ -1371,6 +1390,76 @@ function webAdminPayloadFromRequest(request) {
     return null;
   }
 }
+async function handleAdminActivityAudit(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) {
+    return json({ ok: false, error: "Sesi admin tidak valid atau kedaluwarsa." }, 401);
+  }
+  const raw = Number(new URL(request.url).searchParams.get("limit") || 30);
+  const limit = Number.isFinite(raw) ? Math.max(1, Math.min(100, Math.floor(raw))) : 30;
+  try {
+    const [orderEvents, adminActivities] = await Promise.all([
+      env.DB.prepare(
+        "SELECT id,order_id,event_type,from_status,to_status,actor,created_at " +
+        "FROM order_events WHERE event_type IN ('PAYMENT_APPROVED','PAYMENT_REJECTED','STATUS_CHANGED','PICKED_UP') " +
+        "ORDER BY id DESC LIMIT ?"
+      ).bind(limit).all(),
+      env.DB.prepare(
+        "SELECT audit_id,actor_channel,actor_id,action,resource_type,resource_id,summary_json,created_at_ms " +
+        "FROM admin_activity_audit ORDER BY created_at_ms DESC LIMIT ?"
+      ).bind(limit).all()
+    ]);
+    const items = (orderEvents.results || []).map(row => {
+      const actor = String(row.actor || "");
+      const fromTelegram = actor.startsWith("telegram:") || actor === "telegram-admin";
+      const actorLabel = actor.startsWith("telegram:")
+        ? "Telegram · " + actor.slice("telegram:".length)
+        : actor === "telegram-admin" ? "Telegram Admin (riwayat lama)"
+        : actor === "web-admin" ? "Panel Web" : actor || "Admin (tidak diketahui)";
+      const timestamp = Date.parse(row.created_at || "");
+      return {
+        id: "order-event:" + row.id,
+        actor: actorLabel,
+        actor_id: actor,
+        action: String(row.event_type || "ORDER_EVENT"),
+        resource: "order",
+        resource_id: String(row.order_id || ""),
+        source: fromTelegram ? "Telegram" : actor === "web-admin" ? "Panel Web" : "Admin/Legacy",
+        summary: {
+          event_type: String(row.event_type || ""),
+          from_status: String(row.from_status || ""),
+          to_status: String(row.to_status || "")
+        },
+        created_at_ms: Number.isFinite(timestamp) ? timestamp : 0
+      };
+    });
+    for (const row of adminActivities.results || []) {
+      let summary = {};
+      try { summary = JSON.parse(row.summary_json || "{}"); } catch {}
+      items.push({
+        id: "admin-activity:" + row.audit_id,
+        actor: row.actor_channel === "telegram"
+          ? "Telegram · " + String(row.actor_id || "")
+          : "Panel Web · " + String(row.actor_id || ""),
+        actor_id: String(row.actor_id || ""),
+        action: String(row.action || "ADMIN_ACTION"),
+        resource: String(row.resource_type || ""),
+        resource_id: String(row.resource_id || ""),
+        source: row.actor_channel === "telegram" ? "Telegram" : "Panel Web",
+        summary,
+        created_at_ms: Number(row.created_at_ms || 0)
+      });
+    }
+    items.sort((a, b) => b.created_at_ms - a.created_at_ms);
+    return json({ ok: true, items: items.slice(0, limit) });
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error", event: "admin_activity_audit_read_failed",
+      code: "ADMIN_ACTIVITY_AUDIT_READ_FAILED"
+    }));
+    return json({ ok: false, error: "Riwayat operasional tidak dapat dibaca." }, 503);
+  }
+}
+
 async function verifyDashboardAccess(request, env) {
   const auth = request.headers.get("Authorization") || "";
   if (!auth.startsWith("Bearer ") || !env.TELEGRAM_WEBHOOK_SECRET) return false;
@@ -1622,7 +1711,7 @@ async function handleAdminPaymentAction(request, env) {
     if (body.action==="approve") {
       const method=String(found.row[11]||"").toUpperCase();
       if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi melalui menu ini.");
-      const approved=await approvePaymentAndIssueTicket(env,found.rowNumber ?? body.order_id);
+      const approved=await approvePaymentAndIssueTicket(env,found.rowNumber ?? body.order_id,"web-admin");
       let receiptSent = true;
       try { await sendPickupReceipt(env,String(approved.row[3]),approved.row,String(approved.row[0]),approved.receiptCode); }
       catch(error) {
@@ -1632,7 +1721,7 @@ async function handleAdminPaymentAction(request, env) {
       return json({ok:true,status:"DIBAYAR",receipt_code:approved.receiptCode,receipt_sent:receiptSent});
     }
     if (body.action==="reject") {
-      const rejected=await rejectPaymentRequest(env,found.rowNumber ?? body.order_id);
+      const rejected=await rejectPaymentRequest(env,found.rowNumber ?? body.order_id,"web-admin");
       try { await sendTelegram(env,String(rejected[3]),"⚠️ Permintaan verifikasi pembayaran untuk "+rejected[0]+" belum dapat disetujui. Periksa kembali bukti dan nominal pembayaran, lalu ajukan ulang dari menu Pesanan Saya.",{inline_keyboard:[[{text:"🔁 Ajukan Verifikasi Ulang",callback_data:"pc:req:"+rejected[0]}]]}); } catch (error) { console.warn(JSON.stringify({level:"warn",event:"dashboard_payment_rejection_notice",message:error.message})); }
       return json({ok:true,status:"DITOLAK"});
     }
@@ -1646,23 +1735,25 @@ async function handleAdminProductMutation(request, env) {
     await ensureCatalogHeaders(env);
     if (body.action === "delete") {
       const result = await deleteCatalogProduct(env, body.sku);
+      await recordAdminActivity(env, { actorChannel: "web", actorId: "web-admin", action: "PRODUCT_DELETED", resourceType: "product", resourceId: result.sku, summary: { sku: result.sku } });
       return json({ok:true,deleted:result.sku});
     }
     if (body.action !== "save" || !body.product) return json({ok:false,error:"Aksi produk tidak dikenal."},400);
     const p = body.product;
     const active = p.active === true || String(p.active).toLowerCase() === "true";
     const result = await saveCatalogProduct(env, { ...p, active }, String(p.original_sku || ""));
+    await recordAdminActivity(env, { actorChannel: "web", actorId: "web-admin", action: result === "updated" ? "PRODUCT_UPDATED" : "PRODUCT_CREATED", resourceType: "product", resourceId: String(p.sku).trim(), summary: { sku: String(p.sku).trim(), name: String(p.name || "").slice(0, 100), price: Number(p.price), active } });
     return json({ok:true,sku:String(p.sku).trim(),action:result});
   } catch(error) { return json({ok:false,error:error.message},400); }
 }
 
-async function setOrderStatus(env, rowNumber, status) {
+async function setOrderStatus(env, rowNumber, status, actor = "admin") {
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
   if (state.ready) {
     const found = await resolveOrderReference(env,rowNumber);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
-    const updated = await setOrderStatusTransactional(env,found.order.order_id,status,"admin");
+    const updated = await setOrderStatusTransactional(env,found.order.order_id,status,actor);
     await mirrorTransactionalOrder(env,updated);
     return orderToSheetRow(updated);
   }
@@ -1682,6 +1773,7 @@ async function setOrderStatus(env, rowNumber, status) {
     throw new Error("Pembayaran QRIS/transfer harus disetujui melalui menu Verifikasi Pembayaran agar resi diterbitkan.");
   }
   await updateSheetRange(env, "Pesanan!M" + rowNumber + ":M" + rowNumber, [[status]]);
+  await recordAdminActivity(env, { actorChannel: actorChannel(actor), actorId: actorIdentifier(actor), action: "STATUS_CHANGED", resourceType: "order", resourceId: String(row[0]), summary: { from_status: current, to_status: status } });
   return row;
 }
 
@@ -1693,7 +1785,7 @@ async function handleAdminOrderStatus(request, env) {
   const status=String(body.status||"").trim().toUpperCase();
   const allowed=["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
   if(!allowed.includes(status))return json({ok:false,error:"Status pesanan tidak dikenal."},400);
-  try { await setOrderStatus(env,found.rowNumber ?? body.order_id,status); return json({ok:true,status}); }
+  try { await setOrderStatus(env,found.rowNumber ?? body.order_id,status,"web-admin"); return json({ok:true,status}); }
   catch(error){return json({ok:false,error:error.message},400);}
 }
 async function handleAdminPaymentProof(request, env) {
@@ -2014,13 +2106,13 @@ async function showPaymentRequestDetail(env, message, reference) {
     if (r[14] && r[15] === "DOCUMENT") await sendTelegramDocumentById(env, message.chat.id, String(r[14]), "Bukti pembayaran " + r[0]);
   }
 }
-async function approvePaymentAndIssueTicket(env, reference) {
+async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-admin") {
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
   if (state.ready) {
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
-    const approved = await approvePaymentTransactional(env,found.order.order_id,"telegram-admin");
+    const approved = await approvePaymentTransactional(env,found.order.order_id,actor);
     await mirrorTransactionalOrder(env,approved);
     const row = orderToSheetRow(approved);
     const ticketUrl = await createPickupTicketUrl(env,String(approved.order_id),String(approved.receipt_code));
@@ -2039,16 +2131,17 @@ async function approvePaymentAndIssueTicket(env, reference) {
   await updateSheetRange(env, "Pesanan!M" + rowNumber + ":T" + rowNumber, [[
     "DIBAYAR", "DISETUJUI", r[14] || "", r[15] || "", r[16] || now, now, receiptCode, "BELUM_DIAMBIL"
   ]]);
+  await recordAdminActivity(env, { actorChannel: actorChannel(actor), actorId: actorIdentifier(actor), action: "PAYMENT_APPROVED", resourceType: "order", resourceId: String(r[0]), summary: { from_status: String(r[12] || ""), to_status: "DIBAYAR" } });
   const ticketUrl = await createPickupTicketUrl(env, String(r[0]), receiptCode);
   return { row:r, receiptCode, ticketUrl };
 }
-async function rejectPaymentRequest(env, reference) {
+async function rejectPaymentRequest(env, reference, actor = "telegram-admin") {
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
   if (state.ready) {
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
-    const rejected = await rejectPaymentTransactional(env,found.order.order_id,"telegram-admin");
+    const rejected = await rejectPaymentTransactional(env,found.order.order_id,actor);
     await mirrorTransactionalOrder(env,rejected);
     return orderToSheetRow(rejected);
   }
@@ -2059,6 +2152,7 @@ async function rejectPaymentRequest(env, reference) {
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
   await updateSheetRange(env, "Pesanan!N" + rowNumber + ":N" + rowNumber, [["DITOLAK"]]);
+  await recordAdminActivity(env, { actorChannel: actorChannel(actor), actorId: actorIdentifier(actor), action: "PAYMENT_REJECTED", resourceType: "order", resourceId: String(r[0]), summary: { payment_confirmation_status: "DITOLAK" } });
   return r;
 }
 async function createPickupTicketToken(env, orderId, receiptCode) {
@@ -2211,13 +2305,13 @@ async function showPickupOrderDetail(env, message, reference) {
     replyMarkup: { inline_keyboard: buttons }, clearMedia: true
   });
 }
-async function markOrderPickedUp(env, reference) {
+async function markOrderPickedUp(env, reference, actor = "telegram-admin") {
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
   if (state.ready) {
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
-    const updated = await markPickedUpTransactional(env,found.order.order_id,"telegram-admin");
+    const updated = await markPickedUpTransactional(env,found.order.order_id,actor);
     await mirrorTransactionalOrder(env,updated);
     return orderToSheetRow(updated);
   }
@@ -2230,6 +2324,7 @@ async function markOrderPickedUp(env, reference) {
   await updateSheetRange(env, "Pesanan!M" + rowNumber + ":T" + rowNumber, [[
     "SELESAI", "DISETUJUI", r[14] || "", r[15] || "", r[16] || "", r[17] || "", r[18], "DIAMBIL"
   ]]);
+  await recordAdminActivity(env, { actorChannel: actorChannel(actor), actorId: actorIdentifier(actor), action: "PICKED_UP", resourceType: "order", resourceId: String(r[0]), summary: { from_status: String(r[12] || ""), to_status: "SELESAI", pickup_status: "DIAMBIL" } });
   return r;
 }
 
@@ -2560,6 +2655,39 @@ async function sendTelegram(env, chatId, text, replyMarkup = null) {
 }
 
 
+
+async function recordAdminActivity(env, entry) {
+  if (!env?.DB || !entry || !entry.actorId || !entry.action) return false;
+  const actorChannelValue = entry.actorChannel === "web" ? "web" : "telegram";
+  const actorIdValue = String(entry.actorId).trim().slice(0, 128);
+  if (!actorIdValue) return false;
+  const actionValue = String(entry.action).trim().slice(0, 80);
+  const resourceTypeValue = String(entry.resourceType || "admin").trim().slice(0, 40);
+  const resourceIdValue = entry.resourceId == null ? null : String(entry.resourceId).trim().slice(0, 160);
+  let summaryJson = "{}";
+  try { summaryJson = JSON.stringify(entry.summary || {}).slice(0, 4000); } catch {}
+  try {
+    await env.DB.prepare(
+      "INSERT INTO admin_activity_audit(audit_id,actor_channel,actor_id,action,resource_type,resource_id,summary_json,created_at_ms) " +
+      "VALUES(?,?,?,?,?,?,?,?)"
+    ).bind(crypto.randomUUID(), actorChannelValue, actorIdValue, actionValue,
+      resourceTypeValue, resourceIdValue, summaryJson, Date.now()).run();
+    return true;
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "error", event: "admin_activity_audit_write_failed", action: actionValue,
+      code: "ADMIN_ACTIVITY_AUDIT_WRITE_FAILED"
+    }));
+    return false;
+  }
+}
+function actorChannel(actor) {
+  return String(actor || "").startsWith("telegram") ? "telegram" : "web";
+}
+function actorIdentifier(actor) {
+  const value = String(actor || "");
+  return value.startsWith("telegram:") ? value.slice("telegram:".length) : value;
+}
 
 function isAdmin(id, env) {
   const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);

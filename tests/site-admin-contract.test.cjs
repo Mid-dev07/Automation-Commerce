@@ -109,3 +109,18 @@ test("owner admin reconciles locally registered sessions after backend invalidat
   assert.ok(worker.includes('reason:"backend_session_invalid"'));
   assert.ok(worker.includes("UPDATE site_admin_sessions SET revoked_at_ms=? WHERE session_id=? AND revoked_at_ms IS NULL"));
 });
+
+test("owner admin merges backend operational audit with local panel audit", () => {
+  assert.match(worker, /\/api\/admin\/activity-audit\?limit=/);
+  assert.match(worker, /Authorization:\"Bearer \"\+session\.token/);
+  assert.match(worker, /localItems\.concat\(operationalItems\)/);
+  assert.match(worker, /activity_available:activityAvailable/);
+});
+
+test("owner admin audit UI labels order-state and Telegram actions", () => {
+  assert.match(worker, /PAYMENT_APPROVED:'Pembayaran disetujui'/);
+  assert.match(worker, /STATUS_CHANGED:'Status pesanan diubah'/);
+  assert.match(worker, /HANDOFF_REPLY_QUEUED:'Balasan admin masuk antrean'/);
+  assert.match(worker, /Produk diarsipkan/);
+  assert.match(worker, /Isi tidak disimpan|isi tidak disimpan/);
+});
