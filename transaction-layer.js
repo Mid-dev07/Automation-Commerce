@@ -1,4 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  createCartOrderD1, listCartProductsD1, listCartOrderItemsD1,
+  cartInventoryReleaseStatements
+} from "./cart-layer.mjs";
 
 const TZ_OFFSET_MS = 7 * 60 * 60 * 1000;
 const SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
@@ -389,12 +393,22 @@ async function setOrderStatusD1(db,id,status,actor="admin") {
       .bind(status,at,id,o.status)
   ];
   if(status==="DIBATALKAN") {
-    stmts.push(db.prepare(`INSERT OR IGNORE INTO inventory_movements(order_id,sku,movement_type,quantity,created_at)
-      SELECT order_id,sku,'RELEASE',quantity,? FROM orders
-      WHERE order_id=? AND status='DIBATALKAN' AND stock_reserved=1`).bind(at,id));
-    stmts.push(db.prepare(`UPDATE orders SET stock_reserved=0,updated_at=?
-      WHERE order_id=? AND status='DIBATALKAN' AND stock_reserved=1
-        AND EXISTS(SELECT 1 FROM inventory_movements WHERE order_id=? AND movement_type='RELEASE')`).bind(at,id,id));
+    if (String(o.sku || "").toUpperCase() === "MULTI") {
+      const itemCount = await db.prepare(
+        "SELECT COUNT(*) AS item_count FROM order_items WHERE order_id=?"
+      ).bind(id).first();
+      if (!Number(itemCount?.item_count)) {
+        throw new Error("Detail item pesanan multi-produk tidak ditemukan; stok tidak dapat dilepas dengan aman.");
+      }
+      stmts.push(...cartInventoryReleaseStatements(db,id,at));
+    } else {
+      stmts.push(db.prepare(`INSERT OR IGNORE INTO inventory_movements(order_id,sku,movement_type,quantity,created_at)
+        SELECT order_id,sku,'RELEASE',quantity,? FROM orders
+        WHERE order_id=? AND status='DIBATALKAN' AND stock_reserved=1`).bind(at,id));
+      stmts.push(db.prepare(`UPDATE orders SET stock_reserved=0,updated_at=?
+        WHERE order_id=? AND status='DIBATALKAN' AND stock_reserved=1
+          AND EXISTS(SELECT 1 FROM inventory_movements WHERE order_id=? AND movement_type='RELEASE')`).bind(at,id,id));
+    }
   }
   const sourceKey = "status:" + crypto.randomUUID();
   stmts.push(db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
@@ -526,6 +540,39 @@ export async function createOrderTransactional(env,input) {
     subtotal:o.subtotal,shipping:o.shipping,total:o.total,paymentMethod:o.payment_method,
     status:o.status,duplicate:Boolean(o.duplicate)};
 }
+
+function getCartCoordinator(env,channel,customerId) {
+  if(!env.ORDER_COORDINATOR)throw new Error("Durable Object ORDER_COORDINATOR belum dikonfigurasi.");
+  const normalizedChannel=clean(channel || "telegram",24);
+  const normalizedCustomer=clean(customerId,128);
+  if(!normalizedCustomer)throw new Error("Identitas pelanggan tidak valid.");
+  return env.ORDER_COORDINATOR.getByName("cart:"+normalizedChannel+":"+normalizedCustomer);
+}
+export async function getCartTransactional(env,channel,customerId) {
+  const stub=getCartCoordinator(env,channel,customerId);
+  return stub.getCart();
+}
+export async function addCartItemTransactional(env,channel,customerId,sku,quantity,operationId) {
+  const stub=getCartCoordinator(env,channel,customerId);
+  return stub.addCartItem(sku,quantity,operationId);
+}
+export async function updateCartItemTransactional(env,channel,customerId,sku,quantity,operationId) {
+  const stub=getCartCoordinator(env,channel,customerId);
+  return stub.updateCartItem(sku,quantity,operationId);
+}
+export async function removeCartItemTransactional(env,channel,customerId,sku,operationId) {
+  const stub=getCartCoordinator(env,channel,customerId);
+  return stub.removeCartItem(sku,operationId);
+}
+export async function clearCartTransactional(env,channel,customerId,operationId) {
+  const stub=getCartCoordinator(env,channel,customerId);
+  return stub.clearCart(operationId);
+}
+export async function checkoutCartTransactional(env,input) {
+  const stub=getCartCoordinator(env,input.channel,input.customerId);
+  return stub.checkoutCart(input);
+}
+
 export async function orderOperation(env,id,method,...args) {
   if(!env.ORDER_COORDINATOR)throw new Error("Durable Object ORDER_COORDINATOR belum dikonfigurasi.");
   const stub=env.ORDER_COORDINATOR.getByName("order:"+String(id));
@@ -533,7 +580,11 @@ export async function orderOperation(env,id,method,...args) {
 }
 export async function findOrderTransactional(env,id) {
   await requireReady(env.DB);
-  return getOrderD1(env.DB,id);
+  const order=await getOrderD1(env.DB,id);
+  if(order && String(order.sku || "").toUpperCase()==="MULTI") {
+    order.items=await listCartOrderItemsD1(env.DB,order.order_id);
+  }
+  return order;
 }
 export async function findOrderByLegacyRow(env,row) {
   await requireReady(env.DB);
@@ -637,13 +688,28 @@ export class OrderCoordinator extends DurableObject {
     super(ctx,env);
     this.serial=Promise.resolve();
     ctx.blockConcurrencyWhile(()=>{
-      ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS coordinator_audit(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        operation TEXT NOT NULL,
-        aggregate_key TEXT NOT NULL,
-        result TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      )`);
+      ctx.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS coordinator_audit(" +
+          "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+          "operation TEXT NOT NULL,aggregate_key TEXT NOT NULL," +
+          "result TEXT NOT NULL,created_at TEXT NOT NULL)"
+      );
+      ctx.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS cart_items(" +
+          "sku TEXT PRIMARY KEY COLLATE NOCASE," +
+          "quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 1000)," +
+          "updated_at TEXT NOT NULL)"
+      );
+      ctx.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS cart_meta(" +
+          "id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL," +
+          "last_checkout_version INTEGER,last_checkout_json TEXT)"
+      );
+      ctx.storage.sql.exec("INSERT OR IGNORE INTO cart_meta(id,version) VALUES(1,1)");
+      ctx.storage.sql.exec(
+        "CREATE TABLE IF NOT EXISTS cart_mutations(" +
+          "operation_id TEXT PRIMARY KEY,result_json TEXT NOT NULL,created_ms INTEGER NOT NULL)"
+      );
     });
   }
   enqueue(fn) {
@@ -665,6 +731,185 @@ export class OrderCoordinator extends DurableObject {
       // Transaction state is authoritative in D1; audit failure must not mask a committed operation.
       console.warn(JSON.stringify({level:"warn",event:"coordinator_audit",operation,message:error?.message||String(error)}));
     }
+  }
+  cartRows() {
+    return this.ctx.storage.sql.exec(
+      "SELECT sku,quantity FROM cart_items ORDER BY sku"
+    ).toArray();
+  }
+  cartMeta() {
+    return this.ctx.storage.sql.exec(
+      "SELECT version,last_checkout_version,last_checkout_json FROM cart_meta WHERE id=1"
+    ).one();
+  }
+  cartMutation(operationId) {
+    const id=clean(operationId,180);
+    if(!id)throw new Error("Identitas aksi keranjang tidak valid.");
+    const row=this.ctx.storage.sql.exec(
+      "SELECT result_json FROM cart_mutations WHERE operation_id=?",
+      id
+    ).toArray()[0];
+    return row ? JSON.parse(row.result_json) : null;
+  }
+  saveCartMutation(operationId,result,mutate) {
+    const id=clean(operationId,180);
+    const now=Date.now();
+    this.ctx.storage.transactionSync(()=>{
+      if(mutate)mutate();
+      this.ctx.storage.sql.exec(
+        "INSERT OR REPLACE INTO cart_mutations(operation_id,result_json,created_ms) VALUES(?,?,?)",
+        id,JSON.stringify(result),now
+      );
+      this.ctx.storage.sql.exec(
+        "DELETE FROM cart_mutations WHERE created_ms<?",
+        now-7*24*60*60*1000
+      );
+    });
+    return result;
+  }
+  async getCart() {
+    return this.enqueue(async()=>{
+      const rows=this.cartRows();
+      return listCartProductsD1(this.env.DB,rows);
+    });
+  }
+  async addCartItem(sku,quantity,operationId) {
+    return this.enqueue(async()=>{
+      const duplicate=this.cartMutation(operationId);
+      if(duplicate)return {...duplicate,duplicate:true};
+      const key=clean(sku,40).toUpperCase();
+      const amount=Number(quantity);
+      if(!/^[A-Z0-9._-]{1,40}$/.test(key))throw new Error("SKU produk tidak valid.");
+      if(!Number.isInteger(amount)||amount<1||amount>1000)throw new Error("Jumlah produk tidak valid.");
+      await requireReady(this.env.DB);
+      const product=await getProductD1(this.env.DB,key);
+      if(!product||!product.active)throw new Error("Produk tidak ditemukan atau sedang nonaktif.");
+      const current=this.cartRows();
+      const existing=current.find(item=>String(item.sku).toUpperCase()===key);
+      const nextQuantity=Number(existing?.quantity||0)+amount;
+      if(nextQuantity>1000)throw new Error("Jumlah produk di keranjang melebihi batas.");
+      if(current.length>=30&&!existing)throw new Error("Keranjang maksimal 30 jenis produk.");
+      if(product.stock!=null&&Number(product.stock)<nextQuantity) {
+        throw new Error("Stok "+key+" tidak mencukupi. Stok tersedia: "+product.stock);
+      }
+      const result={sku:key,quantity:nextQuantity};
+      return this.saveCartMutation(operationId,result,()=>{
+        this.ctx.storage.sql.exec(
+          "INSERT INTO cart_items(sku,quantity,updated_at) VALUES(?,?,?) " +
+          "ON CONFLICT(sku) DO UPDATE SET quantity=excluded.quantity,updated_at=excluded.updated_at",
+          key,nextQuantity,nowJakarta()
+        );
+        this.ctx.storage.sql.exec("UPDATE cart_meta SET version=version+1 WHERE id=1");
+      });
+    });
+  }
+  async updateCartItem(sku,quantity,operationId) {
+    return this.enqueue(async()=>{
+      const duplicate=this.cartMutation(operationId);
+      if(duplicate)return {...duplicate,duplicate:true};
+      const key=clean(sku,40).toUpperCase();
+      const amount=Number(quantity);
+      if(!/^[A-Z0-9._-]{1,40}$/.test(key))throw new Error("SKU produk tidak valid.");
+      if(!Number.isInteger(amount)||amount<1||amount>1000)throw new Error("Jumlah produk tidak valid.");
+      await requireReady(this.env.DB);
+      const product=await getProductD1(this.env.DB,key);
+      if(!product||!product.active)throw new Error("Produk tidak ditemukan atau sedang nonaktif.");
+      const current=this.cartRows();
+      if(!current.some(item=>String(item.sku).toUpperCase()===key)) {
+        throw new Error("Produk tersebut belum ada di keranjang. Gunakan TAMBAH terlebih dahulu.");
+      }
+      if(product.stock!=null&&Number(product.stock)<amount) {
+        throw new Error("Stok "+key+" tidak mencukupi. Stok tersedia: "+product.stock);
+      }
+      const result={sku:key,quantity:amount};
+      return this.saveCartMutation(operationId,result,()=>{
+        this.ctx.storage.sql.exec(
+          "UPDATE cart_items SET quantity=?,updated_at=? WHERE sku=? COLLATE NOCASE",
+          amount,nowJakarta(),key
+        );
+        this.ctx.storage.sql.exec("UPDATE cart_meta SET version=version+1 WHERE id=1");
+      });
+    });
+  }
+  async removeCartItem(sku,operationId) {
+    return this.enqueue(async()=>{
+      const duplicate=this.cartMutation(operationId);
+      if(duplicate)return {...duplicate,duplicate:true};
+      const key=clean(sku,40).toUpperCase();
+      if(!/^[A-Z0-9._-]{1,40}$/.test(key))throw new Error("SKU produk tidak valid.");
+      const existing=this.cartRows().some(item=>String(item.sku).toUpperCase()===key);
+      const result={sku:key,removed:existing};
+      return this.saveCartMutation(operationId,result,()=>{
+        if(existing) {
+          this.ctx.storage.sql.exec("DELETE FROM cart_items WHERE sku=? COLLATE NOCASE",key);
+          this.ctx.storage.sql.exec("UPDATE cart_meta SET version=version+1 WHERE id=1");
+        }
+      });
+    });
+  }
+  async clearCart(operationId) {
+    return this.enqueue(async()=>{
+      const duplicate=this.cartMutation(operationId);
+      if(duplicate)return {...duplicate,duplicate:true};
+      const hadItems=this.cartRows().length>0;
+      const result={cleared:hadItems};
+      return this.saveCartMutation(operationId,result,()=>{
+        if(hadItems) {
+          this.ctx.storage.sql.exec("DELETE FROM cart_items");
+          this.ctx.storage.sql.exec("UPDATE cart_meta SET version=version+1 WHERE id=1");
+        }
+      });
+    });
+  }
+  async checkoutCart(input) {
+    return this.enqueue(async()=>{
+      const operationId=clean(input.operationId,180);
+      const duplicateOperation=this.cartMutation(operationId);
+      if(duplicateOperation)return {...duplicateOperation,duplicate:true};
+      const rows=this.cartRows();
+      const meta=this.cartMeta();
+      if(!rows.length&&meta.last_checkout_json&&
+        Number(meta.last_checkout_version)>=Number(meta.version)-1) {
+        const previous=JSON.parse(meta.last_checkout_json);
+        const duplicate={...previous,duplicate:true};
+        return this.saveCartMutation(operationId,duplicate);
+      }
+      if(!rows.length)throw new Error("Keranjang masih kosong. Tambahkan produk sebelum checkout.");
+      const version=Number(meta.version);
+      const customerId=clean(input.customerId,128);
+      const channel=clean(input.channel||"telegram",24);
+      const result=await createCartOrderD1(this.env.DB,{
+        ...input,channel,customerId,items:rows,
+        actor:"telegram:"+customerId,
+        idempotencyKey:"cart:"+channel+":"+customerId+":"+version
+      });
+      const normalized={
+        orderId:result.order_id,createdAt:result.created_at,createdMs:result.created_ms,
+        channel:result.channel,customerId:result.customer_id,customerName:result.customer_name,
+        product:result.product_name,sku:result.sku,quantity:Number(result.quantity),
+        unitPrice:Number(result.unit_price),subtotal:Number(result.subtotal),
+        shipping:Number(result.shipping),total:Number(result.total),
+        paymentMethod:result.payment_method,status:result.status,
+        duplicate:Boolean(result.duplicate),items:result.items||[]
+      };
+      this.ctx.storage.transactionSync(()=>{
+        this.ctx.storage.sql.exec(
+          "UPDATE cart_meta SET last_checkout_version=?,last_checkout_json=?,version=version+1 WHERE id=1",
+          version,JSON.stringify(normalized)
+        );
+        this.ctx.storage.sql.exec("DELETE FROM cart_items");
+        this.ctx.storage.sql.exec(
+          "INSERT OR REPLACE INTO cart_mutations(operation_id,result_json,created_ms) VALUES(?,?,?)",
+          operationId,JSON.stringify(normalized),Date.now()
+        );
+        this.ctx.storage.sql.exec(
+          "DELETE FROM cart_mutations WHERE created_ms<?",
+          Date.now()-7*24*60*60*1000
+        );
+      });
+      this.audit("CHECKOUT_CART","cart:"+channel+":"+customerId,normalized.orderId);
+      return normalized;
+    });
   }
   async createOrder(input) {
     return this.enqueue(async()=>{
