@@ -7,13 +7,32 @@ Source for the production owner pricing panel at https://admin.seiton.biz.id/.
 - `ORDER_BACKEND`: service binding to `seiton-order-bot` production.
 - `SITE_DB`: D1 database `seiton-site-content-prod`.
 
-## Login request forwarding
+## Login and sessions
 
-The owner panel reads the edge-provided `CF-Connecting-IP` from the public request and forwards it as `CF-Connecting-IP` and `X-Real-IP` to the backend through its service binding. The backend continues to derive its own HMAC client key with its existing `TELEGRAM_WEBHOOK_SECRET` binding. No additional shared secret is required.
+- The owner panel forwards the edge-provided `CF-Connecting-IP` and `X-Real-IP` to `seiton-order-bot` through the same-zone service binding.
+- The backend pseudonymizes the client IP with its existing `TELEGRAM_WEBHOOK_SECRET`.
+- Browser sessions are registered in `SITE_DB` using a SHA-256 token fingerprint. The raw backend token is never stored in D1.
+- Sessions expire after eight hours, have a last-seen timestamp, and can be revoked server-side from the panel.
+- The session cookie remains `Secure; HttpOnly; SameSite=Strict`.
+- Login, logout, pricing writes, and session revocation require the exact owner-panel Origin.
 
-The owner panel fails closed if the edge-provided client IP is absent. It does not use a shared `unknown` identity.
+## Audit trail
 
-Only an upstream HTTP 401 increments the owner panel's password-failure counter. HTTP 429 is returned with its retry interval. Upstream 5xx or malformed responses return HTTP 503 and do not consume password-failure attempts.
+The panel records successful logins, session revocations, and catalog changes. Pricing/catalog audit entries are written in the same D1 batch transaction as the replacement catalog rows. Audit summaries include names, prices, availability, and changed field names; they exclude passwords, session tokens, raw IP addresses, and customer-message text.
+
+Audit history is append-only through the panel API and can be viewed from the owner admin UI.
+
+## Site database migrations
+
+The owner panel uses a separate database from the order bot. Its migrations live in `site-admin/migrations/` and are configured by `migrations_dir` in `site-admin/wrangler.jsonc`.
+
+Apply the migration to the production **seiton-site-content-prod** database:
+
+```sh
+npx wrangler d1 migrations apply seiton-site-content-prod --remote --config site-admin/wrangler.jsonc
+```
+
+Do not apply these migrations to `seiton-transactions-prod`.
 
 ## Deployment
 
@@ -23,4 +42,4 @@ Deploy with:
 npx wrangler deploy --config site-admin/wrangler.jsonc
 ```
 
-Then verify that the `seiton-site-admin` custom domain / DNS Worker association remains attached to `admin.seiton.biz.id`.
+Then verify that the `seiton-site-admin` Worker remains attached to `admin.seiton.biz.id`.
