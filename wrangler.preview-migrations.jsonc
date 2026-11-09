@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seiton-order-bot",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "seiton-preview-transactions-20261109",
+      "database_id": "c98e9147-8a53-4fb1-bee2-d33e966baeb7",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
