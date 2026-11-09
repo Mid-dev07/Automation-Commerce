@@ -180,6 +180,67 @@ async function mirrorTransactionalProduct(env, product) {
   }
 }
 
+async function cleanupOrphanProductMedia(env, maxPages = 2) {
+  if (!env.PRODUCT_MEDIA || !env.DB) return {scanned:0,deleted:0,pages:0};
+  const state = await transactionReadiness(env);
+  if (!state.ready) return {scanned:0,deleted:0,pages:0};
+  const cursorRow = await env.DB.prepare(
+    "SELECT value FROM app_meta WHERE key='product_media_gc_cursor'"
+  ).first().catch(() => null);
+  let cursor = String(cursorRow?.value || "") || undefined;
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  let scanned = 0, deleted = 0, pages = 0;
+  try {
+    while (pages < Math.max(1,Math.min(3,Number(maxPages)||2))) {
+      const result = await env.PRODUCT_MEDIA.list({
+        prefix:"products/",limit:100,...(cursor ? {cursor} : {})
+      });
+      const objects = (result.objects || []).filter(object =>
+        isProductMediaKey(object.key) &&
+        object.uploaded instanceof Date &&
+        object.uploaded.getTime() < cutoff
+      );
+      scanned += (result.objects || []).length;
+      pages += 1;
+
+      if (objects.length) {
+        const placeholders = objects.map(() => "?").join(",");
+        const refs = await env.DB.prepare(
+          "SELECT photo_url FROM catalog_products WHERE photo_url IN (" + placeholders + ")"
+        ).bind(...objects.map(object=>object.key)).all();
+        const referenced = new Set((refs.results || []).map(row=>String(row.photo_url)));
+        const orphanKeys = objects
+          .map(object=>object.key)
+          .filter(key=>!referenced.has(key));
+        if (orphanKeys.length) {
+          await env.PRODUCT_MEDIA.delete(orphanKeys);
+          deleted += orphanKeys.length;
+        }
+      }
+
+      cursor = result.truncated ? String(result.cursor || "") : "";
+      await env.DB.prepare(
+        "INSERT INTO app_meta(key,value,updated_at) VALUES('product_media_gc_cursor',?,?) " +
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at"
+      ).bind(cursor,new Date().toISOString()).run();
+      if (!result.truncated || !cursor) break;
+    }
+  } catch(error) {
+    console.warn(JSON.stringify({
+      level:"warn",event:"product_media_gc_failed",
+      pages,scanned,deleted,message:String(error?.message||error).slice(0,240)
+    }));
+    return {scanned,deleted,pages,error:true};
+  }
+  if (pages && !cursor) {
+    await env.DB.prepare(
+      "INSERT INTO app_meta(key,value,updated_at) VALUES('product_media_gc_cursor','',?) " +
+      "ON CONFLICT(key) DO UPDATE SET value='',updated_at=excluded.updated_at"
+    ).bind(new Date().toISOString()).run();
+  }
+  return {scanned,deleted,pages};
+}
+
 export default {
   async scheduled(controller, env) {
     try {
@@ -200,6 +261,14 @@ export default {
     }
     const state = await transactionReadiness(env);
     if (!state.ready) return;
+    if (env.PRODUCT_MEDIA) {
+      const mediaCleanup = await cleanupOrphanProductMedia(env,2);
+      if (mediaCleanup.deleted) {
+        console.log(JSON.stringify({
+          level:"info",event:"product_media_gc_batch",cron:controller.cron,...mediaCleanup
+        }));
+      }
+    }
     const result = await dispatchSheetsMirrorOutbox(env, 20);
     if (result.claimed) {
       console.log(JSON.stringify({level:"info",event:"sheet_mirror_outbox_batch",cron:controller.cron,...result}));
