@@ -33,3 +33,39 @@ test("only an upstream credential rejection counts as a failed password", () => 
     false
   );
 });
+
+test("owner admin stores hashed session tokens and checks expiry/revocation", () => {
+  assert.ok(worker.includes('digest("site-owner-session:"+token)'));
+  assert.ok(worker.includes("FROM site_admin_sessions WHERE token_hash=?"));
+  assert.ok(worker.includes("revoked_at_ms"));
+  assert.ok(worker.includes("expires_at_ms"));
+  assert.ok(worker.includes("UPDATE site_admin_sessions SET last_seen_at_ms=?"));
+  assert.ok(worker.includes("INSERT INTO site_admin_sessions"));
+});
+
+test("owner admin mutating endpoints enforce exact same-origin checks", () => {
+  assert.ok(worker.includes('function sameOriginAdmin(req){return req.headers.get("Origin")==="https://admin.seiton.biz.id";}'));
+  assert.ok(worker.includes('if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));'));
+  assert.ok(worker.includes("/api/admin/sessions/revoke"));
+});
+
+test("pricing audit is committed atomically with the catalog replacement", () => {
+  assert.ok(worker.includes("function buildPricingAudit"));
+  assert.ok(worker.includes('action:"PRICING_UPDATED",resource:"site_pricing"'));
+  assert.ok(worker.includes("if(summary.changes.length)q.push(newAuditStatement"));
+  assert.ok(worker.includes("await env.SITE_DB.batch(q)"));
+  assert.ok(worker.includes("/api/admin/audit"));
+});
+
+test("audit snapshots avoid customer-message content and raw IP data", () => {
+  assert.ok(worker.includes("function auditSnapshot(kind,row)"));
+  assert.ok(worker.includes("tersedia:Boolean(row.tersedia)"));
+  assert.ok(worker.includes("client_hash"));
+  assert.ok(!worker.includes("ip_address"));
+});
+
+test("audit and active-session endpoints require an authenticated session", () => {
+  assert.ok(worker.includes('if(u.pathname==="/api/admin/audit"&&req.method==="GET")'));
+  assert.ok(worker.includes('if(u.pathname==="/api/admin/sessions"&&req.method==="GET")'));
+  assert.ok(worker.includes("const session=await activeSession(req,env)"));
+});
