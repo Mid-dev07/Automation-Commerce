@@ -276,3 +276,53 @@ test("customer order status includes child item details for multi-item orders", 
   assert.match(core, /Rincian:/);
   assert.match(worker, /checkoutCart\(env,input\)/);
 });
+
+test("R2 product media uses the verified bucket binding and public GET/HEAD route", () => {
+  const config = JSON.parse(fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8"));
+  const binding = config.r2_buckets?.find(item => item.binding === "PRODUCT_MEDIA");
+  assert.deepEqual(binding, {
+    binding: "PRODUCT_MEDIA",
+    bucket_name: "seiton-product-media"
+  });
+  assert.match(worker, /url\.pathname\.startsWith\("\/media\/"\)/);
+  assert.match(worker, /serveProductMedia\(request,env\.PRODUCT_MEDIA,key\)/);
+  assert.match(worker, /request\.method === "GET" \|\| request\.method === "HEAD"/);
+});
+
+test("product image uploads require authenticated admin and store to R2 before D1 save", () => {
+  assert.match(worker, /async function handleAdminProductPhotoUpload\(request, env\)/);
+  assert.match(worker, /verifyDashboardAccess\(request, env\)/);
+  assert.match(worker, /storeProductImage\(env\.PRODUCT_MEDIA/);
+  assert.match(worker, /uploadThenPersistProductImage\([\s\S]{0,260}saveCatalogProduct/);
+  assert.match(worker, /DELETE|deleteProductMediaObject/);
+  assert.match(worker, /MAX_PRODUCT_IMAGE_BYTES/);
+  assert.match(worker, /\/api\/admin\/products\/photo/);
+});
+
+test("Telegram admin can upload an image by replying to the product-photo prompt", () => {
+  assert.match(worker, /async function promptAdminProductPhoto/);
+  assert.match(worker, /async function handleTelegramProductPhotoUpload/);
+  assert.match(worker, /prod:photo:/);
+  assert.match(worker, /UPLOAD FOTO PRODUK SEITON/);
+  assert.match(worker, /handleTelegramProductPhotoUpload\([\s\S]{0,150}message\.reply_to_message\.text/);
+  assert.match(worker, /callback_data: "prod:photo:" \+ sku/);
+  assert.match(worker, /Upload Foto/);
+});
+
+test("product images render through the Worker media route in Telegram and admin screens", () => {
+  assert.match(worker, /productMediaPublicUrl\(p\[5\]\) \|\| null/);
+  assert.match(worker, /photo_r2: key/);
+  assert.match(worker, /photo_url: key \? productMediaPublicUrl\(product\.photo_url,origin\)/);
+  assert.match(worker, /p\.photo_r2\?'':\(p\.photo_url\|\|''\)/);
+  assert.match(worker, /\/api\/admin\/products\/photo/);
+});
+
+test("R2 object keys are not copied into the Google Sheets catalog mirror", () => {
+  const start=worker.indexOf("async function mirrorTransactionalProduct");
+  const end=worker.indexOf("\n}\n",start);
+  const mirror=worker.slice(start,end);
+  assert.match(mirror, /isProductMediaKey\(product\.photo_url\) \? ""/);
+  assert.match(mirror, /photoForSheet/);
+  assert.match(worker, /product_media_gc_cursor/);
+  assert.match(worker, /cleanupOrphanProductMedia\(env,2\)/);
+});
