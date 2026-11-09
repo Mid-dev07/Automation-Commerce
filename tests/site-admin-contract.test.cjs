@@ -26,7 +26,7 @@ test("owner admin does not merge missing client IPs into an unknown shared ident
 
 test("only an upstream credential rejection counts as a failed password", () => {
   assert.ok(worker.includes("if(upstream.status===401){await failLogin(env,g.id)"));
-  assert.ok(worker.includes("if(upstream.status===429){return secure(j"));
+  assert.ok(worker.includes("if(upstream.status===429)return secure(j"));
   assert.ok(worker.includes("if(!upstream.ok){console.error"));
   assert.ok(worker.includes("owner_admin_login_upstream_unavailable"));
   assert.equal(
