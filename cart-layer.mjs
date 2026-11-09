@@ -49,7 +49,7 @@ function sheetMirrorStatement(db, id, at) {
   ).bind(at, at, id);
 }
 
-function adminActivityStatement(db, actor, id, at, sourceKey) {
+function adminActivityStatement(db, actor, id, at, sourceKey, itemCount) {
   const actorValue = clean(actor || "telegram:unknown", 128);
   const actorChannel = actorValue.startsWith("telegram") ? "telegram" : "web";
   const actorId = actorValue.startsWith("telegram:")
@@ -65,7 +65,7 @@ function adminActivityStatement(db, actor, id, at, sourceKey) {
     ")"
   ).bind(
     crypto.randomUUID(), actorChannel, actorId, "ORDER_CREATED", "order", id,
-    JSON.stringify({ sku: "MULTI", item_count: null }), createdAtMs, id, sourceKey
+    JSON.stringify({ sku: "MULTI", item_count: Number(itemCount) }), createdAtMs, id, sourceKey
   );
 }
 
@@ -106,9 +106,14 @@ export async function listCartProductsD1(db, rawItems) {
       name: product?.name || "Produk tidak tersedia",
       quantity: item.quantity,
       unitPrice: priceValid ? price : null,
-      subtotal: priceValid ? price * item.quantity : null,
+      subtotal: priceValid && Number.isSafeInteger(price * item.quantity)
+        ? price * item.quantity
+        : null,
       stock,
-      available: Boolean(active && priceValid && (stock == null || stock >= item.quantity))
+      available: Boolean(
+        active && priceValid && Number.isSafeInteger(price * item.quantity) &&
+        (stock == null || stock >= item.quantity)
+      )
     };
   });
 }
@@ -261,7 +266,9 @@ export async function createCartOrderD1(db, input) {
     JSON.stringify({ sku: "MULTI", item_count: pricedItems.length }), at
   ));
 
-  const audit = adminActivityStatement(db, input.actor || ("telegram:" + customerId), id, at, sourceKey);
+  const audit = adminActivityStatement(
+    db, input.actor || ("telegram:" + customerId), id, at, sourceKey, pricedItems.length
+  );
   if (audit) statements.push(audit);
   statements.push(sheetMirrorStatement(db, id, at));
 
