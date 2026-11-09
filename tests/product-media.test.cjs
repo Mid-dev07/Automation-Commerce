@@ -183,3 +183,25 @@ test("deletion helper accepts only generated product image keys", async () => {
   assert.equal(await media.deleteProductMediaObject(bucket, uploaded.key), true);
   assert.equal(bucket.objects.has(uploaded.key), false);
 });
+
+test("deletes the newly uploaded object when persisting product metadata fails", async () => {
+  const bucket = createBucket();
+  await assert.rejects(
+    media.uploadThenPersistProductImage(
+      bucket,jpegBytes(),"image/jpeg","admin",
+      async () => { throw new Error("D1 write failed"); }
+    ),
+    /D1 write failed/
+  );
+  assert.equal(bucket.objects.size,0);
+});
+
+test("keeps the newly uploaded object when product metadata persistence succeeds", async () => {
+  const bucket = createBucket();
+  const outcome = await media.uploadThenPersistProductImage(
+    bucket,pngBytes(),"image/png","telegram",
+    async key => ({savedKey:key})
+  );
+  assert.equal(outcome.result.savedKey,outcome.uploaded.key);
+  assert.equal(bucket.objects.has(outcome.uploaded.key),true);
+});
