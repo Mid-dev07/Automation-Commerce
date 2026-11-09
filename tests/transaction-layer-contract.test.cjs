@@ -152,6 +152,7 @@ test("product create, update, and soft-delete enqueue retryable catalog mirrors"
   const deleteEnd=layer.indexOf("\nasync function setLegacySheetRowD1",deleteStart);
   const remove=layer.slice(deleteStart,deleteEnd);
   assert.equal((save.match(/catalogMirrorStatement\(db,/g)||[]).length,2);
+  assert.match(remove,/UPDATE catalog_products SET active=0,updated_at=\?/);
   assert.match(remove,/catalogMirrorStatement\(db,old\.sku,at\)/);
   assert.match(layer,/event_type IN \('SHEET_MIRROR','CATALOG_MIRROR'\)/);
 });
