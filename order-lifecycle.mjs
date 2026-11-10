@@ -8,6 +8,12 @@ const ONLINE_METHODS = new Set(["QRIS", "TRANSFER", "TRANSFER_BANK"]);
 function nowJakarta() {
   return new Date(Date.now() + TZ_OFFSET_MS).toISOString().replace("Z", "+07:00");
 }
+function dateStamp(value) {
+  const d = new Date(value);
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit"
+  }).format(d).replace(/-/g, "");
+}
 function clean(value, max = 500) {
   return String(value ?? "").trim().slice(0, max);
 }
