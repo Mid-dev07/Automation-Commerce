@@ -2,6 +2,20 @@ import { env, exports } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import migration0001 from "../migrations/0001_transaction_core.sql?raw";
+import migration0002 from "../migrations/0002_multi_item_cart.sql?raw";
+import migration0004 from "../migrations/0004_messaging_core.sql?raw";
+import migration0005 from "../migrations/0005_messaging_handoff_audit.sql?raw";
+import migration0006 from "../migrations/0006_messaging_handoff_resolution.sql?raw";
+import migration0007 from "../migrations/0007_admin_login_security.sql?raw";
+import migration0008 from "../migrations/0008_admin_web_sessions.sql?raw";
+import migration0009 from "../migrations/0009_admin_activity_audit.sql?raw";
+
+const migrations = [
+  migration0001, migration0002, migration0004, migration0005,
+  migration0006, migration0007, migration0008, migration0009
+];
+
 const stamp = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
 const createdSkus: string[] = [];
 
@@ -45,6 +59,7 @@ async function cleanupSku(sku: string) {
 
 describe("Seiton cart Durable Object runtime", () => {
   beforeAll(async () => {
+    for (const migration of migrations) await env.DB.exec(migration);
     await env.DB.prepare(
       "INSERT INTO app_meta(key,value,updated_at) VALUES('transaction_store_state','READY',?) " +
       "ON CONFLICT(key) DO UPDATE SET value='READY',updated_at=excluded.updated_at"
