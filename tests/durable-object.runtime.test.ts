@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import worker from "../worker.js";
 import { createExecutionContext, evictDurableObject, waitOnExecutionContext } from "cloudflare:test";
 import { setupNetwork } from "@msw/cloudflare";
 import { http, HttpResponse } from "msw";
@@ -62,7 +63,7 @@ async function orderIdsForSku(sku: string): Promise<string[]> {
 
 async function postTelegramUpdate(update: unknown, secret = "RUNTIME_TEST_WEBHOOK_SECRET") {
   const ctx = createExecutionContext();
-  const response = await exports.default.fetch(new Request("http://runtime.test/telegram", {
+  const response = await worker.fetch(new Request("http://runtime.test/telegram", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
