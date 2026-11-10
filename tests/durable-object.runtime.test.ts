@@ -259,7 +259,7 @@ describe("Seiton cart Durable Object runtime", () => {
     }), env);
     expect(malformed.status).toBe(400);
 
-    const sent: Array<{ chat_id: string; text: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> }> }> = [];
+    const sent: any[] = [];
     const telegramMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = new Request(input, init);
       expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
@@ -314,7 +314,7 @@ describe("Seiton cart Durable Object runtime", () => {
   });
 
   it("blocks Telegram sales-report commands from non-admin users", async () => {
-    const sent: Array<{ chat_id: string; text: string }> = [];
+    const sent: any[] = [];
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = new Request(input, init);
       expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
@@ -353,7 +353,7 @@ describe("Seiton cart Durable Object runtime", () => {
     const customerId = "runtime-telegram-" + id;
     const chatId = Number.parseInt(id.slice(0, 8), 16) + 100000000;
     const updateId = Number.parseInt(id.slice(0, 8), 16);
-    const sent: Array<{ chat_id: string; text: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> }> }> = [];
+    const sent: any[] = [];
 
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = new Request(input, init);
