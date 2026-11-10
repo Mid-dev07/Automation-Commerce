@@ -2,7 +2,7 @@ import { cartInventoryReleaseStatements } from "./cart-layer.mjs";
 
 const TZ_OFFSET_MS = 7 * 60 * 60 * 1000;
 const PAID_STATUSES = new Set(["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI", "PAID", "COMPLETED"]);
-const CANCELLED_STATUSES = new Set(["DIBATALKAN", "CANCELLED", "CANCELLED"]);
+const CANCELLED_STATUSES = new Set(["DIBATALKAN", "CANCELLED", "CANCELED"]);
 const ONLINE_METHODS = new Set(["QRIS", "TRANSFER", "TRANSFER_BANK"]);
 
 function nowJakarta() {
