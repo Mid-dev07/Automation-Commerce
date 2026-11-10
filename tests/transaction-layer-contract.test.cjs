@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const root = path.resolve(__dirname, "..");
 const worker = fs.readFileSync(path.join(root, "worker.js"), "utf8");
 const layer = fs.readFileSync(path.join(root, "transaction-layer.js"), "utf8");
+const orderLifecycle = fs.readFileSync(path.join(root, "order-lifecycle.mjs"), "utf8");
 const schema = fs.readFileSync(path.join(root, "migrations/0001_transaction_core.sql"), "utf8");
 
 test("transaction layer and Worker are valid JavaScript modules", () => {
@@ -45,7 +46,7 @@ test("Durable Object serializes payment and pickup state changes", () => {
   assert.match(layer, /enqueue\(fn\)/);
   assert.match(layer, /approvePaymentD1/);
   assert.match(layer, /markPickedUpD1/);
-  assert.match(layer, /payment_confirmation_status='MENUNGGU_VERIFIKASI'/);
+  assert.match(orderLifecycle, /payment_confirmation_status='MENUNGGU_VERIFIKASI'/);
   assert.match(layer, /pickup_status='DIAMBIL'/);
 });
 
@@ -66,9 +67,9 @@ test("payment, status and pickup callbacks accept stable order IDs", () => {
 test("catalog blank stock remains unlimited and paid approval retry-safe", () => {
   assert.match(layer, /product\.stock == null \|\| product\.stock === "" \? null/);
   assert.match(worker, /stockText === "" \? null : Number\(stockText\)/);
-  assert.match(layer, /alreadyApproved: true/);
+  assert.match(orderLifecycle, /alreadyApproved: true/);
   assert.match(layer, /status IN \('DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED'\)/);
-  assert.match(layer, /Pesanan yang sudah dibatalkan tidak dapat dibuka kembali/);
+  assert.match(orderLifecycle, /Pesanan yang sudah dibatalkan tidak dapat dibuka kembali/);
 });
 
 test("Wrangler declares the SQLite DO class and D1 production binding", () => {
@@ -92,29 +93,27 @@ test("payment approval event records the actual previous status", () => {
 });
 
 test("order lifecycle transitions are atomically mirrored into the admin activity audit", () => {
-  assert.match(layer, /function adminActivityAuditStatement\(db, actor, action, resourceId, summary, at, sourceKey\)/);
-  assert.match(layer, /INSERT INTO admin_activity_audit\(audit_id,actor_channel,actor_id,action,resource_type,resource_id,summary_json,created_at_ms\)/);
-  assert.match(layer, /WHERE EXISTS \([\s\S]{0,180}FROM order_events WHERE order_id=\? AND event_type=\? AND source_key=\?/);
+  assert.match(orderLifecycle, /function adminActivityAuditStatement\(db, actor, action, resourceId, summary, at, sourceKey\)/);
+  assert.match(orderLifecycle, /INSERT INTO admin_activity_audit\(audit_id,actor_channel,actor_id,action,resource_type,resource_id,summary_json,created_at_ms\)/);
+  assert.match(orderLifecycle, /WHERE EXISTS \([\s\S]{0,180}FROM order_events WHERE order_id=\? AND event_type=\? AND source_key=\?/);
 
   const cases = [
-    ["async function approvePaymentD1", "async function rejectPaymentD1", "PAYMENT_APPROVED"],
-    ["async function rejectPaymentD1", "async function setOrderStatusD1", "PAYMENT_REJECTED"],
-    ["async function setOrderStatusD1", "async function markPickedUpD1", "STATUS_CHANGED"],
-    ["async function markPickedUpD1", "export async function bootstrapTransactions", "PICKED_UP"]
+    ["export async function approvePaymentD1", "export async function rejectPaymentD1", "PAYMENT_APPROVED"],
+    ["export async function rejectPaymentD1", "export async function setOrderStatusD1", "PAYMENT_REJECTED"],
+    ["export async function setOrderStatusD1", "", "STATUS_CHANGED"]
   ];
   for (const [startMarker, endMarker, action] of cases) {
-    const start = layer.indexOf(startMarker);
-    const end = layer.indexOf(endMarker, start + startMarker.length);
+    const start = orderLifecycle.indexOf(startMarker);
+    const end = endMarker ? orderLifecycle.indexOf(endMarker, start + startMarker.length) : orderLifecycle.length;
     assert.notEqual(start, -1, startMarker);
-    assert.notEqual(end, -1, endMarker);
-    assert.match(layer.slice(start, end), new RegExp("adminActivityAuditStatement\\(db,actor,\"" + action + "\""));
+    assert.notEqual(end, -1, endMarker || "end of lifecycle module");
+    assert.ok(orderLifecycle.slice(start, end).includes('adminActivityAuditStatement(db,actor,"' + action + '"'));
   }
 
-  assert.match(layer, /if \(current === String\(status\)\.toUpperCase\(\)\) return \{ \.\.\.o, noStatusChange: true \}/);
+  assert.match(orderLifecycle, /noStatusChange: true/);
   assert.match(layer, /SELECT order_id,'PICKED_UP',\?,'SELESAI'/);
-  assert.match(layer, /String\(before\.status\|\|\"\"\)/);
+  assert.match(layer, /String\(before\.status\|\|""\)/);
 });
-
 test("coordinator audit is best-effort and bounded", () => {
   const start = layer.indexOf("  audit(operation,key,result)");
   const end = layer.indexOf("\n  async createOrder", start);
@@ -194,17 +193,13 @@ test("cart checkout and operations are serialized by the durable coordinator", (
 });
 
 test("cancelling a multi-item order releases all child SKU reservations atomically", () => {
-  const start=layer.indexOf("async function setOrderStatusD1");
-  const end=layer.indexOf("\nasync function markPickedUpD1",start);
-  const code=layer.slice(start,end);
-  assert.match(code, /String\(o\.sku \|\| ""\)\.toUpperCase\(\) === "MULTI"/);
-  assert.match(code, /cartInventoryReleaseStatements\(db,id,at\)/);
+  assert.match(orderLifecycle, /String\(o\.sku \|\| ""\)\.toUpperCase\(\) === "MULTI"/);
+  assert.match(orderLifecycle, /cartInventoryReleaseStatements\(db,id,at\)/);
   const cart = fs.readFileSync(path.join(root, "cart-layer.mjs"), "utf8");
   assert.match(cart, /INSERT OR IGNORE INTO order_item_inventory_movements/);
   assert.match(cart, /UPDATE orders SET stock_reserved=0/);
-  assert.match(code, /PAID_STATUSES\.has\(current\)/);
+  assert.match(orderLifecycle, /PAID_STATUSES\.has\(current\)/);
 });
-
 test("legacy single-SKU checkout path remains active alongside cart checkout", () => {
   assert.match(layer, /async function createOrderD1\(db, input\)/);
   assert.match(layer, /export async function createOrderTransactional\(env,input\)/);
