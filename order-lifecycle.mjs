@@ -76,9 +76,10 @@ export async function requestVerificationD1(db, id, customerId) {
   }
   if (String(o.payment_confirmation_status).toUpperCase() === "MENUNGGU_VERIFIKASI") return o;
   const at = nowJakarta();
+  const sourceKey = "request:" + crypto.randomUUID();
   const results = await db.batch([
     db.prepare("UPDATE orders SET payment_confirmation_status='MENUNGGU_VERIFIKASI',payment_proof_file_id='',payment_proof_type='',payment_requested_at=?,updated_at=? WHERE order_id=? AND status=? AND payment_confirmation_status IN ('','DITOLAK')").bind(at,at,id,o.status),
-    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_REQUESTED',?,?,?,?,'{}',? FROM orders WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND updated_at=?").bind(o.payment_confirmation_status||"","MENUNGGU_VERIFIKASI",clean(customerId,128),"request:"+at,at,id,at),
+    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_REQUESTED',?,?,?,?,'{}',? FROM orders WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI' AND updated_at=?").bind(o.payment_confirmation_status||"","MENUNGGU_VERIFIKASI",clean(customerId,128),sourceKey,at,id,at),
     sheetMirrorStatement(db,id,at)
   ]);
   if (Number(results[0].meta?.changes) !== 1) {
