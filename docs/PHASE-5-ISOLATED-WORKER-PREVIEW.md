@@ -199,3 +199,48 @@ GitHub Actions also runs the existing Worker/cart regression and Messaging Core 
 - No Production secret values were read or copied.
 - No Production bindings, routes, cron triggers, Sheets destination, bot token, or admin chat ID were changed.
 - Work remains on `feat/phase-3-r2-product-media-2026-11-09`; no merge to `main` was performed.
+
+
+## 9. Non-browser regression continuation — 2026-11-10
+
+This continuation intentionally avoided TinyFish and did not change Worker runtime code.
+
+### Product-media unit coverage
+
+The existing `tests/product-media.test.cjs` suite already covered signature detection, forged MIME rejection, generated R2 keys, safe HTTP metadata, URL construction, GET/HEAD media serving, path validation, delete-key validation, and R2 compensation when D1 persistence fails.
+
+Three additional boundary cases were added:
+
+- Accept an image exactly at the 5 MiB limit.
+- Return HTTP 503 when media storage is unavailable and HTTP 415 when a stored object has an unsupported MIME type.
+- Return HTTP 412 when an R2 GET result has no body.
+
+Commit: `7a8389b2bfbdcee2ed04ab374a41909d9bca627b`.
+
+### Feature-branch CI trigger
+
+The `Cart regression checks` workflow now also runs on pushes to this isolated feature branch:
+
+`feat/phase-3-r2-product-media-2026-11-09`
+
+It still runs for pull requests targeting `main` and retains its manual `workflow_dispatch` trigger. The workflow runs Worker/module syntax checks, all `tests/*.test.cjs` suites, and Messaging Core unit tests under Node 24.
+
+Commit: `8fc7588c04c37550ef9bc0f46235c9e25c1f1b08`.
+
+The connected GitHub status endpoint did not expose a verifiable run result for this branch-push event. Therefore the new commit is **not recorded as CI-passing** here. The last previously documented successful workflow result remains Worker/cart regression 93/93 and Messaging Core 26/26, before these latest test changes.
+
+### Read-only Preview resource recheck
+
+Cloudflare API read-only queries confirmed:
+
+- Preview D1 `transaction_store_state=READY`.
+- `catalog_products=0`, `orders=0`, `order_items=0`, and `inventory_movements=0`.
+- Preview R2 prefix `products/` contains zero objects.
+
+No synthetic records or objects were created by this recheck. No Worker code was uploaded, no Preview deployment was created, and no Production resource was written.
+
+### Remaining verification
+
+- Confirm the GitHub Actions run for the branch-push commit from the Actions page.
+- Authenticated browser test of the deployment #5 delete modal and the complete admin product-photo upload flow.
+- Full cart/checkout/order lifecycle and Telegram end-to-end checks remain separate follow-up work.
