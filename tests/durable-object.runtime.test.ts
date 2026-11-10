@@ -346,6 +346,65 @@ describe("Seiton cart Durable Object runtime", () => {
     expect(Number(forbiddenAudit?.n)).toBe(0);
   });
 
+  it("accepts a customer QRIS order through the webhook, reserves stock in D1 and sends a confirmation", async () => {
+    const id = stamp();
+    const sku = "RT-TG-ORDER-" + id;
+    await seedProduct(sku, 5, 17000);
+    const customerId = "runtime-telegram-" + id;
+    const chatId = Number.parseInt(id.slice(0, 8), 16) + 100000000;
+    const updateId = Number.parseInt(id.slice(0, 8), 16);
+    const sent: Array<{ chat_id: string; text: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> }> }> = [];
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
+      const payload = await request.json() as typeof sent[number];
+      sent.push(payload);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 9003 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const response = await postTelegramUpdate({
+      update_id: updateId,
+      message: {
+        message_id: 4,
+        date: 1794300003,
+        chat: { id: chatId, type: "private" },
+        from: { id: chatId, first_name: "Runtime", last_name: "Buyer" },
+        text: "beli " + sku + " 2 QRIS"
+      }
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].chat_id).toBe(String(chatId));
+    expect(sent[0].text).toContain("PESANAN DICATAT - SEITON.ID");
+
+    const order = await env.DB.prepare(
+      "SELECT order_id,status,total,stock_reserved,payment_method FROM orders WHERE idempotency_key=?"
+    ).bind("update:telegram:" + String(updateId)).first<{
+      order_id: string; status: string; total: number; stock_reserved: number; payment_method: string;
+    }>();
+    expect(order).toMatchObject({
+      status: "MENUNGGU_PEMBAYARAN",
+      total: 34000,
+      stock_reserved: 1,
+      payment_method: "QRIS"
+    });
+    expect(sent[0].text).toContain(order!.order_id);
+    const buttons = sent[0].reply_markup?.inline_keyboard.flat().map(button => button.callback_data);
+    expect(buttons).toContain("pc:req:" + order!.order_id);
+    expect(await readStock(sku)).toBe(3);
+
+    const movement = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM inventory_movements WHERE order_id=? AND movement_type='RESERVE' AND quantity=2"
+    ).bind(order!.order_id).first<{ n: number }>();
+    expect(Number(movement?.n)).toBe(1);
+  });
+
   it("serves health from the Worker runtime with the D1 and DO bindings ready", async () => {
     const response = await exports.default.fetch(new Request("http://runtime.test/health"));
     expect(response.status).toBe(200);
