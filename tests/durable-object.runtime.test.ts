@@ -1,6 +1,10 @@
 import { env, exports } from "cloudflare:workers";
 import { createExecutionContext, evictDurableObject, waitOnExecutionContext } from "cloudflare:test";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { setupNetwork } from "@msw/cloudflare";
+import { http, HttpResponse } from "msw";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+
+const network = setupNetwork();
 
 const runtimeSchema = [
   "CREATE TABLE IF NOT EXISTS app_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
@@ -21,6 +25,16 @@ const runtimeSchema = [
 ];
 
 const stamp = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
+
+function mockTelegramSendMessages(sent: any[]) {
+  network.use(http.post(
+    "https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage",
+    async ({ request }) => {
+      sent.push(await request.json());
+      return HttpResponse.json({ ok: true, result: { message_id: 9001 } });
+    }
+  ));
+}
 const createdSkus: string[] = [];
 
 async function seedProduct(sku: string, stock: number, price = 12000) {
@@ -77,9 +91,10 @@ async function cleanupSku(sku: string) {
 }
 
 describe("Seiton cart Durable Object runtime", () => {
-  afterEach(() => { vi.restoreAllMocks(); });
+  afterEach(() => network.resetHandlers());
 
   beforeAll(async () => {
+    network.enable();
     await env.DB.batch(runtimeSchema.map(sql => env.DB.prepare(sql)));
     await env.DB.prepare(
       "INSERT INTO app_meta(key,value,updated_at) VALUES('transaction_store_state','READY',?) " +
@@ -88,6 +103,7 @@ describe("Seiton cart Durable Object runtime", () => {
   });
 
   afterAll(async () => {
+    network.disable();
     for (const sku of createdSkus) await cleanupSku(sku);
   });
 
@@ -260,16 +276,7 @@ describe("Seiton cart Durable Object runtime", () => {
     expect(malformed.status).toBe(400);
 
     const sent: any[] = [];
-    const telegramMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const request = new Request(input, init);
-      expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
-      const payload = await request.json() as typeof sent[number];
-      sent.push(payload);
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 9001 } }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    });
+    mockTelegramSendMessages(sent);
 
     const adminResponse = await postTelegramUpdate({
       update_id: 41001,
@@ -310,21 +317,12 @@ describe("Seiton cart Durable Object runtime", () => {
     const customerButtons = sent[1].reply_markup?.inline_keyboard.flat().map(button => button.callback_data);
     expect(customerButtons).toContain("nav:catalog");
     expect(customerButtons).toContain("nav:orders");
-    expect(telegramMock).toHaveBeenCalledTimes(2);
+    expect(sent).toHaveLength(2);
   });
 
   it("blocks Telegram sales-report commands from non-admin users", async () => {
     const sent: any[] = [];
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const request = new Request(input, init);
-      expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
-      const payload = await request.json() as typeof sent[number];
-      sent.push(payload);
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 9002 } }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    });
+    mockTelegramSendMessages(sent);
 
     const response = await postTelegramUpdate({
       update_id: 41003,
@@ -354,17 +352,7 @@ describe("Seiton cart Durable Object runtime", () => {
     const chatId = Number.parseInt(id.slice(0, 8), 16) + 100000000;
     const updateId = Number.parseInt(id.slice(0, 8), 16);
     const sent: any[] = [];
-
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-      const request = new Request(input, init);
-      expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
-      const payload = await request.json() as typeof sent[number];
-      sent.push(payload);
-      return new Response(JSON.stringify({ ok: true, result: { message_id: 9003 } }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    });
+    mockTelegramSendMessages(sent);
 
     const response = await postTelegramUpdate({
       update_id: updateId,
