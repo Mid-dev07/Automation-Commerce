@@ -205,3 +205,50 @@ test("keeps the newly uploaded object when product metadata persistence succeeds
   assert.equal(outcome.result.savedKey,outcome.uploaded.key);
   assert.equal(bucket.objects.has(outcome.uploaded.key),true);
 });
+
+
+test("accepts the exact 5 MB boundary while retaining the detected signature", () => {
+  const image = new Uint8Array(media.MAX_PRODUCT_IMAGE_BYTES);
+  image.set(pngBytes());
+  const inspected = media.inspectProductImage(image, "image/png");
+  assert.equal(inspected.size, media.MAX_PRODUCT_IMAGE_BYTES);
+  assert.equal(inspected.contentType, "image/png");
+});
+
+test("media route returns 503 for unavailable storage and 415 for unsupported stored MIME", async () => {
+  const unavailable = await media.serveProductMedia(
+    new Request("https://example.test/media/image"),
+    null,
+    "products/550e8400-e29b-41d4-a716-446655440000.png"
+  );
+  assert.equal(unavailable.status, 503);
+
+  const unsupported = await media.serveProductMedia(
+    new Request("https://example.test/media/image"),
+    {
+      async get() {
+        return {
+          body: new Response("not an image").body,
+          httpMetadata: { contentType: "text/html" }
+        };
+      },
+      async head() { return null; }
+    },
+    "products/550e8400-e29b-41d4-a716-446655440000.png"
+  );
+  assert.equal(unsupported.status, 415);
+});
+
+test("media route returns 412 when a stored object has no GET body", async () => {
+  const response = await media.serveProductMedia(
+    new Request("https://example.test/media/image"),
+    {
+      async get() {
+        return { httpMetadata: { contentType: "image/png" }, size: 8 };
+      },
+      async head() { return null; }
+    },
+    "products/550e8400-e29b-41d4-a716-446655440000.png"
+  );
+  assert.equal(response.status, 412);
+});
