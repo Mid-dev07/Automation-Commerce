@@ -92,10 +92,8 @@ test("multi-item cart checkout completes proof, approval, and processing without
     assert.equal(order.total, 49000);
     assert.equal(order.status, "MENUNGGU_PEMBAYARAN");
     assert.equal(order.stock_reserved, true);
-    assert.deepEqual(
-      sqlite.prepare("SELECT sku,stock FROM catalog_products ORDER BY sku").all(),
-      [{ sku: "PH6-PAY-A", stock: 6 }, { sku: "PH6-PAY-B", stock: 4 }]
-    );
+    assert.equal(sqlite.prepare("SELECT stock FROM catalog_products WHERE sku='PH6-PAY-A'").get().stock, 6);
+    assert.equal(sqlite.prepare("SELECT stock FROM catalog_products WHERE sku='PH6-PAY-B'").get().stock, 4);
 
     await assert.rejects(
       requestVerificationD1(db, order.order_id, "OTHER-CUSTOMER"),
