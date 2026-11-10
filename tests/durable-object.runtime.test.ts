@@ -104,6 +104,9 @@ describe("Seiton cart Durable Object runtime", () => {
   });
 
   afterAll(async () => {
+    await env.DB.prepare(
+      "DELETE FROM admin_activity_audit WHERE actor_id='70001' AND action='ADMIN_MENU_OPENED'"
+    ).run();
     network.disable();
     for (const sku of createdSkus) await cleanupSku(sku);
   });
