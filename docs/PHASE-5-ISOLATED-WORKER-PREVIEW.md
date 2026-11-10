@@ -287,3 +287,14 @@ After the smoke test, all PH6 catalog, order, child-item, inventory-movement, ev
 This phase does **not** claim a fully live Telegram-to-Worker end-to-end checkout. The SQLite integration tests invoke the D1 cart-order/lifecycle functions; the Preview D1 smoke test validates the isolated database triggers and lifecycle SQL. The authenticated Worker endpoints and the customer's persisted Durable Object cart RPC methods (`addCartItem`, `updateCartItem`, `removeCartItem`, `checkoutCart`) were not driven through a live browser or Telegram session. The actual payment gateway and real payment-proof file transport were not called; the proof identifier was synthetic.
 
 No Worker deployment, Production D1/R2 write, Production secret access, merge, or update to `main` occurred in this phase. The latest deployed Preview Worker remains deployment #5; the new lifecycle-module changes are on the feature branch and have not been deployed.
+
+
+### Payment retry event-key hardening
+
+A rapid retry test caught a unique-key collision when two payment verification requests occurred within the same timestamp tick. The payment-request event source key now uses a UUID rather than the timestamp alone, preventing a same-millisecond retry from colliding with the prior `PAYMENT_REQUESTED` event.
+
+The regression suite exercises rejection followed by immediate resubmission. GitHub Actions run **#31** passed after this correction: **100/100** SQLite/Worker contract tests and **26/26** Messaging Core tests.
+
+See [GitHub Actions run #31](https://github.com/midznight/Automation-Commerce/actions/runs/42783862129).
+
+Latest code commit: `e80ccb696ab0cda7adc7dff084701471eeffee66`.
