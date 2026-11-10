@@ -46,6 +46,20 @@ async function orderIdsForSku(sku: string): Promise<string[]> {
   return (result.results || []).map(row => row.order_id);
 }
 
+async function postTelegramUpdate(update: unknown, secret = "RUNTIME_TEST_WEBHOOK_SECRET") {
+  const ctx = createExecutionContext();
+  const response = await exports.default.fetch(new Request("http://runtime.test/telegram", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Telegram-Bot-Api-Secret-Token": secret
+    },
+    body: JSON.stringify(update)
+  }), env, ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
+}
+
 async function cleanupSku(sku: string) {
   const ids = await orderIdsForSku(sku);
   for (const id of ids) {
@@ -63,6 +77,8 @@ async function cleanupSku(sku: string) {
 }
 
 describe("Seiton cart Durable Object runtime", () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
   beforeAll(async () => {
     await env.DB.batch(runtimeSchema.map(sql => env.DB.prepare(sql)));
     await env.DB.prepare(
@@ -213,6 +229,121 @@ describe("Seiton cart Durable Object runtime", () => {
       "WHERE sku=? AND movement_type='RESERVE'"
     ).bind(sku).first<{ n: number }>();
     expect(Number(reserveCount?.n)).toBe(1);
+  });
+
+  it("validates Telegram webhook secret and routes admin/customer start menus with a mock API", async () => {
+    const unauthorized = await exports.default.fetch(new Request("http://runtime.test/telegram", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ update_id: 1 })
+    }), env);
+    expect(unauthorized.status).toBe(401);
+
+    const wrongSecret = await exports.default.fetch(new Request("http://runtime.test/telegram", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Bot-Api-Secret-Token": "WRONG_SECRET"
+      },
+      body: JSON.stringify({ update_id: 2 })
+    }), env);
+    expect(wrongSecret.status).toBe(401);
+
+    const malformed = await exports.default.fetch(new Request("http://runtime.test/telegram", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Telegram-Bot-Api-Secret-Token": "RUNTIME_TEST_WEBHOOK_SECRET"
+      },
+      body: "{bad-json"
+    }), env);
+    expect(malformed.status).toBe(400);
+
+    const sent: Array<{ chat_id: string; text: string; reply_markup?: { inline_keyboard: Array<Array<{ text: string; callback_data?: string }>> }> }> = [];
+    const telegramMock = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
+      const payload = await request.json() as typeof sent[number];
+      sent.push(payload);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 9001 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const adminResponse = await postTelegramUpdate({
+      update_id: 41001,
+      message: {
+        message_id: 1,
+        date: 1794300000,
+        chat: { id: 70001, type: "private" },
+        from: { id: 70001, first_name: "Preview", last_name: "Admin" },
+        text: "/start"
+      }
+    });
+    expect(adminResponse.status).toBe(200);
+    expect(await adminResponse.json()).toMatchObject({ ok: true });
+    expect(sent[0].chat_id).toBe("70001");
+    expect(sent[0].text).toContain("PANEL ADMIN SEITON.ID");
+    const adminButtons = sent[0].reply_markup?.inline_keyboard.flat().map(button => button.callback_data);
+    expect(adminButtons).toContain("adm:report");
+    expect(adminButtons).toContain("adm:catalog");
+
+    const audit = await env.DB.prepare(
+      "SELECT action,actor_id FROM admin_activity_audit WHERE action='ADMIN_MENU_OPENED' AND actor_id='70001'"
+    ).first<{ action: string; actor_id: string }>();
+    expect(audit).toMatchObject({ action: "ADMIN_MENU_OPENED", actor_id: "70001" });
+
+    const customerResponse = await postTelegramUpdate({
+      update_id: 41002,
+      message: {
+        message_id: 2,
+        date: 1794300001,
+        chat: { id: 80002, type: "private" },
+        from: { id: 80002, first_name: "Preview", last_name: "Customer" },
+        text: "/start"
+      }
+    });
+    expect(customerResponse.status).toBe(200);
+    expect(sent[1].chat_id).toBe("80002");
+    expect(sent[1].text).toContain("SELAMAT DATANG DI SEITON.ID");
+    const customerButtons = sent[1].reply_markup?.inline_keyboard.flat().map(button => button.callback_data);
+    expect(customerButtons).toContain("nav:catalog");
+    expect(customerButtons).toContain("nav:orders");
+    expect(telegramMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("blocks Telegram sales-report commands from non-admin users", async () => {
+    const sent: Array<{ chat_id: string; text: string }> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const request = new Request(input, init);
+      expect(request.url).toBe("https://api.telegram.org/botSEITON_RUNTIME_TEST_TOKEN/sendMessage");
+      const payload = await request.json() as typeof sent[number];
+      sent.push(payload);
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 9002 } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const response = await postTelegramUpdate({
+      update_id: 41003,
+      message: {
+        message_id: 3,
+        date: 1794300002,
+        chat: { id: 80003, type: "private" },
+        from: { id: 80003, first_name: "Preview" },
+        text: "/laporan"
+      }
+    });
+
+    expect(response.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].text).toContain("khusus admin");
+    const forbiddenAudit = await env.DB.prepare(
+      "SELECT COUNT(*) AS n FROM admin_activity_audit WHERE actor_id='80003' AND action='REPORT_GENERATED'"
+    ).first<{ n: number }>();
+    expect(Number(forbiddenAudit?.n)).toBe(0);
   });
 
   it("serves health from the Worker runtime with the D1 and DO bindings ready", async () => {
