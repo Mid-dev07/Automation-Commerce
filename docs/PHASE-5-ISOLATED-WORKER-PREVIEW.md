@@ -3,7 +3,7 @@
 Date: 2026-11-10  
 Status: **Preview deployment #5 active. Health, dashboard, D1 readiness, catalog create/update, R2 bucket object CRUD, and SQL soft-delete semantics have been checked. Browser-level photo upload and post-#5 delete confirmation still need an authenticated browser run.**
 
-Latest successful GitHub Actions run before the docs-only status update: Worker/cart regression **93/93 passed**, Messaging Core **26/26 passed**. Preview URL opt-in is covered by a regression test.
+Latest successful GitHub Actions run: [run #20](https://github.com/midznight/Automation-Commerce/actions/runs/42767283766) on 2026-11-10. Worker/cart regression **97/97 passed**, Messaging Core **26/26 passed**, and Worker/module syntax checks passed. Preview URL opt-in is covered by a regression test.
 
 ## 1. Isolated resources provisioned
 
@@ -227,7 +227,7 @@ It still runs for pull requests targeting `main` and retains its manual `workflo
 
 Commit: `8fc7588c04c37550ef9bc0f46235c9e25c1f1b08`.
 
-The connected GitHub status endpoint did not expose a verifiable run result for this branch-push event. Therefore the new commit is **not recorded as CI-passing** here. The last previously documented successful workflow result remains Worker/cart regression 93/93 and Messaging Core 26/26, before these latest test changes.
+GitHub Actions run **#20** completed successfully for commit `d8b0ca533ae127e8543c9a1d7d3b3f09018e1d3e` (event `push`). The `Cart, worker, and messaging regression` job passed all steps: Worker/module syntax checks, **97/97** SQLite and Worker contract tests, and **26/26** Messaging Core tests. See [run #20](https://github.com/midznight/Automation-Commerce/actions/runs/42767283766).
 
 ### Read-only Preview resource recheck
 
