@@ -349,3 +349,62 @@ A direct HTTP request from the current execution container to the Preview URL co
 The live Telegram webhook/customer journey and authenticated admin browser flows remain unverified. Preview deployment #6 contains no Telegram bot token or admin chat ID, and no real Telegram API/payment provider call was made.
 
 No Production Worker deployment, Production D1/R2 write, secret-value read/copy, merge to `main`, or change to `main` occurred. `main` remains at `fd41a0de75cd8de4119e8a8f24e9e1699b4a8044`.
+
+
+## Phase 8 — Telegram webhook and single-item checkout runtime simulation
+
+### Isolated Telegram test identity
+
+The local Workers runtime test configuration `wrangler.test.jsonc` now provides only synthetic Telegram values:
+
+- `TELEGRAM_WEBHOOK_SECRET=RUNTIME_TEST_WEBHOOK_SECRET`
+- `TELEGRAM_TOKEN=SEITON_RUNTIME_TEST_TOKEN`
+- `ADMIN_CHAT_ID=70001`
+
+These values are test literals, not real Telegram credentials. They are not added to the Cloudflare Preview deployment or Production. The local runtime keeps its own synthetic D1 schema/database and a local Durable Object namespace.
+
+### Mocked Telegram network boundary
+
+Added `msw@^3` and `@msw/cloudflare@^0.2.0`. The test suite intercepts the exact fake bot `sendMessage` endpoint with Mock Service Worker. The handler returns synthetic Telegram API responses and records the outgoing payloads for assertions.
+
+The Worker webhook tests do not call Telegram's real API and do not deliver messages to a real user or administrator. The Google Sheets service-account setting is absent from the local test environment; transactional mirroring therefore cannot write to a spreadsheet.
+
+### Three Telegram webhook scenarios passed
+
+1. **Webhook security and menu routing**
+   - Missing and incorrect `X-Telegram-Bot-Api-Secret-Token` are rejected with HTTP 401.
+   - Malformed JSON is rejected with HTTP 400.
+   - A synthetic admin `/start` receives the admin menu and creates an `ADMIN_MENU_OPENED` audit row.
+   - A synthetic customer `/start` receives the customer menu and customer navigation keyboard.
+
+2. **Admin-only command authorization**
+   - A non-admin customer issuing `/laporan` receives the admin-only rejection response.
+   - No `REPORT_GENERATED` audit entry is created for that customer.
+
+3. **Customer single-item QRIS order**
+   - A synthetic customer sends `beli <SKU> 2 QRIS` through the Worker's `POST /telegram` handler.
+   - The Worker calls the existing Durable Object order coordinator and creates a D1 order in `MENUNGGU_PEMBAYARAN`.
+   - The order total is Rp34.000, with `stock_reserved=1`.
+   - The D1 `RESERVE` movement deducts exactly two units from the product's stock.
+   - The mocked Telegram API receives the order confirmation and the `pc:req:<order_id>` payment-verification callback button.
+
+The runtime suite's `afterAll` cleanup removes synthetic Telegram order records, single-item inventory movements, related outbox/order events, the synthetic product, and the `ADMIN_MENU_OPENED` test audit row from its local D1 database.
+
+### GitHub Actions run #53
+
+Run **#53** succeeded for commit `aaefc123b55223e1dfcea06a1b5af2546815d344`:
+
+- Worker / SQLite / static contract tests: **100/100 passed**.
+- Durable Object and Telegram webhook runtime tests: **8/8 passed**.
+- Messaging Core tests: **26/26 passed**.
+- Total: **134 tests passed, 0 failed**.
+
+See [GitHub Actions run #53](https://github.com/midznight/Automation-Commerce/actions/runs/42834100730).
+
+### Boundaries not yet verified
+
+This phase is a local Worker runtime simulation inside workerd. It does **not** prove that the public Telegram webhook is currently configured to the real bot, that Telegram can reach the deployed Cloudflare URL, or that actual Telegram chats work. No real bot token, real webhook secret, admin chat ID, external Telegram API request, or payment gateway was used.
+
+The actual deployed Preview remains deployment **#6**. Phase 8 changed only test configuration, test code, and test dependencies; it did not deploy a new Worker. The live Preview HTTP endpoint, authenticated admin browser flows, actual Telegram delivery, QRIS transfer, and uploaded payment-proof transport remain separate validation items.
+
+No Production resource was modified. No merge to `main` occurred; the main branch remains at `fd41a0de75cd8de4119e8a8f24e9e1699b4a8044`.
