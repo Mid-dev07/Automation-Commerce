@@ -2,18 +2,18 @@ import { env, exports } from "cloudflare:workers";
 import { evictDurableObject } from "cloudflare:test";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import migration0001 from "../migrations/0001_transaction_core.sql?raw";
-import migration0002 from "../migrations/0002_multi_item_cart.sql?raw";
-import migration0004 from "../migrations/0004_messaging_core.sql?raw";
-import migration0005 from "../migrations/0005_messaging_handoff_audit.sql?raw";
-import migration0006 from "../migrations/0006_messaging_handoff_resolution.sql?raw";
-import migration0007 from "../migrations/0007_admin_login_security.sql?raw";
-import migration0008 from "../migrations/0008_admin_web_sessions.sql?raw";
-import migration0009 from "../migrations/0009_admin_activity_audit.sql?raw";
-
-const migrations = [
-  migration0001, migration0002, migration0004, migration0005,
-  migration0006, migration0007, migration0008, migration0009
+const runtimeSchema = [
+  "CREATE TABLE IF NOT EXISTS app_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)",
+  "CREATE TABLE IF NOT EXISTS catalog_products(sku TEXT PRIMARY KEY COLLATE NOCASE,name TEXT NOT NULL,price INTEGER NOT NULL CHECK(price>=0),stock INTEGER CHECK(stock IS NULL OR stock>=0),active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),photo_url TEXT NOT NULL DEFAULT '',description TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS orders(order_id TEXT PRIMARY KEY,idempotency_key TEXT UNIQUE,created_at TEXT NOT NULL,created_ms INTEGER NOT NULL,channel TEXT NOT NULL,customer_id TEXT NOT NULL,customer_name TEXT NOT NULL,sku TEXT NOT NULL,product_name TEXT NOT NULL,quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 1000),unit_price INTEGER NOT NULL CHECK(unit_price>=0),subtotal INTEGER NOT NULL CHECK(subtotal>=0),shipping INTEGER NOT NULL CHECK(shipping>=0),total INTEGER NOT NULL CHECK(total>=0),payment_method TEXT NOT NULL,status TEXT NOT NULL,payment_confirmation_status TEXT NOT NULL DEFAULT '',payment_proof_file_id TEXT NOT NULL DEFAULT '',payment_proof_type TEXT NOT NULL DEFAULT '',payment_requested_at TEXT NOT NULL DEFAULT '',payment_confirmed_at TEXT NOT NULL DEFAULT '',receipt_code TEXT UNIQUE,pickup_status TEXT NOT NULL DEFAULT '',stock_reserved INTEGER NOT NULL DEFAULT 0 CHECK(stock_reserved IN (0,1)),legacy_sheet_row INTEGER UNIQUE,updated_at TEXT NOT NULL)",
+  "CREATE TABLE IF NOT EXISTS order_items(order_id TEXT NOT NULL,sku TEXT NOT NULL COLLATE NOCASE,product_name TEXT NOT NULL,quantity INTEGER NOT NULL CHECK(quantity BETWEEN 1 AND 1000),unit_price INTEGER NOT NULL CHECK(unit_price>=0),subtotal INTEGER NOT NULL CHECK(subtotal>=0),created_at TEXT NOT NULL,PRIMARY KEY(order_id,sku),FOREIGN KEY(order_id) REFERENCES orders(order_id),FOREIGN KEY(sku) REFERENCES catalog_products(sku))",
+  "CREATE TABLE IF NOT EXISTS order_item_inventory_movements(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT NOT NULL,sku TEXT NOT NULL COLLATE NOCASE,movement_type TEXT NOT NULL CHECK(movement_type IN ('RESERVE','RELEASE')),quantity INTEGER NOT NULL CHECK(quantity>0),created_at TEXT NOT NULL,UNIQUE(order_id,sku,movement_type),FOREIGN KEY(order_id,sku) REFERENCES order_items(order_id,sku),FOREIGN KEY(sku) REFERENCES catalog_products(sku))",
+  "CREATE TABLE IF NOT EXISTS order_events(id INTEGER PRIMARY KEY AUTOINCREMENT,order_id TEXT NOT NULL,event_type TEXT NOT NULL,from_status TEXT NOT NULL DEFAULT '',to_status TEXT NOT NULL DEFAULT '',actor TEXT NOT NULL DEFAULT '',source_key TEXT NOT NULL,payload_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,UNIQUE(order_id,event_type,source_key),FOREIGN KEY(order_id) REFERENCES orders(order_id))",
+  "CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,event_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,payload_json TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'PENDING',attempts INTEGER NOT NULL DEFAULT 0,available_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,created_at TEXT NOT NULL,processed_at TEXT,UNIQUE(event_type,aggregate_id))",
+  "CREATE TABLE IF NOT EXISTS admin_activity_audit(audit_id TEXT PRIMARY KEY,actor_channel TEXT NOT NULL CHECK(actor_channel IN ('telegram','web')),actor_id TEXT NOT NULL,action TEXT NOT NULL,resource_type TEXT NOT NULL,resource_id TEXT,summary_json TEXT NOT NULL DEFAULT '{}',created_at_ms INTEGER NOT NULL)",
+  "CREATE TRIGGER IF NOT EXISTS order_item_inventory_guard BEFORE INSERT ON order_item_inventory_movements WHEN NEW.movement_type='RESERVE' BEGIN SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM order_items i JOIN catalog_products p ON p.sku=i.sku JOIN orders o ON o.order_id=i.order_id WHERE i.order_id=NEW.order_id AND i.sku=NEW.sku AND i.quantity=NEW.quantity AND p.active=1 AND o.sku='MULTI' AND o.stock_reserved=1) THEN RAISE(ABORT,'PRODUCT_UNAVAILABLE') WHEN (SELECT stock FROM catalog_products WHERE sku=NEW.sku) IS NOT NULL AND (SELECT stock FROM catalog_products WHERE sku=NEW.sku)<NEW.quantity THEN RAISE(ABORT,'INSUFFICIENT_STOCK') END; END",
+  "CREATE TRIGGER IF NOT EXISTS order_item_inventory_reserve_apply AFTER INSERT ON order_item_inventory_movements WHEN NEW.movement_type='RESERVE' BEGIN UPDATE catalog_products SET stock=stock-NEW.quantity,updated_at=NEW.created_at WHERE sku=NEW.sku AND stock IS NOT NULL; END",
+  "CREATE TRIGGER IF NOT EXISTS order_item_inventory_release_apply AFTER INSERT ON order_item_inventory_movements WHEN NEW.movement_type='RELEASE' BEGIN UPDATE catalog_products SET stock=stock+NEW.quantity,updated_at=NEW.created_at WHERE sku=NEW.sku AND stock IS NOT NULL; END"
 ];
 
 const stamp = () => crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase();
@@ -59,10 +59,7 @@ async function cleanupSku(sku: string) {
 
 describe("Seiton cart Durable Object runtime", () => {
   beforeAll(async () => {
-    for (const migration of migrations) {
-      const sql = migration.split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith("--") && !/^PRAGMA foreign_keys\s*=/i.test(line)).join("\n");
-      await env.DB.exec(sql);
-    }
+    await env.DB.batch(runtimeSchema.map(sql => env.DB.prepare(sql)));
     await env.DB.prepare(
       "INSERT INTO app_meta(key,value,updated_at) VALUES('transaction_store_state','READY',?) " +
       "ON CONFLICT(key) DO UPDATE SET value='READY',updated_at=excluded.updated_at"
