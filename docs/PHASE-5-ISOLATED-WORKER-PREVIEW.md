@@ -244,3 +244,46 @@ No synthetic records or objects were created by this recheck. No Worker code was
 - Confirm the GitHub Actions run for the branch-push commit from the Actions page.
 - Authenticated browser test of the deployment #5 delete modal and the complete admin product-photo upload flow.
 - Full cart/checkout/order lifecycle and Telegram end-to-end checks remain separate follow-up work.
+
+
+## Phase 6 — cart, checkout, payment, and cancellation validation
+
+### Testable payment lifecycle module
+
+The D1 order lifecycle functions were extracted into `order-lifecycle.mjs` and imported by `transaction-layer.js`. This makes the existing state-transition implementation directly testable under Node's SQLite-backed D1 adapter without importing the Cloudflare Worker runtime.
+
+Added `tests/order-lifecycle.test.cjs` with three integration-style SQLite scenarios:
+
+- Multi-item checkout → customer ownership check → payment verification request → synthetic proof attachment → payment approval and receipt issuance → duplicate approval retry → reject cancellation after payment → move order to processing. Assertions verify stock is reserved once and no RELEASE movement occurs for a paid order.
+- Unpaid multi-item cancellation → restore each SKU's stock → confirm `stock_reserved=0` → reject reopening/re-verification of cancelled orders and ensure release is not duplicated.
+- Rejected payment → customer can resubmit verification → repeated pending verification remains stable → subsequent cancellation returns reserved stock.
+
+Static contract assertions were updated to follow the lifecycle helpers in the extracted module.
+
+### GitHub Actions validation
+
+GitHub Actions run **#29** succeeded for commit `3f769f914c1e3b8e2a179a24430183ebff9e3cb3` (push to the isolated feature branch):
+
+- Worker/module syntax check: passed.
+- SQLite and Worker contract tests: **100/100 passed**.
+- Messaging Core tests: **26/26 passed**.
+
+See [GitHub Actions run #29](https://github.com/midznight/Automation-Commerce/actions/runs/42783562662).
+
+### Isolated Preview D1 smoke test
+
+A direct D1 Preview smoke test used only synthetic SKUs and order IDs prefixed `PH6-`:
+
+- Two multi-item order parents and their child items were inserted; D1 inventory triggers reserved stock per SKU.
+- The QRIS scenario progressed from `MENUNGGU_PEMBAYARAN` to `MENUNGGU_VERIFIKASI`, accepted a synthetic proof reference, and ended as `DIBAYAR` / `DISETUJUI` with a test receipt code.
+- The unpaid scenario transitioned to `DIBATALKAN`; its two child RELEASE movements restored stock.
+- Replaying the release statements produced zero changes; stock remained unchanged and the RELEASE row count stayed at two.
+- The paid order retained its reservations; paid-order cancellation remains blocked by the lifecycle implementation.
+
+After the smoke test, all PH6 catalog, order, child-item, inventory-movement, event, outbox, and audit records were cleaned. A final read-only D1 check confirmed `transaction_store_state=READY` and zero rows in `catalog_products`, `orders`, `order_items`, `inventory_movements`, `order_item_inventory_movements`, `order_events`, `outbox`, and PH6 audit records.
+
+### Explicitly not yet verified
+
+This phase does **not** claim a fully live Telegram-to-Worker end-to-end checkout. The SQLite integration tests invoke the D1 cart-order/lifecycle functions; the Preview D1 smoke test validates the isolated database triggers and lifecycle SQL. The authenticated Worker endpoints and the customer's persisted Durable Object cart RPC methods (`addCartItem`, `updateCartItem`, `removeCartItem`, `checkoutCart`) were not driven through a live browser or Telegram session. The actual payment gateway and real payment-proof file transport were not called; the proof identifier was synthetic.
+
+No Worker deployment, Production D1/R2 write, Production secret access, merge, or update to `main` occurred in this phase. The latest deployed Preview Worker remains deployment #5; the new lifecycle-module changes are on the feature branch and have not been deployed.
