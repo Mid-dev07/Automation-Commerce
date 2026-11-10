@@ -59,7 +59,10 @@ async function cleanupSku(sku: string) {
 
 describe("Seiton cart Durable Object runtime", () => {
   beforeAll(async () => {
-    for (const migration of migrations) await env.DB.exec(migration);
+    for (const migration of migrations) {
+      const sql = migration.split("\\n").filter(line => !line.trim().startsWith("--")).join("\\n");
+      await env.DB.exec(sql);
+    }
     await env.DB.prepare(
       "INSERT INTO app_meta(key,value,updated_at) VALUES('transaction_store_state','READY',?) " +
       "ON CONFLICT(key) DO UPDATE SET value='READY',updated_at=excluded.updated_at"
