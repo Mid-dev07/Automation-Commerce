@@ -298,3 +298,54 @@ The regression suite exercises rejection followed by immediate resubmission. Git
 See [GitHub Actions run #31](https://github.com/midznight/Automation-Commerce/actions/runs/42783862129).
 
 Latest code commit: `e80ccb696ab0cda7adc7dff084701471eeffee66`.
+
+
+## Phase 7 — Durable Object RPC runtime validation
+
+### Preview deployment #6
+
+Updated the existing isolated Preview with the branch's current Worker modules using a merge-patch upload of code modules and annotations only. Existing Preview configuration was preserved: no secret values were included in the upload, and the D1, R2, rate-limit, and Durable Object bindings remained attached to the Preview resources.
+
+- Preview deployment: **#6**
+- Deployment ID: `e4fef012-371c-48c2-a7f2-9aa80071d82d`
+- Worker source annotation: `bd4df06e3c0c4fe6ba30d01797fab6b801d5989a`
+- Stable Preview URL: [phase-5-isolated-preview.automate-bot.seiton.biz.id](https://phase-5-isolated-preview.automate-bot.seiton.biz.id)
+- Immutable deployment URL: [e4fef012.automate-bot.seiton.biz.id](https://e4fef012.automate-bot.seiton.biz.id)
+- workers.dev deployment URL: [e4fef012-seiton-order-bot.midzpribadi.workers.dev](https://e4fef012-seiton-order-bot.midzpribadi.workers.dev)
+
+The Preview still uses D1 `c98e9147-8a53-4fb1-bee2-d33e966baeb7`, R2 `seiton-preview-product-media-20261109`, Preview rate-limit namespace `2026110902`, and Preview DO namespace `2bae989dc0364fef855fd80d3fc0cf4c`. Both Preview secret bindings remain present, but their values are not included in deployment responses or this document.
+
+### Cloudflare Workers runtime tests
+
+Added a dedicated Workers Vitest suite using `@cloudflare/vitest-plugin`, `vitest`, and an isolated local Wrangler config (`wrangler.test.jsonc`). The runtime suite executes the actual `OrderCoordinator` class in workerd and calls the cart Durable Object RPC stub directly. It uses a local test D1 database with a synthetic schema for the cart/order tables and stock triggers; the config does not reference any Cloudflare Production or Preview database ID.
+
+Five runtime scenarios passed:
+
+1. Add/update/remove/clear cart RPC operations and idempotent retry of a repeated mutation.
+2. Cart state survives Durable Object eviction and instance recreation.
+3. Multi-item checkout persists one parent order and child item rows, reserves stock through D1 triggers, clears the cart, and safely returns the same order for repeated checkout calls.
+4. Two distinct customer Durable Objects racing for the final stock unit produce exactly one successful checkout and one reservation.
+5. The Worker `/health` handler runs in workerd and reports D1 plus Durable Object transaction readiness as `READY`.
+
+The test suite cleans its synthetic D1 products and associated orders/events/outbox/audit rows in `afterAll`. The local workerd/Miniflare runtime and its Durable Object namespace are disposable test resources.
+
+### GitHub Actions run #43
+
+Run **#43** completed successfully for commit `7ab18fc3ea144db6adee51d777a85a8bd0b93f38`:
+
+- Worker / SQLite / static contract tests: **100/100 passed**.
+- Cloudflare Workers runtime / Durable Object RPC tests: **5/5 passed**.
+- Messaging Core tests: **26/26 passed**.
+- Total: **131 tests passed, 0 failed**.
+
+See [GitHub Actions run #43](https://github.com/midznight/Automation-Commerce/actions/runs/42831195275).
+
+### Post-test Preview state and remaining boundary
+
+A read-only check after the runtime suite confirmed the cloud Preview D1 remained `READY`, with zero rows in `catalog_products`, `orders`, `order_items`, `inventory_movements`, `order_item_inventory_movements`, `order_events`, and `outbox`. These Vitest tests ran against the local ephemeral D1, not the cloud Preview D1.
+
+A direct HTTP request from the current execution container to the Preview URL could not be completed because its DNS resolver returned a temporary name-resolution failure. Therefore this phase does not claim a successful live HTTP request against deployment #6. The Worker `/health` route was exercised successfully inside workerd by the Vitest integration test.
+
+The live Telegram webhook/customer journey and authenticated admin browser flows remain unverified. Preview deployment #6 contains no Telegram bot token or admin chat ID, and no real Telegram API/payment provider call was made.
+
+No Production Worker deployment, Production D1/R2 write, secret-value read/copy, merge to `main`, or change to `main` occurred. `main` remains at `fd41a0de75cd8de4119e8a8f24e9e1699b4a8044`.
