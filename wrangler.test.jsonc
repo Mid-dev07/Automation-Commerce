@@ -5,7 +5,10 @@
   "compatibility_date": "2026-11-03",
   "vars": {
     "APP_ENV": "preview",
-    "DEFAULT_SHIPPING": "0"
+    "DEFAULT_SHIPPING": "0",
+    "TELEGRAM_WEBHOOK_SECRET": "RUNTIME_TEST_WEBHOOK_SECRET",
+    "TELEGRAM_TOKEN": "SEITON_RUNTIME_TEST_TOKEN",
+    "ADMIN_CHAT_ID": "70001"
   },
   "d1_databases": [
     {
