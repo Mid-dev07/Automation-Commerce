@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seiton-order-bot-runtime-tests",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-03",
+  "vars": {
+    "APP_ENV": "preview",
+    "DEFAULT_SHIPPING": "0"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "seiton-runtime-tests",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ORDER_COORDINATOR",
+        "class_name": "OrderCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "default": {
+      "type": "worker"
+    },
+    "OrderCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}
