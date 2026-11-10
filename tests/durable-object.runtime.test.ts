@@ -60,7 +60,7 @@ async function cleanupSku(sku: string) {
 describe("Seiton cart Durable Object runtime", () => {
   beforeAll(async () => {
     for (const migration of migrations) {
-      const sql = migration.split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith("--") && !/^PRAGMA foreign_keys\\s*=/i.test(line)).join("\n");
+      const sql = migration.split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith("--") && !/^PRAGMA foreign_keys\s*=/i.test(line)).join("\n");
       await env.DB.exec(sql);
     }
     await env.DB.prepare(
