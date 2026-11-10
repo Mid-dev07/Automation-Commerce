@@ -44,5 +44,9 @@ jobs:
           node --check messaging-core.mjs
       - name: Run SQLite and Worker contract regression tests
         run: node --test tests/*.test.cjs
+      - name: Install Worker runtime test dependencies
+        run: npm install --no-audit --no-fund
+      - name: Run Durable Object RPC and Worker integration tests
+        run: npm run test:runtime
       - name: Run Messaging Core unit tests
         run: node --test tests/messaging-core.test.mjs
