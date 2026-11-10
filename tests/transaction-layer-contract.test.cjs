@@ -87,9 +87,9 @@ test("Google Sheets is only a best-effort mirror after transactional checkout", 
 });
 
 test("payment approval event records the actual previous status", () => {
-  assert.match(layer, /SELECT order_id,'PAYMENT_APPROVED',\?,'DIBAYAR'/);
-  assert.match(layer, /\.bind\(o\.status,clean\(actor,128\),sourceKey/);
-  assert.match(layer, /const sourceKey = \"approve:\" \+ code/);
+  assert.match(orderLifecycle, /SELECT order_id,'PAYMENT_APPROVED',\?,'DIBAYAR'/);
+  assert.match(orderLifecycle, /\.bind\(o\.status,clean\(actor,128\),sourceKey/);
+  assert.match(orderLifecycle, /const sourceKey = \"approve:\" \+ code/);
 });
 
 test("order lifecycle transitions are atomically mirrored into the admin activity audit", () => {
