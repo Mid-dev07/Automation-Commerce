@@ -11,6 +11,16 @@
       "database_id": "35483d1c-58e9-4b44-a6cd-648041c5e244"
     }
   ],
+  "kv_namespaces": [
+    {
+      "binding": "MUSE_KV",
+      "id": "25fd738d46634cbca8e4d0af701d05b7"
+    },
+    {
+      "binding": "OTP_KV",
+      "id": "06ed220a5b2741b6aaca79977a10ad23"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
