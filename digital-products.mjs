@@ -327,6 +327,8 @@ export async function createOtpPortalAccess(env, emailValue, orderId, ownerChatI
     throw new Error("OTP_EMAIL_ROUTING_NOT_READY");
   }
   if (!env.OTP_KV) throw new Error("OTP_KV_BINDING_MISSING");
+  const portalBase = clean(env.OTP_PORTAL_URL, 240);
+  if (portalBase !== "https://otp.seiton.biz.id") throw new Error("OTP_PORTAL_URL_INVALID");
   const email = clean(emailValue, 254).toLowerCase();
   if (!/^[a-z0-9.!#$%&'*+/=?^`{|}~-]+@[a-z0-9.-]+\.biz\.id$/i.test(email)) {
     throw new Error("OTP_MAILBOX_DOMAIN_INVALID");
@@ -343,8 +345,6 @@ export async function createOtpPortalAccess(env, emailValue, orderId, ownerChatI
     created_at: nowIso()
   };
   await env.OTP_KV.put("mailbox:" + emailHash, JSON.stringify(value), { expirationTtl: 30 * 86400 });
-  const portalBase = clean(env.OTP_PORTAL_URL, 240);
-  if (portalBase !== "https://otp.seiton.biz.id") throw new Error("OTP_PORTAL_URL_INVALID");
   return portalBase + "/?email=" + encodeURIComponent(email) + "#token=" + encodeURIComponent(token);
 }
 
