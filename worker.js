@@ -13,7 +13,6 @@ import {
   markDigitalDeliveredD1,
   getDigitalOrderD1,
   createOtpPortalAccess,
-  listWaitingDigitalFulfillmentsD1,
   parseMuseBusinessSetupInput,
   storeMuseBusinessSetupD1,
   getMuseBusinessSetupD1
@@ -411,7 +410,7 @@ async function handleTelegram(request, env, ctx) {
         const category = match[1].toLowerCase();
         const stub = env.ORDER_COORDINATOR.getByName("digital-stock:" + category);
         const added = await stub.addDigitalStock(category, match[2], customerId);
-        const waiting = await listWaitingDigitalFulfillmentsD1(env.DB, category, Math.max(1, added.added));
+        const waiting = added.waitingOrderIds || [];
         let delivered = 0;
         for (const orderId of waiting) {
           const result = await deliverDigitalProductAfterPayment(env, orderId);
