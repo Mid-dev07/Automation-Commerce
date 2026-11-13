@@ -408,7 +408,7 @@ async function handleTelegram(request, env, ctx) {
       if (!match) return sendTelegram(env,chatId,"Format: /addstock muse_starter\nemail@domain.biz.id|password|catatan");
       try {
         const category = match[1].toLowerCase();
-        const stub = env.ORDER_COORDINATOR.getByName("digital-stock:" + category);
+        const stub = digitalStockCoordinator(env, category);
         const added = await stub.addDigitalStock(category, match[2], customerId);
         const waiting = added.waitingOrderIds || [];
         let delivered = 0;
@@ -2338,6 +2338,18 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   const ticketUrl = await createPickupTicketUrl(env, String(r[0]), receiptCode);
   return { row:r, receiptCode, ticketUrl };
 }
+function digitalStockSku(category) {
+  return category === "muse_starter" ? "MUSE-STARTER"
+    : category === "muse_bisnis" ? "MUSE-BISNIS" : "";
+}
+function digitalStockCoordinator(env, category) {
+  const sku = digitalStockSku(category);
+  if (!sku || !env.ORDER_COORDINATOR) throw new Error("DIGITAL_STOCK_COORDINATOR_NOT_CONFIGURED");
+  // Share the same per-SKU Durable Object queue used by checkout, so add/remove/claim
+  // cannot race a customer order reservation.
+  return env.ORDER_COORDINATOR.getByName("sku:" + sku);
+}
+
 async function deliverDigitalProductAfterPayment(env, orderId) {
   const order = await findOrderTransactional(env, String(orderId || ""));
   if (!order) return { handled: false, reason: "ORDER_NOT_FOUND" };
@@ -2346,7 +2358,7 @@ async function deliverDigitalProductAfterPayment(env, orderId) {
     : sku === "MUSE-BISNIS" ? "muse_bisnis" : null;
 
   if (category) {
-    const stub = env.ORDER_COORDINATOR.getByName("digital-stock:" + category);
+    const stub = digitalStockCoordinator(env, category);
     const claim = await stub.claimDigitalStock(category, String(order.order_id));
     if (claim.status === "WAITING_STOCK") {
       const buyerText = "Pembayaran pesanan " + order.order_id +
