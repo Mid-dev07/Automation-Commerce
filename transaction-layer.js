@@ -1,4 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
+import {
+  addDigitalStockD1,
+  deleteDigitalStockD1,
+  claimDigitalStockD1
+} from "./digital-products.mjs";
 
 const TZ_OFFSET_MS = 7 * 60 * 60 * 1000;
 const SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
@@ -714,5 +719,14 @@ export class OrderCoordinator extends DurableObject {
       this.audit("PICKUP",id,"DIAMBIL");
       return result;
     });
+  }
+  async addDigitalStock(category, input, actor) {
+    return this.enqueue(() => addDigitalStockD1(this.env, category, input, actor));
+  }
+  async deleteDigitalStock(category, email, actor) {
+    return this.enqueue(() => deleteDigitalStockD1(this.env, category, email, actor));
+  }
+  async claimDigitalStock(category, orderId) {
+    return this.enqueue(() => claimDigitalStockD1(this.env, category, orderId));
   }
 }
