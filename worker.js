@@ -391,11 +391,137 @@ async function handleTelegram(request, env, ctx) {
         "\n\nOrder lama tidak mengurangi stok ulang. Checkout baru kini memakai D1 dan reservasi stok atomik.");
       return;
     }
+    if (text === "/cekstok") {
+      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      const stock = await listDigitalStockD1(env.DB);
+      const lines = ["📦 STOK PRODUK DIGITAL"];
+      for (const category of ["muse_starter","muse_bisnis"]) {
+        const item = stock[category];
+        lines.push("", category, "Tersedia: " + item.available, "Sudah diklaim: " + item.claimed,
+          "Dicabut: " + item.revoked, "Domain: " + (item.domains.join(", ") || "-"));
+      }
+      await sendTelegram(env, chatId, lines.join("\n"));
+      return;
+    }
+    if (text.startsWith("/addstock")) {
+      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      const match = text.match(/^\/addstock(?:@[a-z0-9_]+)?\s+(muse_starter|muse_bisnis)\s*\n([\s\S]+)$/i);
+      if (!match) return sendTelegram(env,chatId,"Format: /addstock muse_starter\nemail@domain.biz.id|password|catatan");
+      try {
+        const category = match[1].toLowerCase();
+        const stub = env.ORDER_COORDINATOR.getByName("digital-stock:" + category);
+        const added = await stub.addDigitalStock(category, match[2], customerId);
+        const waiting = await listWaitingDigitalFulfillmentsD1(env.DB, category, Math.max(1, added.added));
+        let delivered = 0;
+        for (const orderId of waiting) {
+          const result = await deliverDigitalProductAfterPayment(env, orderId);
+          if (result.status === "DELIVERED") delivered += 1;
+        }
+        await recordAdminActivity(env,{actorChannel:"telegram",actorId:customerId,action:"DIGITAL_STOCK_ADDED",resourceType:"digital_stock",resourceId:category,summary:{added:added.added,duplicates:added.duplicate,auto_delivered:delivered}});
+        await sendTelegram(env,chatId,"✅ Penambahan stok selesai.\nKategori: "+category+"\nDitambahkan: "+added.added+"\nDuplikat dilewati: "+added.duplicate+"\nStok tersedia: "+added.available+"\nOrder antrean diproses: "+delivered);
+      } catch(error) {
+        await sendTelegram(env,chatId,"⚠️ Stok tidak ditambahkan: "+String(error?.message||"DIGITAL_STOCK_FAILED").slice(0,180));
+      }
+      return;
+    }
+    if (text.startsWith("/delstock")) {
+      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      const match=text.match(/^\/delstock(?:@[a-z0-9_]+)?\s+(muse_starter|muse_bisnis)\s+(\S+)$/i);
+      if(!match)return sendTelegram(env,chatId,"Format: /delstock muse_starter email@domain.biz.id");
+      const category=match[1].toLowerCase();
+      const stub=env.ORDER_COORDINATOR.getByName("digital-stock:"+category);
+      const result=await stub.deleteDigitalStock(category,match[2],customerId);
+      await recordAdminActivity(env,{actorChannel:"telegram",actorId:customerId,action:"DIGITAL_STOCK_REVOKED",resourceType:"digital_stock",resourceId:category,summary:{removed:result.removed,email_domain:String(match[2]).split("@")[1]||""}});
+      await sendTelegram(env,chatId,result.removed?"✅ Entri stok tersedia berhasil dicabut.":"⚠️ Entri tidak ditemukan atau sudah diklaim.");
+      return;
+    }
+    if (text.startsWith("/cekorder")) {
+      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      const reference=text.split(/\s+/)[1];
+      if(!reference)return sendTelegram(env,chatId,"Format: /cekorder <order_ref>");
+      const item=await getDigitalOrderD1(env,reference);
+      if(!item)return sendTelegram(env,chatId,"Order digital tidak ditemukan.");
+      const lines=["🔎 DETAIL ORDER DIGITAL","Order: "+item.order_id,"Kategori: "+item.category,"Status: "+item.status,"Order pembayaran: "+item.order_status,"Email: "+(item.credentials?.email||"-")];
+      if(item.credentials?.password)lines.push("Password: "+item.credentials.password);
+      lines.push("Dikirim: "+(item.delivered_at||"-"),"Catatan: gunakan informasi ini hanya untuk klaim garansi order terkait.");
+      await sendTelegram(env,chatId,lines.join("\n"));
+      return;
+    }
+    if (text.startsWith("/approve")) {
+      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      const reference=text.split(/\s+/)[1];
+      if(!reference)return sendTelegram(env,chatId,"Format: /approve <order_ref>");
+      try {
+        const found=await resolveOrderReference(env,reference);
+        if(!found)throw new Error("Pesanan tidak ditemukan.");
+        const paid=String(found.order?.payment_confirmation_status||"").toUpperCase()==="DISETUJUI";
+        let receiptSent=true;
+        if(!paid) {
+          const approved=await approvePaymentAndIssueTicket(env,reference,"telegram:"+customerId);
+          try{await sendPickupReceipt(env,String(approved.row[3]),approved.row,String(approved.row[0]),approved.receiptCode);}
+          catch(error){receiptSent=false;console.error(JSON.stringify({level:"error",event:"telegram_receipt_delivery",order_id:approved.row[0],message:error.message}));}
+        }
+        const delivered=await deliverDigitalProductAfterPayment(env,String(found.order.order_id));
+        const status=delivered.status||"PAYMENT_APPROVED";
+        await sendTelegram(env,chatId,"✅ Perintah /approve selesai untuk "+found.order.order_id+".\nStatus produk: "+status+(receiptSent?"":"\nResi belum terkirim."));
+      } catch(error) {
+        await sendTelegram(env,chatId,"⚠️ Pesanan belum dapat diproses: "+String(error?.message||"APPROVE_FAILED").slice(0,180));
+      }
+      return;
+    }
+    if (text.startsWith("/ambilsetup")) {
+      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      const setupId=text.split(/\s+/)[1];
+      if(!setupId)return sendTelegram(env,chatId,"Format: /ambilsetup <setup_id>");
+      const setup=await getMuseBusinessSetupD1(env,setupId);
+      if(!setup)return sendTelegram(env,chatId,"Form setup tidak ditemukan.");
+      await sendTelegram(env,chatId,[
+        "🔐 FORM SETUP MUSE BISNIS (RAHASIA)",
+        "Setup: "+setup.setup_id,
+        "Order: "+setup.order_id,
+        "Nama usaha: "+setup.business_name,
+        "Token Bot Telegram: "+setup.payload.telegramToken,
+        "Deskripsi: "+setup.payload.description,
+        "",
+        "Jangan teruskan token kepada pihak lain. Setelah selesai, cabut/ganti token jika sudah tidak diperlukan."
+      ].join("\n"));
+      await recordAdminActivity(env,{actorChannel:"telegram",actorId:customerId,action:"DIGITAL_SETUP_SECRET_VIEWED",resourceType:"digital_setup",resourceId:setupId,summary:{setup_type:"muse_bisnis"}});
+      return;
+    }
     if (text.startsWith("/laporan")) {
       if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const report = await buildAdminReport(env);
       await recordAdminActivity(env, { actorId: customerId, action: "REPORT_GENERATED", resourceType: "sales_report", summary: { report_type: "sales_summary" } });
       await sendTelegram(env, chatId, report);
+      return;
+    }
+    if (/^SETUP\s*\|/i.test(text)) {
+      if (message.chat.type && message.chat.type !== "private") return;
+      try {
+        const input=parseMuseBusinessSetupInput(text);
+        const eligible=await env.DB.prepare(
+          "SELECT order_id FROM orders WHERE customer_id=? AND sku='MUSE-BISNIS' " +
+          "AND status IN ('DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED') " +
+          "AND payment_confirmation_status='DISETUJUI' AND EXISTS (" +
+          "SELECT 1 FROM digital_fulfillments f WHERE f.order_id=orders.order_id AND f.status='DELIVERED') " +
+          "AND NOT EXISTS (SELECT 1 FROM digital_setup_requests s WHERE s.order_id=orders.order_id) " +
+          "ORDER BY created_ms DESC LIMIT 1"
+        ).bind(customerId).first();
+        if(!eligible) {
+          await sendTelegram(env,chatId,"⚠️ Form SETUP hanya dapat dikirim setelah paket Muse Bisnis dibayar dan akun berhasil dikirim.");
+          return;
+        }
+        const result=await storeMuseBusinessSetupD1(env,eligible.order_id,customerId,input);
+        for(const target of String(env.ADMIN_CHAT_ID||"").split(",").map(v=>v.trim()).filter(Boolean)) {
+          await sendTelegram(env,target,"🛠️ FORM SETUP MUSE BISNIS BARU\nSetup ID: "+result.setupId+
+            "\nOrder: "+eligible.order_id+"\nNama usaha: "+input.businessName+
+            "\nDeskripsi: "+input.description+
+            "\nToken tersimpan terenkripsi. Ambil melalui /ambilsetup "+result.setupId);
+        }
+        await sendTelegram(env,chatId,"✅ Form setup diterima. Admin Seiton.id akan menindaklanjuti. Referensi: "+result.setupId);
+      } catch(error) {
+        await sendTelegram(env,chatId,"⚠️ Form setup tidak diterima: "+String(error?.message||"SETUP_FAILED").slice(0,180));
+      }
       return;
     }
     if (text.startsWith("/start") || text.startsWith("/help")) {
@@ -1130,8 +1256,25 @@ async function handleTelegramCallback(env, query) {
       receiptSent = false;
       console.error(JSON.stringify({level:"error",event:"telegram_receipt_delivery",order_id:approved.row[0],message:error.message}));
     }
+    let digitalStatus = "";
+    try {
+      const delivered = await deliverDigitalProductAfterPayment(env, String(approved.row[0]));
+      if (delivered.handled) digitalStatus = delivered.status === "DELIVERED"
+        ? " Kredensial digital telah dikirim."
+        : delivered.status === "WAITING_STOCK"
+          ? " Produk digital masuk antrean stok dan admin telah diberi tahu."
+          : delivered.status === "SETUP_PENDING"
+            ? " Admin akan menghubungi pelanggan untuk proses setup."
+            : delivered.status === "ALREADY_DELIVERED" ? " Produk digital sudah pernah dikirim." : "";
+    } catch(error) {
+      digitalStatus = " Pengiriman digital tertahan; admin perlu memeriksa konfigurasi.";
+      console.error(JSON.stringify({level:"error",event:"digital_fulfillment_after_approval",order_id:approved.row[0],code:String(error?.message||"DIGITAL_FULFILLMENT_FAILED").slice(0,80)}));
+      for (const target of String(env.ADMIN_CHAT_ID || "").split(",").map(v=>v.trim()).filter(Boolean)) {
+        try { await sendTelegram(env,target,"⚠️ Pengiriman produk digital tertahan. Order: "+approved.row[0]+". Periksa binding OTP_KV, MUSE_STOCK_ENCRYPTION_KEY, dan status fulfillment."); } catch {}
+      }
+    }
     await updateTelegramMessage(env, message, {
-      text: "✅ Pembayaran " + approved.row[0] + " berhasil disetujui. " + (receiptSent ? "Resi dan QR pengambilan sudah dikirim." : "Resi tersimpan, tetapi QR gagal dikirim. Pelanggan dapat meminta resi ulang lewat Pesanan Saya."),
+      text: "✅ Pembayaran " + approved.row[0] + " berhasil disetujui. " + (receiptSent ? "Resi dan QR pengambilan sudah dikirim." : "Resi tersimpan, tetapi QR gagal dikirim. Pelanggan dapat meminta resi ulang lewat Pesanan Saya.") + digitalStatus,
       replyMarkup: { inline_keyboard: [
         [{ text: "📦 Lihat Antrean Pengambilan", callback_data: "adm:pickup" }],
         [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
