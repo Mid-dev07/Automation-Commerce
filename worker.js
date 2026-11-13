@@ -968,7 +968,7 @@ async function handleTelegramCallback(env, query) {
 
   if (data.startsWith("buy:")) {
     const sku = data.slice(4);
-    const rows = await readCatalogRows(env);
+    const rows = await readTelegramCatalogRows(env);
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!p || ["FALSE","0","NONAKTIF","NO"].includes(String(p[4] ?? "TRUE").toUpperCase())) throw new Error("Produk tidak tersedia");
     const stock = p[3] === "" || p[3] == null ? null : Number(p[3]);
@@ -1006,7 +1006,7 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("pay:")) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
     if (!["QRIS","TRANSFER","COD"].includes(method)) throw new Error("Metode pembayaran tidak valid");
-    const rows = await readCatalogRows(env, "Katalog_Produk!A2:E");
+    const rows = await readTelegramCatalogRows(env, "Katalog_Produk!A2:G");
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!p) throw new Error("Produk tidak ditemukan");
     await updateTelegramMessage(env, message, {
@@ -1376,8 +1376,28 @@ async function handleTelegramCallback(env, query) {
   });
 }
 
+async function readTelegramCatalogRows(env, range = "Katalog_Produk!A2:G") {
+  const rows = await readCatalogRows(env, range);
+  const state = await transactionReadiness(env);
+  if (!state.ready) return rows;
+  const digital = await listProductsTransactional(env, true);
+  const extras = (digital || [])
+    .filter(product => Boolean(product.active) && /^(MUSE-STARTER|MUSE-BISNIS|OTP-SETUP)$/i.test(String(product.sku || "")))
+    .map(product => [
+      String(product.sku || ""),
+      String(product.name || ""),
+      String(product.price ?? 0),
+      product.stock == null ? "" : String(product.stock),
+      product.active ? "TRUE" : "FALSE",
+      String(product.photo_url || ""),
+      String(product.description || "")
+    ]);
+  const seen = new Set(rows.map(row => String(row[0] || "").trim().toUpperCase()));
+  return rows.concat(extras.filter(row => !seen.has(String(row[0]).toUpperCase())));
+}
+
 async function showCustomerCatalogPage(env, message, page = 0) {
-  const rows = await readCatalogRows(env);
+  const rows = await readTelegramCatalogRows(env);
   const products = rows.filter(r => r[0] && parseCatalogProduct(r).active);
   if (!products.length) {
     await updateTelegramMessage(env, message, { text: "Katalog belum memiliki produk aktif.", replyMarkup: customerMenuKeyboard() });
@@ -3085,7 +3105,7 @@ function telegramMessagingEvent(update, message, textOverride = null) {
 function createMessagingServices(env) {
   return {
     async listProducts() {
-      const rows = await readCatalogRows(env);
+      const rows = await readTelegramCatalogRows(env);
       return rows.map(parseCatalogProduct).filter(product =>
         product.active && product.priceValid && product.stockValid
       ).map(product => ({
