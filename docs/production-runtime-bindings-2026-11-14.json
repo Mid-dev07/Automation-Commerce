@@ -1,0 +1,69 @@
+{
+  "observed_at": "2026-11-14",
+  "mode": "read-only",
+  "workers": [
+    {
+      "name": "seiton-order-bot",
+      "compatibility_date": "2026-11-03",
+      "entrypoint": "worker.js",
+      "bindings": [
+        {"type":"d1","name":"DB","resource":"seiton-transactions-prod"},
+        {"type":"kv_namespace","name":"MUSE_KV"},
+        {"type":"kv_namespace","name":"OTP_KV"},
+        {"type":"durable_object_namespace","name":"ORDER_COORDINATOR","class_name":"OrderCoordinator"},
+        {"type":"r2_bucket","name":"PRODUCT_MEDIA","resource":"seiton-product-media"},
+        {"type":"ratelimit","name":"ADMIN_LOGIN_RATE_LIMITER"},
+        {"type":"plain_text","name":"GOOGLE_SHEETS_ID"},
+        {"type":"plain_text","name":"OTP_EMAIL_ROUTING_READY"},
+        {"type":"plain_text","name":"OTP_PORTAL_URL"},
+        {"type":"secret_text","name":"ADMIN_CHAT_ID"},
+        {"type":"secret_text","name":"ADMIN_WEB_PASSWORD"},
+        {"type":"secret_text","name":"GOOGLE_SERVICE_ACCOUNT_KEY"},
+        {"type":"secret_text","name":"MUSE_STOCK_ENCRYPTION_KEY"},
+        {"type":"secret_text","name":"TELEGRAM_TOKEN"},
+        {"type":"secret_text","name":"TELEGRAM_WEBHOOK_SECRET"}
+      ],
+      "modules": [
+        {"name":"worker.js","bytes":208963},
+        {"name":"transaction-layer.js","bytes":38096},
+        {"name":"messaging-core.mjs","bytes":29385},
+        {"name":"digital-products.mjs","bytes":18030}
+      ],
+      "repository_config_gaps": ["PRODUCT_MEDIA R2 binding declaration"]
+    },
+    {
+      "name": "seiton-otp-portal",
+      "compatibility_date": "2026-11-13",
+      "entrypoint": "index.js",
+      "bindings": [
+        {"type":"durable_object_namespace","name":"MAILBOX_INDEX","class_name":"MailboxIndex"},
+        {"type":"kv_namespace","name":"MUSE_KV"},
+        {"type":"kv_namespace","name":"OTP_KV"},
+        {"type":"plain_text","name":"OTP_ALLOWED_DOMAINS"},
+        {"type":"plain_text","name":"OTP_PORTAL_URL"},
+        {"type":"secret_text","name":"OTP_EMAIL_ENCRYPTION_KEY"},
+        {"type":"secret_text","name":"OTP_INTERNAL_SECRET"}
+      ],
+      "modules": [
+        {"name":"index.js","bytes":31074},
+        {"name":"email-parser.js","bytes":5745}
+      ],
+      "repository_config_gaps": ["entrypoint and module inventory mismatch", "MAILBOX_INDEX binding", "MUSE_KV binding", "OTP_ALLOWED_DOMAINS variable", "OTP_PORTAL_URL variable", "OTP_INTERNAL_SECRET secret"]
+    },
+    {
+      "name": "seiton-site-admin",
+      "compatibility_date": "2026-11-04",
+      "entrypoint": "worker.js",
+      "bindings": [
+        {"type":"service","name":"ORDER_BACKEND","service":"seiton-order-bot","environment":"production"},
+        {"type":"service","name":"OTP_BACKEND","service":"seiton-otp-portal","environment":"production"},
+        {"type":"d1","name":"SITE_DB","resource":"seiton-site-content-prod"},
+        {"type":"secret_text","name":"OTP_INTERNAL_SECRET"}
+      ],
+      "modules": [{"name":"worker.js","bytes":49047}],
+      "repository_config_gaps": ["OTP_BACKEND service binding", "deployed source is larger than repository worker.js"]
+    }
+  ],
+  "secret_values_included": false,
+  "production_changed": false
+}
