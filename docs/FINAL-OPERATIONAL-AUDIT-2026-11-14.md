@@ -63,7 +63,7 @@ This audit does **not** authorize or perform a production deployment. No product
 - The production sitemap lists 20 URLs, including the AI Gateway and OTP service detail pages.
 - Public `/api/pricing` output matches the corresponding `site_services` and `site_addons` rows in `seiton-site-content-prod`.
 - Current availability flags remain intentional: Telegram, website catalogue, profile, and package are available; WhatsApp, AI Gateway setup, and OTP setup are unavailable. Prices were not changed.
-- The main-site source contains the production consent controller with GTM container `GTM-K3LKMTF3` and GA4 Measurement ID `G-9Z02GKBZQX`. Analytics defaults to denied and GTM is loaded only after the visitor explicitly grants analytics consent. The controller only permits the production Seiton hosts. Google account ownership and the currently published GTM container version were not independently inspected.
+- The main-site source contains the production consent controller and GTM container ID `GTM-K3LKMTF3`; `ANALYTICS.md` records GA4 Measurement ID `G-9Z02GKBZQX`. Analytics defaults to denied and GTM is loaded only after the visitor explicitly grants analytics consent. The controller only permits the production Seiton hosts. The current GTM container version, GA4 property ownership, and a fresh post-consent page-view were not independently verified.
 
 ## 4. Telegram integration
 
