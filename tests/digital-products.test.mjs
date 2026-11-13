@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 import {
   normalizeDigitalCategory,
   parseDigitalStockLines,
-  parseMuseBusinessSetupInput
+  parseMuseBusinessSetupInput,
+  addDigitalStockD1,
+  createOtpPortalAccess
 } from "../digital-products.mjs";
 
 test("only the two documented stock categories are accepted", () => {
@@ -34,4 +36,31 @@ test("Muse Business onboarding accepts a token only in the documented SETUP form
   assert.equal(parsed.description, "Jual sembako");
   assert.throws(() => parseMuseBusinessSetupInput("SETUP | Toko | invalid-token | Jual sembako"), /DIGITAL_SETUP_TELEGRAM_TOKEN_INVALID/);
   assert.throws(() => parseMuseBusinessSetupInput("SETUP | Toko | 123456:AbCdEfGhIjKlMnOpQrStUvWxYz123456789"), /DIGITAL_SETUP_FORMAT_INVALID/);
+});
+
+test("stock insertion is blocked until Email Routing has been tested and enabled", async () => {
+  await assert.rejects(
+    addDigitalStockD1({}, "muse_starter", "test@seiton.biz.id|Password#123|test", "admin"),
+    /OTP_EMAIL_ROUTING_NOT_READY/
+  );
+});
+
+test("private mailbox links are blocked while Email Routing readiness is false", async () => {
+  await assert.rejects(
+    createOtpPortalAccess({ OTP_EMAIL_ROUTING_READY: "false" }, "test@seiton.biz.id", "INV-1", "123"),
+    /OTP_EMAIL_ROUTING_NOT_READY/
+  );
+});
+
+test("OTP portal URL must match the production private portal origin", async () => {
+  const values = new Map();
+  const env = {
+    OTP_EMAIL_ROUTING_READY: "true",
+    OTP_PORTAL_URL: "https://example.com",
+    OTP_KV: { put: async (key,value,options) => values.set(key,{value,options}) }
+  };
+  await assert.rejects(
+    createOtpPortalAccess(env, "test@seiton.biz.id", "INV-1", "123"),
+    /OTP_PORTAL_URL_INVALID/
+  );
 });
