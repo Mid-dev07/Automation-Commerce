@@ -9,6 +9,11 @@
       "binding": "ORDER_BACKEND",
       "service": "seiton-order-bot",
       "environment": "production"
+    },
+    {
+      "binding": "OTP_BACKEND",
+      "service": "seiton-otp-portal",
+      "environment": "production"
     }
   ],
   "d1_databases": [
