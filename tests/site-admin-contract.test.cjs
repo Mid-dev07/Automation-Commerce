@@ -44,8 +44,8 @@ test("owner admin stores hashed session tokens and checks expiry/revocation", ()
   assert.ok(worker.includes("INSERT INTO site_admin_sessions"));
 });
 
-test("owner admin mutating endpoints enforce exact same-origin checks", () => {
-  assert.ok(worker.includes('function sameOriginAdmin(req){return req.headers.get("Origin")==="https://admin.seiton.biz.id";}'));
+test("owner admin mutating endpoints enforce the explicit same-origin allowlist", () => {
+  assert.match(worker, /function sameOriginAdmin\\(req\\)\\{const origin=req\\.headers\\.get\\("Origin"\\);return origin==="https:\\/\\/admin\\.seiton\\.biz\\.id"\\|\\|origin==="https:\\/\\/owner\\.seiton\\.biz\\.id";\\}/);
   assert.ok(worker.includes('if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));'));
   assert.ok(worker.includes("/api/admin/sessions/revoke"));
 });
