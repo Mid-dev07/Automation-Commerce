@@ -22,5 +22,7 @@ jobs:
         run: node --check worker.js
       - name: Check transactional module syntax
         run: node --check transaction-layer.js
+      - name: Check digital products module syntax
+        run: node --check digital-products.mjs
       - name: Run regression tests
-        run: node --test tests/*.test.cjs
+        run: node --test tests/*.test.cjs tests/*.test.mjs
