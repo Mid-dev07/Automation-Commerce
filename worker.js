@@ -2358,6 +2358,9 @@ async function deliverDigitalProductAfterPayment(env, orderId) {
     : sku === "MUSE-BISNIS" ? "muse_bisnis" : null;
 
   if (category) {
+    if (String(env.OTP_EMAIL_ROUTING_READY || "false").toLowerCase() !== "true") {
+      throw new Error("OTP_EMAIL_ROUTING_NOT_READY");
+    }
     const stub = digitalStockCoordinator(env, category);
     const claim = await stub.claimDigitalStock(category, String(order.order_id));
     if (claim.status === "WAITING_STOCK") {
