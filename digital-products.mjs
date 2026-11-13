@@ -373,3 +373,17 @@ export async function getMuseBusinessSetupD1(env, setupId) {
   if (!row) return null;
   return { ...row, payload: await decryptPayload(env,row.encrypted_payload,row.payload_nonce) };
 }
+
+export async function listWaitingDigitalFulfillmentsD1(db, categoryValue, limit = 10) {
+  const category = normalizeDigitalCategory(categoryValue);
+  const bounded = Math.min(20, Math.max(1, Number(limit) || 10));
+  const rows = await db.prepare(`
+    SELECT f.order_id
+    FROM digital_fulfillments f
+    JOIN orders o ON o.order_id=f.order_id
+    WHERE f.category=? AND f.status='WAITING_STOCK'
+    ORDER BY o.created_at ASC
+    LIMIT ?
+  `).bind(category,bounded).all();
+  return (rows.results || []).map(row => String(row.order_id));
+}
