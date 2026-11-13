@@ -112,6 +112,9 @@ async function syncStockCount(db, category) {
 }
 
 export async function addDigitalStockD1(env, categoryValue, input, actor) {
+  if (String(env.OTP_EMAIL_ROUTING_READY || "false").toLowerCase() !== "true") {
+    throw new Error("OTP_EMAIL_ROUTING_NOT_READY");
+  }
   const category = normalizeDigitalCategory(categoryValue);
   const rows = parseDigitalStockLines(input, category);
   const inserts = [];
@@ -320,7 +323,12 @@ export async function getDigitalOrderD1(env, orderId) {
 }
 
 export async function createOtpPortalAccess(env, emailValue, orderId, ownerChatId) {
+  if (String(env.OTP_EMAIL_ROUTING_READY || "false").toLowerCase() !== "true") {
+    throw new Error("OTP_EMAIL_ROUTING_NOT_READY");
+  }
   if (!env.OTP_KV) throw new Error("OTP_KV_BINDING_MISSING");
+  const portalBase = clean(env.OTP_PORTAL_URL, 240);
+  if (portalBase !== "https://otp.seiton.biz.id") throw new Error("OTP_PORTAL_URL_INVALID");
   const email = clean(emailValue, 254).toLowerCase();
   if (!/^[a-z0-9.!#$%&'*+/=?^`{|}~-]+@[a-z0-9.-]+\.biz\.id$/i.test(email)) {
     throw new Error("OTP_MAILBOX_DOMAIN_INVALID");
@@ -337,7 +345,7 @@ export async function createOtpPortalAccess(env, emailValue, orderId, ownerChatI
     created_at: nowIso()
   };
   await env.OTP_KV.put("mailbox:" + emailHash, JSON.stringify(value), { expirationTtl: 30 * 86400 });
-  return "https://otp.seiton.biz.id/?email=" + encodeURIComponent(email) + "#token=" + encodeURIComponent(token);
+  return portalBase + "/?email=" + encodeURIComponent(email) + "#token=" + encodeURIComponent(token);
 }
 
 export function parseMuseBusinessSetupInput(rawText) {
