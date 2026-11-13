@@ -316,3 +316,60 @@ export async function createOtpPortalAccess(env, emailValue, orderId, ownerChatI
   await env.OTP_KV.put("mailbox:" + emailHash, JSON.stringify(value), { expirationTtl: 30 * 86400 });
   return "https://otp.seiton.biz.id/?email=" + encodeURIComponent(email) + "#token=" + encodeURIComponent(token);
 }
+
+export function parseMuseBusinessSetupInput(rawText) {
+  const raw = String(rawText || "").trim();
+  const match = raw.match(/^SETUP\s*\|([\s\S]*)$/i);
+  if (!match) throw new Error("DIGITAL_SETUP_FORMAT_INVALID");
+  const parts = match[1].split("|").map(value => value.trim());
+  if (parts.length !== 3) throw new Error("DIGITAL_SETUP_FORMAT_INVALID");
+  const businessName = clean(parts[0], 100);
+  const telegramToken = clean(parts[1], 140);
+  const description = clean(parts[2], 500);
+  if (!businessName || !description) throw new Error("DIGITAL_SETUP_FIELDS_REQUIRED");
+  if (!/^\d{5,12}:[A-Za-z0-9_-]{20,120}$/.test(telegramToken)) {
+    throw new Error("DIGITAL_SETUP_TELEGRAM_TOKEN_INVALID");
+  }
+  return { businessName, telegramToken, description };
+}
+
+export async function storeMuseBusinessSetupD1(env, orderId, buyerChatId, input) {
+  const id = clean(orderId, 80);
+  const buyer = clean(buyerChatId, 80);
+  const order = await env.DB.prepare(`
+    SELECT o.order_id,o.customer_id,o.sku,o.status,f.status AS fulfillment_status
+    FROM orders o
+    JOIN digital_fulfillments f ON f.order_id=o.order_id
+    WHERE o.order_id=?
+  `).bind(id).first();
+  if (!order || String(order.sku).toUpperCase() !== PRODUCT_SKU.muse_bisnis ||
+      String(order.customer_id) !== buyer ||
+      !["DIBAYAR","DIPROSES","DIKIRIM","SELESAI","PAID","COMPLETED"].includes(String(order.status).toUpperCase()) ||
+      order.fulfillment_status !== "DELIVERED") {
+    throw new Error("DIGITAL_SETUP_ORDER_NOT_ELIGIBLE");
+  }
+  const existing = await env.DB.prepare(
+    "SELECT setup_id,status FROM digital_setup_requests WHERE order_id=?"
+  ).bind(id).first();
+  if (existing) return { setupId: existing.setup_id, status: existing.status, duplicate: true };
+  const encrypted = await encryptPayload(env, input);
+  const setupId = "SETUP-" + new Date().toISOString().slice(0,10).replace(/-/g,"") + "-" +
+    crypto.randomUUID().slice(0,8).toUpperCase();
+  const at = nowIso();
+  await env.DB.prepare(`
+    INSERT INTO digital_setup_requests
+    (setup_id,order_id,setup_type,business_name,domain_name,encrypted_payload,status,created_at,updated_at)
+    VALUES(?,?,'muse_bisnis',?,'',? ,?,'RECEIVED',?,?)
+  `).bind(setupId,id,input.businessName,encrypted.ciphertext,encrypted.nonce,at,at).run();
+  return { setupId, status:"RECEIVED", duplicate:false };
+}
+
+export async function getMuseBusinessSetupD1(env, setupId) {
+  const row = await env.DB.prepare(`
+    SELECT setup_id,order_id,setup_type,business_name,status,encrypted_payload,payload_nonce,created_at
+    FROM digital_setup_requests
+    WHERE setup_id=? AND setup_type='muse_bisnis'
+  `).bind(clean(setupId,80)).first();
+  if (!row) return null;
+  return { ...row, payload: await decryptPayload(env,row.encrypted_payload,row.payload_nonce) };
+}
