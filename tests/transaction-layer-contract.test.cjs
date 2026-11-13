@@ -140,8 +140,8 @@ test("scheduled dispatcher retries Sheets mirror and recovers orphaned append", 
 });
 
 test("Wrangler config schedules outbox delivery every five minutes", () => {
-  const config = fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8");
-  assert.match(config, /"crons": \["\*\/5 \* \* \* \*"\]/);
+  const config = JSON.parse(fs.readFileSync(path.join(root, "wrangler.jsonc"), "utf8"));
+  assert.deepEqual(config.triggers?.crons, ["*/5 * * * *"]);
 });
 
 test("product create, update, and soft-delete enqueue retryable catalog mirrors", () => {
