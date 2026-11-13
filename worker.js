@@ -9,6 +9,16 @@ import {
   completeSheetMirrorOutbox, failSheetMirrorOutbox
 } from "./transaction-layer.js";
 import {
+  listDigitalStockD1,
+  markDigitalDeliveredD1,
+  getDigitalOrderD1,
+  createOtpPortalAccess,
+  listWaitingDigitalFulfillmentsD1,
+  parseMuseBusinessSetupInput,
+  storeMuseBusinessSetupD1,
+  getMuseBusinessSetupD1
+} from "./digital-products.mjs";
+import {
   processMessagingEvent,
   claimMessagingOutbox,
   completeMessagingOutbox,
@@ -2166,6 +2176,89 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   const ticketUrl = await createPickupTicketUrl(env, String(r[0]), receiptCode);
   return { row:r, receiptCode, ticketUrl };
 }
+async function deliverDigitalProductAfterPayment(env, orderId) {
+  const order = await findOrderTransactional(env, String(orderId || ""));
+  if (!order) return { handled: false, reason: "ORDER_NOT_FOUND" };
+  const sku = String(order.sku || "").toUpperCase();
+  const category = sku === "MUSE-STARTER" ? "muse_starter"
+    : sku === "MUSE-BISNIS" ? "muse_bisnis" : null;
+
+  if (category) {
+    const stub = env.ORDER_COORDINATOR.getByName("digital-stock:" + category);
+    const claim = await stub.claimDigitalStock(category, String(order.order_id));
+    if (claim.status === "WAITING_STOCK") {
+      const buyerText = "Pembayaran pesanan " + order.order_id +
+        " sudah dikonfirmasi. Stok akun sedang disiapkan dan pesanan masuk antrean prioritas. " +
+        "Admin akan menindaklanjuti maksimal 15 menit.";
+      await sendTelegram(env, String(order.customer_id), buyerText);
+      const targets = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
+      for (const target of targets) {
+        await sendTelegram(env, target,
+          "🚨 STOK DIGITAL KOSONG\nKategori: " + category +
+          "\nOrder: " + order.order_id + "\nPembeli: " + String(order.customer_name || "-") +
+          "\nSegera masukkan stok dengan /addstock " + category +
+          " lalu jalankan /approve " + order.order_id);
+      }
+      return { handled: true, status: "WAITING_STOCK" };
+    }
+    if (claim.status === "DELIVERED") {
+      return { handled: true, status: "ALREADY_DELIVERED" };
+    }
+    if (!claim.credentials || !claim.credentials.email || !claim.credentials.password) {
+      throw new Error("DIGITAL_STOCK_CLAIM_INVALID");
+    }
+    const portalUrl = await createOtpPortalAccess(
+      env, claim.credentials.email, order.order_id, order.customer_id
+    );
+    const lines = [
+      "✅ PRODUK DIGITAL SEITON.ID",
+      "Order: " + order.order_id,
+      "Paket: " + (category === "muse_starter" ? "Muse Starter" : "Muse Bisnis"),
+      "",
+      "Email: " + claim.credentials.email,
+      "Password: " + claim.credentials.password,
+      "Portal mailbox privat (berlaku 30 hari):",
+      portalUrl,
+      "",
+      "Jangan bagikan kredensial atau tautan portal kepada orang lain."
+    ];
+    if (category === "muse_bisnis") {
+      lines.push("", "Setelah login, kirim detail instalasi dengan format:",
+        "SETUP | Nama Usaha | Token Bot Telegram | Deskripsi Layanan",
+        "Token bot hanya akan diteruskan kepada admin dan disimpan terenkripsi.");
+    }
+    await sendTelegram(env, String(order.customer_id), lines.join("\n"));
+    await markDigitalDeliveredD1(env.DB, order.order_id);
+    await recordAdminActivity(env, {
+      actorChannel: "telegram",
+      actorId: "system:digital-fulfillment",
+      action: "DIGITAL_PRODUCT_DELIVERED",
+      resourceType: "digital_order",
+      resourceId: String(order.order_id),
+      summary: { category, stock_domain: String(claim.credentials.email).split("@")[1] }
+    });
+    return { handled: true, status: "DELIVERED" };
+  }
+
+  if (sku === "OTP-SETUP") {
+    const at = new Date().toISOString();
+    await env.DB.prepare(
+      "INSERT INTO digital_fulfillments(order_id,category,status,updated_at) " +
+      "VALUES(?,'otp_setup','SETUP_PENDING',?) ON CONFLICT(order_id) DO NOTHING"
+    ).bind(order.order_id, at).run();
+    await sendTelegram(env, String(order.customer_id),
+      "✅ Pesanan Setup Portal OTP telah dikonfirmasi. Admin Seiton.id akan menghubungi Anda untuk verifikasi kepemilikan domain dan daftar mailbox yang akan diaktifkan.");
+    for (const target of String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean)) {
+      await sendTelegram(env, target,
+        "🛠️ PESANAN SETUP PORTAL OTP\nOrder: " + order.order_id +
+        "\nPelanggan: " + String(order.customer_name || "-") +
+        "\nLanjutkan pemeriksaan kepemilikan domain sebelum konfigurasi Email Routing.");
+    }
+    return { handled: true, status: "SETUP_PENDING" };
+  }
+  return { handled: false, reason: "NOT_A_DIGITAL_PRODUCT" };
+}
+
 async function rejectPaymentRequest(env, reference, actor = "telegram-admin") {
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
