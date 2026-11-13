@@ -428,7 +428,7 @@ async function handleTelegram(request, env, ctx) {
       const match=text.match(/^\/delstock(?:@[a-z0-9_]+)?\s+(muse_starter|muse_bisnis)\s+(\S+)$/i);
       if(!match)return sendTelegram(env,chatId,"Format: /delstock muse_starter email@domain.biz.id");
       const category=match[1].toLowerCase();
-      const stub=env.ORDER_COORDINATOR.getByName("digital-stock:"+category);
+      const stub=digitalStockCoordinator(env, category);
       const result=await stub.deleteDigitalStock(category,match[2],customerId);
       await recordAdminActivity(env,{actorChannel:"telegram",actorId:customerId,action:"DIGITAL_STOCK_REVOKED",resourceType:"digital_stock",resourceId:category,summary:{removed:result.removed,email_domain:String(match[2]).split("@")[1]||""}});
       await sendTelegram(env,chatId,result.removed?"✅ Entri stok tersedia berhasil dicabut.":"⚠️ Entri tidak ditemukan atau sudah diklaim.");
