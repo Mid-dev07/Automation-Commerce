@@ -1,77 +1,45 @@
 # Production Runtime Reconciliation — 2026-11-14
 
-## Scope
+## Scope and result
 
-Read-only comparison of Cloudflare production Worker metadata, deployed module inventory, repository source inventory, and binding configuration. No Worker source, secrets, bindings, database schema/data, webhook, route, or deployment was modified.
+The live Cloudflare module bundles were read directly through the Cloudflare Workers API and compared with GitHub source. No secret values were read, written, or committed. This change updates only the repository; it does not alter production Workers, routes, D1 data, KV data, R2 objects, Telegram webhook settings, or Email Routing.
 
-## Production Worker inventory
+## `seiton-order-bot`
 
-### `seiton-order-bot`
+- Production entry point: `worker.js`; compatibility date: `2026-11-03`.
+- The live `worker.js` matches repository source exactly.
+- `transaction-layer.js`, `messaging-core.mjs`, and `digital-products.mjs` match after trimming the terminal newline only; no code-line differences were found.
+- Bindings: D1 `DB`; KV `MUSE_KV`, `OTP_KV`; Durable Object `ORDER_COORDINATOR`; R2 `PRODUCT_MEDIA`; rate limiter `ADMIN_LOGIN_RATE_LIMITER`; vars `GOOGLE_SHEETS_ID`, `OTP_EMAIL_ROUTING_READY`, `OTP_PORTAL_URL`; Telegram, Google, admin, and stock-encryption secrets.
+- Repository config now declares production R2 binding. Optional `ORDERS_KV` and `TOKEN_KV` code paths are guarded and do not block primary runtime when absent.
 
-Production compatibility date: `2026-11-03`
+## `seiton-otp-portal`
 
-Bindings observed:
-- D1 `DB` → `seiton-transactions-prod`
-- KV `MUSE_KV`, `OTP_KV`
-- Durable Object `ORDER_COORDINATOR` / `OrderCoordinator`
-- R2 `PRODUCT_MEDIA` → `seiton-product-media`
-- Rate limiter `ADMIN_LOGIN_RATE_LIMITER`
-- Plain vars `GOOGLE_SHEETS_ID`, `OTP_EMAIL_ROUTING_READY`, `OTP_PORTAL_URL`
-- Secrets exist for Telegram, Google service account, admin password/chat ID, and stock encryption. Secret values are intentionally not recorded.
+- Production entry point: `index.js`; compatibility date: `2026-11-13`; compatibility flag: `nodejs_compat`.
+- Production modules `index.js` and `email-parser.js` are now versioned in the repository.
+- The older `otp-portal/worker.js` remains for historical traceability; it is not the deployment entry point.
+- Bindings: Durable Object `MAILBOX_INDEX` / `MailboxIndex` (SQLite namespace verified in Cloudflare); KV `MUSE_KV`, `OTP_KV`; vars `OTP_ALLOWED_DOMAINS`, `OTP_PORTAL_URL`; secrets `OTP_EMAIL_ENCRYPTION_KEY`, `OTP_INTERNAL_SECRET`.
+- Wrangler config now reflects the entry point, compatibility flag, vars, KV namespaces, and existing Durable Object binding.
+- The existing Durable Object namespace is confirmed to exist. Its migration history was not exposed by the runtime settings read; do not deploy until the existing class migration history is checked against Wrangler migration metadata.
 
-Deployed modules and byte counts observed:
-- `worker.js` — 208,963
-- `transaction-layer.js` — 38,096
-- `messaging-core.mjs` — 29,385
-- `digital-products.mjs` — 18,030
+## `seiton-site-admin`
 
-Repository root has corresponding module names. File sizes are close; this is not a cryptographic equality proof. The current root `wrangler.jsonc` includes D1, both KV namespaces, Durable Object, and rate limiter, but omits the production R2 binding `PRODUCT_MEDIA`. Do not deploy until this omission is corrected and the bundle is reproducibly built and tested.
+- Production entry point: `worker.js`; compatibility date: `2026-11-04`.
+- The production source replaced the shorter, stale repository copy.
+- Bindings: service `ORDER_BACKEND` → `seiton-order-bot`; service `OTP_BACKEND` → `seiton-otp-portal`; D1 `SITE_DB`; secret `OTP_INTERNAL_SECRET`.
+- Wrangler config now declares both service bindings and the existing D1 binding.
+- The source contains an unused legacy HMAC session helper that references `SITE_ADMIN_SESSION_SECRET`; it has no call sites. Do not provision a new secret solely for that dead helper. Remove it in a later reviewed cleanup if desired.
 
-### `seiton-otp-portal`
+## Validation added
 
-Production compatibility date: `2026-11-13`
+- CI syntax checks now include the production OTP portal entry point, email parser, and site-admin Worker.
+- A regression test verifies all three Wrangler configs against the observed entry points and critical bindings.
+- Existing Worker and Messaging Core regression suites remain enabled.
+- No production D1 migrations were applied.
 
-Bindings observed:
-- Durable Object `MAILBOX_INDEX` / `MailboxIndex`
-- KV `MUSE_KV`, `OTP_KV`
-- Plain vars `OTP_ALLOWED_DOMAINS`, `OTP_PORTAL_URL`
-- Secrets `OTP_EMAIL_ENCRYPTION_KEY`, `OTP_INTERNAL_SECRET`
+## Release status
 
-Deployed modules:
-- `index.js` — 31,074 bytes
-- `email-parser.js` — 5,745 bytes
-
-Repository source currently has `otp-portal/worker.js` (17,046 bytes), and its Wrangler config only declares `OTP_KV`. Entrypoint, module inventory, and bindings therefore materially differ. This Worker cannot safely be deployed from the current repository.
-
-### `seiton-site-admin`
-
-Production compatibility date: `2026-11-04`
-
-Bindings observed:
-- Service `ORDER_BACKEND` → `seiton-order-bot` production
-- Service `OTP_BACKEND` → `seiton-otp-portal` production
-- D1 `SITE_DB` → `seiton-site-content-prod`
-- Secret `OTP_INTERNAL_SECRET`
-
-Deployed module:
-- `worker.js` — 49,047 bytes
-
-Repository `site-admin/worker.js` is 39,603 bytes. The current config declares `ORDER_BACKEND` and `SITE_DB` but omits `OTP_BACKEND`. This Worker cannot safely be deployed from the current repository.
-
-## Required reconciliation actions
-
-1. Recover the exact deployed OTP portal source modules and add them to version control as source files, with an audited diff against the current legacy `worker.js`.
-2. Recover the exact deployed site-admin source and replace or archive the shorter repository version only after behavior and tests are compared.
-3. Add the production R2 binding declaration to the order-bot deploy configuration, preserving its exact bucket name.
-4. Add `MAILBOX_INDEX`, `MUSE_KV`, `OTP_ALLOWED_DOMAINS`, `OTP_PORTAL_URL`, and required secret *names* to OTP deployment documentation/configuration; never commit secret values.
-5. Add `OTP_BACKEND` service binding to site-admin config.
-6. Build all three Workers from the repository and compare module inventory, bindings, compatibility dates, and entrypoint against the Cloudflare runtime.
-7. Add staging/preview contract tests for order bot, OTP portal, and admin before any production deployment.
-
-## Safety status
-
-- No production deployment was performed.
-- No secrets were read or written.
-- No D1 migrations or data mutations were performed.
-- Existing live Workers and routes were left unchanged.
-- The current GitHub source remains non-deployable for OTP portal and site-admin until steps 1–2 are completed.
+Repository reconciliation is prepared for CI and review. Production deploy remains blocked pending:
+1. Passing CI for this branch/PR.
+2. Preview smoke tests for order bot, OTP portal, and site-admin.
+3. Verification of the existing OTP Durable Object migration history.
+4. Explicit approval before any production deployment.
