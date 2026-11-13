@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS digital_stock_accounts (
   created_at TEXT NOT NULL,
   claimed_at TEXT,
   revoked_at TEXT,
-  UNIQUE(category,email_hash)
+  UNIQUE(email_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_digital_stock_available
