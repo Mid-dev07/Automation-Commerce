@@ -136,9 +136,13 @@ export async function addDigitalStockD1(env, categoryValue, input, actor) {
   const added = results.reduce((sum, result) => sum + Number(result?.meta?.changes || 0), 0);
   if (added) await syncStockCount(env.DB, category);
   if (env.MUSE_KV) {
-    await env.MUSE_KV.put("stock:summary:" + category, JSON.stringify({
-      category, available: await digitalStockCount(env.DB, category), updated_at: nowIso()
-    }), { expirationTtl: 86400 });
+    try {
+      await env.MUSE_KV.put("stock:summary:" + category, JSON.stringify({
+        category, available: await digitalStockCount(env.DB, category), updated_at: nowIso()
+      }), { expirationTtl: 86400 });
+    } catch {
+      // D1 remains authoritative; a cache/mirror write must not mask stock insertion.
+    }
   }
   return {
     category,
@@ -216,6 +220,25 @@ export async function claimDigitalStockD1(env, categoryValue, orderId) {
     } else {
       throw new Error("DIGITAL_FULFILLMENT_STATE_INVALID");
     }
+  }
+
+  const previouslyClaimed = await env.DB.prepare(
+    "SELECT stock_id,encrypted_payload,payload_nonce FROM digital_stock_accounts WHERE claimed_order_id=? AND category=?"
+  ).bind(id, category).first();
+  if (previouslyClaimed) {
+    const now = nowIso();
+    await env.DB.prepare(`
+      INSERT INTO digital_fulfillments(order_id,category,status,stock_id,claimed_at,updated_at)
+      VALUES(?,?,'CLAIMED',?,?,?)
+      ON CONFLICT(order_id) DO UPDATE SET
+        status='CLAIMED',stock_id=excluded.stock_id,claimed_at=COALESCE(digital_fulfillments.claimed_at,excluded.claimed_at),updated_at=excluded.updated_at
+    `).bind(id,category,previouslyClaimed.stock_id,now,now).run();
+    await syncStockCount(env.DB, category);
+    return {
+      status:"CLAIMED",alreadyClaimed:true,
+      credentials:await decryptPayload(env,previouslyClaimed.encrypted_payload,previouslyClaimed.payload_nonce),
+      category
+    };
   }
 
   const order = await env.DB.prepare(
