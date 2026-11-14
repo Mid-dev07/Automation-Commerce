@@ -154,6 +154,7 @@ test("normalizes a direct customer message without changing its identity", () =>
 
 test("rejects unsupported channels and non-customer events", () => {
   assert.throws(() => normalizeInboundEvent({ ...event, channel: "baileys" }), /UNSUPPORTED_CHANNEL/);
+  assert.throws(() => normalizeInboundEvent({ ...event, channel: "whatsapp" }), /UNSUPPORTED_CHANNEL/);
   assert.throws(() => normalizeInboundEvent({ ...event, fromMe: true }), /NON_CUSTOMER_EVENT/);
   assert.throws(() => normalizeInboundEvent({ ...event, conversationId: "" }), /MISSING_IDENTITY/);
 });
