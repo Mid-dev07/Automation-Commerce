@@ -135,7 +135,7 @@ async function passwordHash(password, saltBytes) {
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(password),
-    "PBKDF2",
+    { name: "PBKDF2" },
     false,
     ["deriveBits"]
   );
@@ -824,6 +824,7 @@ export {
   encryptMessagePayload,
   extractVerificationCode,
   parseAliasRecipient,
+  passwordHash,
   randomHex
 };
 
@@ -845,7 +846,14 @@ export default {
         const code = error instanceof Error && /^[A-Z0-9_:-]{1,80}$/.test(error.message)
           ? error.message
           : "INTERNAL_ERROR";
-        console.error(JSON.stringify({ level: "error", event: "mail_api_error", code }));
+        console.error(JSON.stringify({
+          level: "error",
+          event: "mail_api_error",
+          code,
+          errorName: error instanceof Error ? error.name : "UnknownError",
+          detail: error instanceof Error ? String(error.message).slice(0, 160) : "NonErrorThrowable",
+          stack: error instanceof Error && error.stack ? String(error.stack).slice(0, 700) : undefined
+        }));
         return responseJson({ ok: false, error: "Permintaan tidak dapat diproses." }, 500);
       }
     }

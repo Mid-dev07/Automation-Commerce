@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decryptMessagePayload, encryptMessagePayload, extractVerificationCode, parseAliasRecipient, randomHex } from "./worker.js";
+import { decryptMessagePayload, encryptMessagePayload, extractVerificationCode, parseAliasRecipient, passwordHash, randomHex } from "./worker.js";
 import { parseEmail } from "./email-parser.js";
+
+test("owner password hashing derives a stable PBKDF2 SHA-256 hash", async () => {
+  const salt = new Uint8Array(16).fill(5);
+  const first = await passwordHash("a-long-owner-password-123", salt);
+  const second = await passwordHash("a-long-owner-password-123", salt);
+  const differentSalt = await passwordHash("a-long-owner-password-123", new Uint8Array(16).fill(6));
+  assert.match(first, /^[a-f0-9]{64}$/);
+  assert.equal(first, second);
+  assert.notEqual(first, differentSalt);
+});
 
 test("plus-address recipient maps only generated receiver aliases", () => {
   const slug = "a1b2c3d4e5f60718293a4b5c";
