@@ -33,5 +33,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Check Worker syntax
+        run: node --check worker.js
+      - name: Check transaction and QRIS modules
+        run: |
+          node --check transaction-layer.js
+          node --check qris.mjs
+      - name: Run Worker and transaction contracts
+        run: node --test tests/worker-contract.test.cjs tests/transaction-layer-contract.test.cjs
+      - name: Run QRIS library tests
+        run: node --test tests/qris.test.mjs
       - name: Run Messaging Core tests
         run: node --test tests/messaging-core.test.mjs
