@@ -114,7 +114,7 @@ function extractVerificationCode(subjectValue, bodyValue) {
   const body = clean(bodyValue, MAX_BODY_CHARS);
   const lines = (subject + "\n" + body).split(/\r?\n/).slice(0, 120);
   const patterns = [
-    /(?:verification\s+code|verify(?:\s+your)?\s+account|security\s+code|authentication\s+code|one[\s-]?time(?:\s+password|\s+code)?|passcode|otp|kode\s+(?:verifikasi|otp|keamanan)|kode\s+anda|your\s+code|use\s+code|code\s+is)\D{0,45}([A-Z0-9]{4,10})/i,
+    /(?:verification\s+code|verify(?:\s+your)?\s+account|security\s+code|authentication\s+code|one[\s-]?time(?:\s+password|\s+code)?|passcode|otp|kode\s+(?:verifikasi|otp|keamanan)|kode\s+anda|your\s+code|use(?:\s+this)?\s+code|code\s+is)\D{0,45}([A-Z0-9]{4,10})/i,
     /(?:G-|FB-)(\d{4,8})\b/i
   ];
   for (const line of lines) {
