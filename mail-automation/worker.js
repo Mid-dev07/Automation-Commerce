@@ -82,6 +82,55 @@ function base64ToBytes(value) {
   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
 }
 
+async function messageEncryptionKey(env) {
+  if (!env.MAIL_MESSAGE_ENCRYPTION_KEY) {
+    throw new Error("MAIL_MESSAGE_ENCRYPTION_KEY_MISSING");
+  }
+  const raw = base64ToBytes(env.MAIL_MESSAGE_ENCRYPTION_KEY);
+  if (raw.length !== 32) {
+    throw new Error("MAIL_MESSAGE_ENCRYPTION_KEY_INVALID");
+  }
+  return crypto.subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+async function encryptMessagePayload(env, aliasId, payload) {
+  const key = await messageEncryptionKey(env);
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const additionalData = encoder.encode("seiton-mail-message:" + String(aliasId));
+  const plaintext = encoder.encode(JSON.stringify(payload));
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData, tagLength: 128 },
+    key,
+    plaintext
+  );
+  return {
+    iv: bytesToBase64(iv),
+    ciphertext: bytesToBase64(new Uint8Array(ciphertext))
+  };
+}
+
+async function decryptMessagePayload(env, aliasId, ivValue, ciphertextValue) {
+  const key = await messageEncryptionKey(env);
+  const iv = base64ToBytes(ivValue);
+  if (iv.length !== 12) throw new Error("MAIL_MESSAGE_IV_INVALID");
+  const additionalData = encoder.encode("seiton-mail-message:" + String(aliasId));
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, additionalData, tagLength: 128 },
+    key,
+    base64ToBytes(ciphertextValue)
+  );
+  try {
+    const payload = JSON.parse(decoder.decode(plaintext));
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      throw new Error("MAIL_MESSAGE_PAYLOAD_INVALID");
+    }
+    return payload;
+  } catch {
+    throw new Error("MAIL_MESSAGE_PAYLOAD_INVALID");
+  }
+}
+
 async function passwordHash(password, saltBytes) {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -382,10 +431,16 @@ async function handleMessagesGet(url, env) {
   ).bind(aliasId).first();
   if (!alias) return responseJson({ ok: false, error: "Alias tidak ditemukan." }, 404);
   const result = await env.MAIL_DB.prepare(
-    "SELECT id,sender,recipient,subject,body_text,verification_code,message_id,received_at " +
+    "SELECT id,message_id,received_at,payload_iv,payload_ciphertext " +
     "FROM mail_messages WHERE alias_id=? ORDER BY received_at DESC LIMIT 50"
   ).bind(aliasId).all();
-  return responseJson({ ok: true, messages: result.results || [] });
+  const messages = await Promise.all((result.results || []).map(async (row) => ({
+    id: row.id,
+    ...(await decryptMessagePayload(env, aliasId, row.payload_iv, row.payload_ciphertext)),
+    message_id: row.message_id,
+    received_at: row.received_at
+  })));
+  return responseJson({ ok: true, messages });
 }
 
 async function handleMessageDelete(request, env, id) {
@@ -705,9 +760,8 @@ async function handleInboundEmail(message, env) {
   }
   const now = Date.now();
   const alias = await env.MAIL_DB.prepare(
-    "UPDATE mail_aliases SET received_count=received_count+1,last_received_at=? " +
-    "WHERE slug=? AND status='ACTIVE' AND expires_at>? AND received_count<? RETURNING id"
-  ).bind(now, recipient.slug, now, MAX_MESSAGES_PER_ALIAS).first();
+    "SELECT id FROM mail_aliases WHERE slug=? AND status='ACTIVE' AND expires_at>? AND received_count<? LIMIT 1"
+  ).bind(recipient.slug, now, MAX_MESSAGES_PER_ALIAS).first();
   if (!alias) {
     message.setReject("Mailbox is inactive or expired");
     return;
@@ -722,22 +776,34 @@ async function handleInboundEmail(message, env) {
   const subject = clean(parsed.subject || "(Tanpa subjek)", 300);
   const body = clean(parsed.text || "", MAX_BODY_CHARS);
   const code = extractVerificationCode(subject, body);
-  const messageId = clean(message.headers.get("message-id") || "", 300) || await sha256Hex(
-    recipient.address + ":" + sender + ":" + subject + ":" + String(now) + ":" + body.slice(0, 300)
-  );
+  const originalMessageId = clean(message.headers.get("message-id") || "", 300) ||
+    recipient.address + ":" + sender + ":" + subject + ":" + String(now) + ":" + body.slice(0, 300);
+  const messageId = await sha256Hex(originalMessageId);
+  const encrypted = await encryptMessagePayload(env, alias.id, {
+    sender,
+    recipient: recipient.address,
+    subject,
+    body_text: body,
+    verification_code: code || null
+  });
+  const active = await env.MAIL_DB.prepare(
+    "UPDATE mail_aliases SET received_count=received_count+1,last_received_at=? " +
+    "WHERE id=? AND status='ACTIVE' AND expires_at>? AND received_count<? RETURNING id"
+  ).bind(now, alias.id, now, MAX_MESSAGES_PER_ALIAS).first();
+  if (!active) {
+    message.setReject("Mailbox is inactive or expired");
+    return;
+  }
   await env.MAIL_DB.prepare(
-    "INSERT INTO mail_messages(id,alias_id,sender,recipient,subject,body_text,verification_code,message_id,received_at) " +
-    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(alias_id,message_id) DO NOTHING"
+    "INSERT INTO mail_messages(id,alias_id,sender,recipient,subject,body_text,verification_code,message_id,received_at,payload_iv,payload_ciphertext) " +
+    "VALUES(?,?,'','','','',NULL,?,?,?,?) ON CONFLICT(alias_id,message_id) DO NOTHING"
   ).bind(
     crypto.randomUUID(),
     alias.id,
-    sender,
-    recipient.address,
-    subject,
-    body,
-    code || null,
     messageId,
-    now
+    now,
+    encrypted.iv,
+    encrypted.ciphertext
   ).run();
 }
 
@@ -754,6 +820,8 @@ async function scheduledCleanup(env) {
 }
 
 export {
+  decryptMessagePayload,
+  encryptMessagePayload,
   extractVerificationCode,
   parseAliasRecipient,
   randomHex

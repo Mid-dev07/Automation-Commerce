@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractVerificationCode, parseAliasRecipient, randomHex } from "./worker.js";
+import { decryptMessagePayload, encryptMessagePayload, extractVerificationCode, parseAliasRecipient, randomHex } from "./worker.js";
 import { parseEmail } from "./email-parser.js";
 
 test("plus-address recipient maps only generated receiver aliases", () => {
@@ -43,4 +43,28 @@ test("MIME parser extracts text and message metadata", () => {
   assert.equal(parsed.subject, "Kode Verifikasi");
   assert.equal(parsed.messageId, "<mail-123@example.net>");
   assert.match(parsed.text, /849201/);
+});
+
+
+test("email payload encryption is authenticated and bound to its alias", async () => {
+  const env = { MAIL_MESSAGE_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64") };
+  const aliasId = "8f8f3b5a-1b19-4cb8-80d1-ae76e9a75021";
+  const payload = {
+    sender: "no-reply@example.net",
+    recipient: "receiver+secret@inbox.seiton.biz.id",
+    subject: "Kode Verifikasi",
+    body_text: "Kode verifikasi Anda 849201",
+    verification_code: "849201"
+  };
+  const encrypted = await encryptMessagePayload(env, aliasId, payload);
+  assert.ok(encrypted.iv);
+  assert.ok(encrypted.ciphertext);
+  assert.notEqual(encrypted.ciphertext, Buffer.from(JSON.stringify(payload)).toString("base64"));
+  assert.deepEqual(
+    await decryptMessagePayload(env, aliasId, encrypted.iv, encrypted.ciphertext),
+    payload
+  );
+  await assert.rejects(
+    () => decryptMessagePayload(env, "1f8f3b5a-1b19-4cb8-80d1-ae76e9a75021", encrypted.iv, encrypted.ciphertext)
+  );
 });

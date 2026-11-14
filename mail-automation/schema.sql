@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS mail_messages (
   verification_code TEXT,
   message_id TEXT NOT NULL DEFAULT '',
   received_at INTEGER NOT NULL,
+  payload_iv TEXT,
+  payload_ciphertext TEXT,
   UNIQUE(alias_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_mail_messages_alias_received ON mail_messages(alias_id, received_at DESC);

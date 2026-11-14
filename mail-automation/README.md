@@ -24,6 +24,8 @@ Ini adalah alamat penerima alias melalui Cloudflare Email Routing subaddressing,
 - Login admin, sesi HttpOnly/Secure/SameSite=Strict, dan lockout login.
 - Generate alias dengan masa aktif 15 menit, 1 jam, 1 hari, 7 hari, atau 30 hari.
 - Inbox per alias, deteksi kode OTP/verifikasi, salin alamat/kode, cabut alias, hapus pesan.
+- Payload email (pengirim, penerima, subjek, isi, dan kode) dienkripsi AES-256-GCM dengan AAD yang terikat ke alias sebelum disimpan ke D1; IV acak disimpan terpisah.
+- Hanya hash Message-ID yang disimpan untuk deduplikasi; plaintext email tidak ditulis ke kolom D1.
 - Retensi pesan maksimum 30 hari; tidak menyimpan lampiran.
 - UI noindex, tanpa analytics dan tanpa resource eksternal.
 - Email inbound only. Pengiriman email keluar bukan bagian dari panel ini.
@@ -34,6 +36,7 @@ Ini adalah alamat penerima alias melalui Cloudflare Email Routing subaddressing,
 2. Set Worker secrets:
    - `MAIL_SETUP_TOKEN`: bootstrap token sekali pakai untuk menginisialisasi password owner.
    - `MAIL_SESSION_SECRET`: secret acak minimal 32 byte.
+   - `MAIL_MESSAGE_ENCRYPTION_KEY`: base64 dari 32 byte acak untuk AES-256-GCM; kunci ini mengenkripsi payload email sebelum disimpan ke D1.
 3. Tambahkan custom domain Worker `mail.seiton.biz.id`.
 4. Tambahkan subdomain Email Routing `inbox.seiton.biz.id`.
 5. Aktifkan `support_subaddress` pada Email Routing zone, lalu buat satu routing rule literal:
