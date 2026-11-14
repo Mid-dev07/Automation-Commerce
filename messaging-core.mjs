@@ -1,4 +1,4 @@
-const ALLOWED_CHANNELS = new Set(["telegram", "whatsapp"]);
+const ALLOWED_CHANNELS = new Set(["telegram"]);
 const ALLOWED_PAYMENTS = new Set(["QRIS", "TRANSFER", "COD"]);
 
 function clean(value, maxLength = 500) {
