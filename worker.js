@@ -1205,6 +1205,8 @@ async function handleTelegramCallback(env, query) {
         buttons.push([{ text: "🎟️ Lihat Resi " + orderId.slice(-8), callback_data: "ticket:" + orderId }]);
       } else if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
         buttons.push([{ text: "📎 Kirim / Perbarui Bukti " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
+      } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+        buttons.push([{ text: "⚡ Periksa QRIS " + orderId.slice(-8), callback_data: "qris:check:" + orderId }]);
       } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() !== "COD") {
         buttons.push([{ text: "💳 Konfirmasi Bayar " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
       }
@@ -3430,20 +3432,20 @@ async function buildAdminReport(env) {
 
 function orderConfirmation(order, env) {
   const paymentInfo = order.paymentMethod === "QRIS"
-    ? `\n\n📲 Silakan scan QRIS: ${env.LINK_QRIS_IMAGE || "Hubungi admin untuk QRIS."}`
+    ? "\n\n📲 QRIS dinamis diterbitkan khusus untuk nominal pesanan ini."
     : order.paymentMethod === "TRANSFER"
       ? "\n\n🏦 Instruksi transfer akan diberikan admin."
       : "\n\n🚚 Pembayaran COD dipilih.";
   return [
     "✅ *PESANAN DICATAT - SEITON.ID*",
-    `🧾 ID: ${order.orderId}`,
-    `📦 ${order.product} (${order.sku})`,
-    `🔢 Jumlah: ${order.quantity}`,
-    `💵 Harga: ${rupiah(order.unitPrice)}`,
-    `🚚 Ongkir: ${rupiah(order.shipping)}`,
-    `💰 *Total: ${rupiah(order.total)}*`,
-    `💳 Metode: ${order.paymentMethod}`,
-    `⏳ Status: ${order.status}`,
+    "🧾 ID: " + order.orderId,
+    "📦 " + order.product + " (" + order.sku + ")",
+    "🔢 Jumlah: " + order.quantity,
+    "💵 Harga: " + rupiah(order.unitPrice),
+    "🚚 Ongkir: " + rupiah(order.shipping),
+    "💰 *Total: " + rupiah(order.total) + "*",
+    "💳 Metode: " + order.paymentMethod,
+    "⏳ Status: " + order.status,
     paymentInfo,
     "",
     "_Powered by Seiton.id_"
@@ -3750,12 +3752,23 @@ async function dispatchTelegramMessagingOutbox(env, limit = 20) {
     try {
       const payload = JSON.parse(job.payload_json || "{}");
       if (payload.type !== "text" || !payload.text) throw new Error("OUTBOX_PAYLOAD_INVALID");
-      await sendTelegram(
-        env,
-        String(job.recipient_id),
-        String(payload.text),
-        telegramMessagingReplyMarkup(payload)
-      );
+      const isWelcome = /SELAMAT DATANG DI SEITON\.ID|Layanan otomatis Seiton/i.test(String(payload.text || ""));
+      if (isWelcome) {
+        await sendTelegramPhoto(
+          env,
+          String(job.recipient_id),
+          SEITON_LOGO_URL,
+          String(payload.text),
+          telegramMessagingReplyMarkup(payload) || customerMenuKeyboard()
+        );
+      } else {
+        await sendTelegram(
+          env,
+          String(job.recipient_id),
+          String(payload.text),
+          telegramMessagingReplyMarkup(payload)
+        );
+      }
       await completeMessagingOutbox(env, job, null);
       sent += 1;
     } catch (error) {
