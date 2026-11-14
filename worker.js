@@ -3727,6 +3727,10 @@ function createMessagingServices(env) {
 function telegramMessagingReplyMarkup(payload) {
   const buttons = Array.isArray(payload.buttons) ? payload.buttons : [];
   if (!buttons.length) return null;
+  const values = new Set(buttons.map(button => String(button.value || "")));
+  if (values.has("catalog") && values.has("orders") && values.has("help")) {
+    return customerMenuKeyboard();
+  }
   const callbackByValue = {
     catalog: "nav:catalog",
     orders: "nav:orders",
