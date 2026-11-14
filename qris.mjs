@@ -74,7 +74,6 @@ export function encodeEmvTlv(fields) {
 
 export function verifyQrisPayload(payload) {
   const input = String(payload ?? "");
-  if (!input.endsWith("6304" + input.slice(-4))) return false;
   const crcMarker = input.lastIndexOf("6304");
   if (crcMarker < 0 || crcMarker + 8 !== input.length) return false;
   const supplied = input.slice(crcMarker + 4).toUpperCase();
@@ -93,7 +92,7 @@ export function parseQrisPayload(payload) {
     seen.add(field.tag);
     values[field.tag] = field.value;
   }
-  if (values["00"] !== "01" || values["53"] !== "360" || values["58"] !== "ID") {
+  if (values["00"] !== "01" || !["11", "12"].includes(values["01"]) || values["53"] !== "360" || values["58"] !== "ID") {
     throw new Error("QRIS_STANDARD_FIELDS_INVALID");
   }
   return {
@@ -123,7 +122,7 @@ export function buildDynamicQrisPayload(staticPayload, amount) {
   }
 
   const fields = [];
-  let hasAmount = false;
+  let hasAmount = parsed.fields.some(field => field.tag === "54");
   let insertedAmount = false;
   for (const field of parsed.fields) {
     if (field.tag === "63") continue;
