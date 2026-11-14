@@ -165,11 +165,11 @@ test("scheduled outbox dispatch handles both order and catalog mirrors", () => {
 
 
 test("Midtrans QRIS settlement is a separate verified transaction operation", () => {
-  assert.match(source, /async function settleQrisPaymentD1\(db,id,input\)/);
-  assert.match(source, /payment_method\)\.toUpperCase\(\)!=="QRIS"/);
-  assert.match(source, /Nominal settlement QRIS tidak cocok/);
-  assert.match(source, /provider_transaction_id/);
-  assert.match(source, /qris_webhook_events/);
-  assert.match(source, /export async function settleQrisPaymentTransactional/);
-  assert.match(source, /async settleQrisPayment\(id,input\)/);
+  assert.match(layer, /async function settleQrisPaymentD1\(db,id,input\)/);
+  assert.match(layer, /payment_method\)\.toUpperCase\(\)!=="QRIS"/);
+  assert.match(layer, /Nominal settlement QRIS tidak cocok/);
+  assert.match(layer, /provider_transaction_id/);
+  assert.match(layer, /qris_webhook_events/);
+  assert.match(layer, /export async function settleQrisPaymentTransactional/);
+  assert.match(layer, /async settleQrisPayment\(id,input\)/);
 });
