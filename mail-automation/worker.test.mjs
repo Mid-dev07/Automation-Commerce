@@ -1,7 +1,24 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decryptMessagePayload, encryptMessagePayload, extractVerificationCode, parseAliasRecipient, passwordHash, randomHex } from "./worker.js";
+import { decryptMessagePayload, encryptMessagePayload, extractVerificationCode, parseAliasRecipient, parseBearerToken, passwordHash, randomHex } from "./worker.js";
 import { parseEmail } from "./email-parser.js";
+
+test("machine API accepts only a syntactically valid Bearer token", () => {
+  const valid = new Request("https://mail.seiton.biz.id/api/v1/machine/messages", {
+    headers: { Authorization: "Bearer " + "a".repeat(64) }
+  });
+  const missing = new Request("https://mail.seiton.biz.id/api/v1/machine/messages");
+  const wrongScheme = new Request("https://mail.seiton.biz.id/api/v1/machine/messages", {
+    headers: { Authorization: "Basic " + "a".repeat(64) }
+  });
+  const short = new Request("https://mail.seiton.biz.id/api/v1/machine/messages", {
+    headers: { Authorization: "Bearer short" }
+  });
+  assert.equal(parseBearerToken(valid), "a".repeat(64));
+  assert.equal(parseBearerToken(missing), "");
+  assert.equal(parseBearerToken(wrongScheme), "");
+  assert.equal(parseBearerToken(short), "");
+});
 
 test("owner password hashing derives a stable PBKDF2 SHA-256 hash", async () => {
   const salt = new Uint8Array(16).fill(5);
