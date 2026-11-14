@@ -1,0 +1,9 @@
+{
+  "name": "seiton-mail-automation",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test worker.test.mjs",
+    "check": "node --check worker.js && node --check email-parser.js"
+  }
+}
