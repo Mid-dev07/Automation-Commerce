@@ -29,10 +29,36 @@ const parseCatalogProduct = evaluateFunction(
   extractBetween(worker, "function parseCatalogProduct(row) {", "async function findProduct(env, sku) {"),
   "parseCatalogProduct"
 );
+const customerCategoryForProduct = evaluateFunction(
+  extractBetween(worker, "function customerCategoryForProduct(row) {", "function customerCategoryTitle(categoryKey) {"),
+  "customerCategoryForProduct"
+);
 const csvCell = evaluateFunction(
   extractBetween(worker, "function csvCell(value) {", "function csvText(rows) {"),
   "csvCell"
 );
+
+
+test("Telegram storefront groups known product families without changing SKU or inventory data", () => {
+  assert.equal(customerCategoryForProduct(["MUSE-STARTER", "Akun Muse Starter"]), "digital");
+  assert.equal(customerCategoryForProduct(["OTP-SETUP", "Jasa Setup Domain & Portal OTP"]), "email");
+  assert.equal(customerCategoryForProduct(["SEI-001", "Website Katalog UMKM"]), "website");
+  assert.equal(customerCategoryForProduct(["S-01", "Bot Automated Commerce"]), "automation");
+  assert.equal(customerCategoryForProduct(["NEW-001", "Produk Baru"]), "other");
+});
+
+test("Telegram customer storefront supports category navigation, product detail, guide and refresh", () => {
+  assert.match(worker, /async function showCustomerCategoryMenu\(env, message\)/);
+  assert.match(worker, /async function showCustomerCatalogPage\(env, message, page = 0, categoryKey = "all"\)/);
+  assert.match(worker, /callback_data: "cat:items:" \+ key \+ ":0"/);
+  assert.match(worker, /data\.startsWith\("cat:items:"\)/);
+  assert.match(worker, /data\.startsWith\("view:"\)/);
+  assert.match(worker, /data === "nav:guide"/);
+  assert.match(worker, /data === "nav:refresh"/);
+  assert.match(worker, /Stok sedang habis\. Produk belum dapat dipesan\./);
+  assert.match(worker, /CUSTOMER_CATALOG_PAGE_SIZE = 5/);
+  assert.match(worker, /data\.startsWith\("cat:page:"\)/);
+});
 
 test("worker module parses", () => {
   execFileSync(process.execPath, ["--check", workerPath], { stdio: "pipe" });
