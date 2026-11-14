@@ -390,7 +390,7 @@ async function settleQrisPaymentD1(db,id,input) {
   const results=await db.batch([
     db.prepare("INSERT INTO qris_webhook_events(provider,event_id,order_id,transaction_status,received_at) VALUES('midtrans',?,?, 'settlement',?)")
       .bind(eventId,orderId,at),
-    db.prepare("UPDATE qris_payments SET status='PAID',raw_provider_status='settlement',provider_transaction_id=?,merchant_id=CASE WHEN ?='' THEN merchant_id ELSE ? END,paid_at=?,updated_at=? WHERE order_id=? AND status='PENDING'")
+    db.prepare("UPDATE qris_payments SET status='PAID',raw_provider_status='settlement',provider_transaction_id=?,merchant_id=CASE WHEN ?='' THEN merchant_id ELSE ? END,paid_at=?,updated_at=? WHERE order_id=? AND status IN ('PENDING','EXPIRED','FAILED')")
       .bind(transactionId,merchantId,merchantId,at,at,orderId),
     db.prepare("UPDATE orders SET status='DIBAYAR',payment_confirmation_status='DISETUJUI',payment_confirmed_at=?,receipt_code=?,pickup_status='BELUM_DIAMBIL',updated_at=? WHERE order_id=? AND payment_method='QRIS' AND total=? AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED') AND COALESCE(payment_confirmation_status,'')<>'DISETUJUI'")
       .bind(at,code,at,orderId,amount),
@@ -400,6 +400,7 @@ async function settleQrisPaymentD1(db,id,input) {
       {from_status:String(order.status||""),to_status:"DIBAYAR",transition_type:"gateway_settlement",provider:"midtrans"},at,sourceKey),
     sheetMirrorStatement(db,orderId,at)
   ].filter(Boolean));
+  checkChanges(results[1],"Status transaksi QRIS tidak dapat diperbarui.");
   checkChanges(results[2],"Settlement QRIS gagal diterapkan; status pesanan berubah atau sudah diproses.");
   return getOrderD1(db,orderId);
 }
