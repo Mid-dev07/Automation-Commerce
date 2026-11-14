@@ -142,7 +142,7 @@ async function passwordHash(password, saltBytes) {
   const bits = await crypto.subtle.deriveBits({
     name: "PBKDF2",
     salt: saltBytes,
-    iterations: 120000,
+    iterations: 100000,
     hash: "SHA-256"
   }, key, 256);
   return bytesToHex(new Uint8Array(bits));
