@@ -1,7 +1,6 @@
 import { parseEmail } from "./email-parser.js";
 
 const PANEL_ORIGIN = "https://mail.seiton.biz.id";
-const PANEL_HOST = "mail.seiton.biz.id";
 const MAIL_DOMAIN = "inbox.seiton.biz.id";
 const BASE_LOCAL_PART = "receiver";
 const MAX_RAW_BYTES = 1024 * 1024;
@@ -13,7 +12,6 @@ const LOGIN_MAX_ATTEMPTS = 5;
 const ALLOWED_TTLS = new Set([900, 3600, 86400, 604800, 2592000]);
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 function responseJson(data, status = 200, headers = {}) {
   return new Response(JSON.stringify(data), {
@@ -607,8 +605,6 @@ byId("setupForm").addEventListener("submit", async (event) => {
       }
     });
     byId("setupForm").reset();
-    await api("/api/login", { method: "POST", body: { password: byId("setupPassword").value } });
-    byId("setupPassword").value = "";
     showDashboard();
   } catch (error) { setStatus(error.message, true); }
 });
