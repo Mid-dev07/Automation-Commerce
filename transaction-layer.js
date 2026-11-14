@@ -346,6 +346,64 @@ async function approvePaymentD1(db,id,actor="admin") {
   checkChanges(results[0],"Permintaan pembayaran sudah diproses atau status pesanan tidak memenuhi syarat.");
   return getOrderD1(db,id);
 }
+async function settleQrisPaymentD1(db,id,input) {
+  await requireReady(db);
+  const orderId=clean(id,80);
+  const order=await getOrderD1(db,orderId);
+  if(!order)throw new Error("Pesanan tidak ditemukan.");
+  if(String(order.payment_method).toUpperCase()!=="QRIS")throw new Error("Pesanan ini bukan pembayaran QRIS.");
+  if(CANCELLED_STATUSES.has(String(order.status).toUpperCase()))throw new Error("Pesanan sudah dibatalkan.");
+  const amount=asSafeMoney(input?.amount,"Nominal settlement QRIS");
+  if(amount!==Number(order.total))throw new Error("Nominal settlement QRIS tidak cocok dengan total pesanan.");
+  const provider=clean(input?.provider,24).toLowerCase();
+  const providerOrderId=clean(input?.providerOrderId,80);
+  const transactionId=clean(input?.transactionId,100);
+  const merchantId=clean(input?.merchantId,80);
+  const eventId=clean(input?.eventId,180);
+  if(provider!=="midtrans"||!providerOrderId||!transactionId||!eventId) {
+    throw new Error("Identitas transaksi QRIS tidak lengkap.");
+  }
+  const payment=await db.prepare("SELECT * FROM qris_payments WHERE order_id=?").bind(orderId).first();
+  if(!payment)throw new Error("Transaksi QRIS tidak ditemukan.");
+  if(payment.provider!=="midtrans"||payment.provider_order_id!==providerOrderId) {
+    throw new Error("Pemetaan transaksi QRIS tidak cocok.");
+  }
+  if(Number(payment.amount)!==amount||String(payment.currency).toUpperCase()!=="IDR") {
+    throw new Error("Nominal atau mata uang transaksi QRIS tidak cocok.");
+  }
+  if(payment.provider_transaction_id && String(payment.provider_transaction_id)!==transactionId) {
+    throw new Error("ID transaksi provider berbeda dari transaksi QRIS tersimpan.");
+  }
+  if(merchantId && payment.merchant_id && String(payment.merchant_id)!==merchantId) {
+    throw new Error("Merchant ID transaksi QRIS tidak cocok.");
+  }
+  if(String(order.payment_confirmation_status).toUpperCase()==="DISETUJUI"&&order.receipt_code) {
+    return { ...order, alreadyPaid:true };
+  }
+  const duplicate=await db.prepare(
+    "SELECT event_id FROM qris_webhook_events WHERE provider='midtrans' AND event_id=?"
+  ).bind(eventId).first();
+  if(duplicate)throw new Error("Notifikasi QRIS sudah pernah diproses.");
+  const at=nowJakarta();
+  const code="SEI-"+dateStamp(at)+"-"+crypto.randomUUID().slice(0,6).toUpperCase();
+  const sourceKey="midtrans:settlement:"+eventId;
+  const results=await db.batch([
+    db.prepare("INSERT INTO qris_webhook_events(provider,event_id,order_id,transaction_status,received_at) VALUES('midtrans',?,?, 'settlement',?)")
+      .bind(eventId,orderId,at),
+    db.prepare("UPDATE qris_payments SET status='PAID',raw_provider_status='settlement',provider_transaction_id=?,merchant_id=CASE WHEN ?='' THEN merchant_id ELSE ? END,paid_at=?,updated_at=? WHERE order_id=? AND status='PENDING'")
+      .bind(transactionId,merchantId,merchantId,at,at,orderId),
+    db.prepare("UPDATE orders SET status='DIBAYAR',payment_confirmation_status='DISETUJUI',payment_confirmed_at=?,receipt_code=?,pickup_status='BELUM_DIAMBIL',updated_at=? WHERE order_id=? AND payment_method='QRIS' AND total=? AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED') AND COALESCE(payment_confirmation_status,'')<>'DISETUJUI'")
+      .bind(at,code,at,orderId,amount),
+    db.prepare("INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at) SELECT order_id,'PAYMENT_APPROVED',?,'DIBAYAR',?,?, '{}',? FROM orders WHERE order_id=? AND receipt_code=?")
+      .bind(order.status,"midtrans:webhook",sourceKey,at,orderId,code),
+    adminActivityAuditStatement(db,"midtrans:webhook","PAYMENT_APPROVED",orderId,
+      {from_status:String(order.status||""),to_status:"DIBAYAR",transition_type:"gateway_settlement",provider:"midtrans"},at,sourceKey),
+    sheetMirrorStatement(db,orderId,at)
+  ].filter(Boolean));
+  checkChanges(results[2],"Settlement QRIS gagal diterapkan; status pesanan berubah atau sudah diproses.");
+  return getOrderD1(db,orderId);
+}
+
 async function rejectPaymentD1(db,id,actor="admin") {
   await requireReady(db);
   const o=await getOrderD1(db,id);
@@ -572,6 +630,9 @@ export async function requestVerificationTransactional(env,id,userId) {
 export async function approvePaymentTransactional(env,id,actor) {
   return orderOperation(env,id,"approvePayment",actor);
 }
+export async function settleQrisPaymentTransactional(env,id,input) {
+  return orderOperation(env,id,"settleQrisPayment",input);
+}
 export async function rejectPaymentTransactional(env,id,actor) {
   return orderOperation(env,id,"rejectPayment",actor);
 }
@@ -697,6 +758,13 @@ export class OrderCoordinator extends DurableObject {
     return this.enqueue(async()=>{
       const result=await approvePaymentD1(this.env.DB,id,actor);
       this.audit("APPROVE_PAYMENT",id,result.receipt_code);
+      return result;
+    });
+  }
+  async settleQrisPayment(id,input) {
+    return this.enqueue(async()=>{
+      const result=await settleQrisPaymentD1(this.env.DB,id,input);
+      this.audit("QRIS_GATEWAY_SETTLEMENT",id,result.receipt_code || "ALREADY_PAID");
       return result;
     });
   }
