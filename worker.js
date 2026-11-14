@@ -599,16 +599,25 @@ async function handleTelegram(request, env, ctx) {
 
 
 function customerMenuText() {
-  return "🛍️ SELAMAT DATANG DI SEITON.ID\nPilih menu di bawah ini. Anda tidak perlu mengetik format pesanan.";
+  return [
+    "🛍️ SEITON.ID",
+    "Belanja produk dan layanan langsung melalui tombol di bawah.",
+    "Pilih katalog untuk mulai berbelanja."
+  ].join("\n");
 }
 function adminMenuText() {
   return "🛠️ PANEL ADMIN SEITON.ID\nPilih tindakan yang ingin dilakukan.";
 }
 function customerMenuKeyboard() {
   return { inline_keyboard: [
-    [{ text: "🛍️ Belanja Produk", callback_data: "nav:catalog" }],
-    [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
-    [{ text: "💬 Bantuan", callback_data: "nav:help" }]
+    [
+      { text: "🛍️ Katalog Produk", callback_data: "nav:catalog" },
+      { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+    ],
+    [
+      { text: "🧭 Cara Belanja", callback_data: "nav:guide" },
+      { text: "💬 Bantuan", callback_data: "nav:help" }
+    ]
   ] };
 }
 function adminMenuKeyboard() {
@@ -626,6 +635,149 @@ function adminMenuKeyboard() {
     [{ text: "🛍️ Tampilan Pelanggan", callback_data: "nav:home" }]
   ] };
 }
+
+const CUSTOMER_CATALOG_PAGE_SIZE = 5;
+const CUSTOMER_CATEGORY_META = {
+  digital: { title: "AI & Akun Digital", button: "🤖 AI & Digital" },
+  email: { title: "Email & OTP", button: "✉️ Email & OTP" },
+  website: { title: "Website & UMKM", button: "🌐 Website & UMKM" },
+  automation: { title: "Bot & Otomasi", button: "⚙️ Bot & Otomasi" },
+  other: { title: "Produk Lainnya", button: "📦 Produk Lainnya" }
+};
+const CUSTOMER_CATEGORY_ORDER = ["digital", "email", "website", "automation", "other"];
+
+function customerCategoryForProduct(row) {
+  const sku = String(row?.[0] || "").trim().toUpperCase();
+  const text = [row?.[1], row?.[6]].map(value => String(value || "").toLowerCase()).join(" ");
+  if (/^MUSE-|\bmuse\b|\bai\b|gemini|chatgpt|claude|grok|capcut|eleven.?labs/.test(sku + " " + text)) return "digital";
+  if (/^OTP-|\botp\b|email|e-mail|mailbox|domain/.test(sku + " " + text)) return "email";
+  if (/^SEI-|website|katalog|umkm/.test(sku + " " + text)) return "website";
+  if (/^S-|bot|automation|automated|otomasi|integrasi/.test(sku + " " + text)) return "automation";
+  return "other";
+}
+
+function customerCategoryTitle(categoryKey) {
+  return CUSTOMER_CATEGORY_META[categoryKey]?.title || "Semua Produk";
+}
+
+function activeCustomerCatalogProducts(rows) {
+  return (rows || []).filter(row => {
+    if (!row?.[0]) return false;
+    const product = parseCatalogProduct(row);
+    return product.active && product.priceValid && product.stockValid;
+  });
+}
+
+async function showCustomerCategoryMenu(env, message) {
+  const rows = await readTelegramCatalogRows(env);
+  const products = activeCustomerCatalogProducts(rows);
+  if (!products.length) {
+    await updateTelegramMessage(env, message, {
+      text: "🛍️ KATALOG SEITON.ID\n\nSaat ini belum ada produk aktif yang dapat ditampilkan. Silakan periksa kembali nanti atau hubungi admin.",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
+        [{ text: "💬 Bantuan", callback_data: "nav:help" }],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
+      clearMedia: true
+    });
+    return;
+  }
+
+  const counts = new Map();
+  for (const row of products) {
+    const key = customerCategoryForProduct(row);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  const categoryButtons = CUSTOMER_CATEGORY_ORDER
+    .filter(key => counts.has(key))
+    .map(key => ({
+      text: CUSTOMER_CATEGORY_META[key].button + " (" + counts.get(key) + ")",
+      callback_data: "cat:items:" + key + ":0"
+    }));
+  const categoryRows = [];
+  for (let i = 0; i < categoryButtons.length; i += 2) {
+    categoryRows.push(categoryButtons.slice(i, i + 2));
+  }
+
+  await updateTelegramMessage(env, message, {
+    text: "🛍️ KATALOG SEITON.ID\n\nTersedia " + products.length + " produk aktif. Pilih kategori atau lihat semuanya.",
+    replyMarkup: { inline_keyboard: [
+      [{ text: "🛒 Semua Produk (" + products.length + ")", callback_data: "cat:items:all:0" }],
+      ...categoryRows,
+      [
+        { text: "📦 Pesanan Saya", callback_data: "nav:orders" },
+        { text: "🔄 Refresh", callback_data: "nav:refresh" }
+      ],
+      [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+    ] },
+    clearMedia: true
+  });
+}
+
+async function showCustomerCatalogPage(env, message, page = 0, categoryKey = "all") {
+  const rows = await readTelegramCatalogRows(env);
+  const allProducts = activeCustomerCatalogProducts(rows);
+  const safeCategory = categoryKey === "all" || CUSTOMER_CATEGORY_META[categoryKey] ? categoryKey : "all";
+  const products = safeCategory === "all"
+    ? allProducts
+    : allProducts.filter(row => customerCategoryForProduct(row) === safeCategory);
+
+  if (!products.length) {
+    await updateTelegramMessage(env, message, {
+      text: "Belum ada produk pada kategori " + customerCategoryTitle(safeCategory) + ".",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "⬅️ Semua Kategori", callback_data: "nav:catalog" }],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
+      clearMedia: true
+    });
+    return;
+  }
+
+  const pageCount = Math.ceil(products.length / CUSTOMER_CATALOG_PAGE_SIZE);
+  const current = Math.max(0, Math.min(pageCount - 1, Number.isInteger(page) ? page : 0));
+  const visible = products.slice(
+    current * CUSTOMER_CATALOG_PAGE_SIZE,
+    (current + 1) * CUSTOMER_CATALOG_PAGE_SIZE
+  );
+  const title = safeCategory === "all" ? "Semua Produk" : customerCategoryTitle(safeCategory);
+  const buttons = visible.map(row => {
+    const product = parseCatalogProduct(row);
+    const availability = product.stock === 0
+      ? "Stok habis"
+      : product.stock === null ? "Ready" : "Stok " + product.stock;
+    let label = product.name + " · " + rupiah(product.price) + " · " + availability;
+    if (label.length > 64) label = label.slice(0, 61) + "…";
+    return [{ text: label, callback_data: "view:" + product.sku }];
+  });
+
+  const navigation = [];
+  if (current > 0) navigation.push({
+    text: "◀️ Sebelumnya",
+    callback_data: "cat:items:" + safeCategory + ":" + (current - 1)
+  });
+  if (current < pageCount - 1) navigation.push({
+    text: "Berikutnya ▶️",
+    callback_data: "cat:items:" + safeCategory + ":" + (current + 1)
+  });
+  const keyboard = [
+    ...buttons,
+    ...(navigation.length ? [navigation] : []),
+    [{ text: "🗂️ Semua Kategori", callback_data: "nav:catalog" }],
+    [
+      { text: "🔄 Refresh", callback_data: "nav:refresh" },
+      { text: "🏠 Menu Utama", callback_data: "nav:home" }
+    ]
+  ];
+
+  await updateTelegramMessage(env, message, {
+    text: "🛍️ " + title + " (" + (current + 1) + "/" + pageCount + ")\nPilih produk untuk melihat detail, foto, harga, dan jumlah yang tersedia.",
+    replyMarkup: { inline_keyboard: keyboard },
+    clearMedia: true
+  });
+}
+
 function adminCatalogKeyboard() {
   return { inline_keyboard: [
     [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
@@ -959,30 +1111,78 @@ async function handleTelegramCallback(env, query) {
     return;
   }
 
-  if (data === "nav:catalog" || data.startsWith("cat:page:")) {
-    const page = data.startsWith("cat:page:") ? Number(data.slice("cat:page:".length)) : 0;
-    await showCustomerCatalogPage(env, message, page);
+  if (data === "nav:catalog" || data === "nav:refresh") {
+    await showCustomerCategoryMenu(env, message);
     return;
   }
 
-  if (data.startsWith("buy:")) {
-    const sku = data.slice(4);
+  if (data.startsWith("cat:items:")) {
+    const parts = data.split(":");
+    const categoryKey = parts[2] || "all";
+    const page = Number(parts[3] || 0);
+    await showCustomerCatalogPage(env, message, page, categoryKey);
+    return;
+  }
+
+  // Backward compatibility for catalog buttons created before the category UI.
+  if (data.startsWith("cat:page:")) {
+    await showCustomerCatalogPage(env, message, Number(data.slice("cat:page:".length)), "all");
+    return;
+  }
+
+  if (data.startsWith("buy:") || data.startsWith("view:")) {
+    const sku = data.startsWith("view:") ? data.slice(5) : data.slice(4);
     const rows = await readTelegramCatalogRows(env);
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
-    if (!p || ["FALSE","0","NONAKTIF","NO"].includes(String(p[4] ?? "TRUE").toUpperCase())) throw new Error("Produk tidak tersedia");
-    const stock = p[3] === "" || p[3] == null ? null : Number(p[3]);
-    const buttons = [1,2,3,5].filter(q => stock === null || (Number.isFinite(stock) && stock >= q))
-      .map(q => ({ text: q + " pcs", callback_data: "qty:" + sku + ":" + q }));
-    const productText = "Produk: " + (p[1] || sku) + "\nHarga: " + rupiah(p[2]) + "\nStok: " + (stock === null ? "Tidak dibatasi" : stock) + (p[6] ? "\n" + p[6] : "") + "\n\nPilih jumlah:";
-    const productKeyboard = { inline_keyboard: [
-      buttons,
-      [{ text: "⬅️ Kembali ke katalog", callback_data: "nav:catalog" }]
-    ] };
+    if (!p) throw new Error("Produk tidak ditemukan atau sudah tidak tersedia.");
+    const product = parseCatalogProduct(p);
+    if (!product.active || !product.priceValid || !product.stockValid) {
+      throw new Error("Produk sedang tidak tersedia. Silakan refresh katalog.");
+    }
+
+    const categoryKey = customerCategoryForProduct(p);
+    const categoryProducts = activeCustomerCatalogProducts(rows)
+      .filter(row => customerCategoryForProduct(row) === categoryKey);
+    const categoryIndex = categoryProducts.findIndex(row =>
+      String(row[0] || "").trim().toUpperCase() === product.sku.toUpperCase()
+    );
+    const returnPage = categoryIndex < 0
+      ? 0
+      : Math.floor(categoryIndex / CUSTOMER_CATALOG_PAGE_SIZE);
+    const canPurchase = product.stock === null || product.stock > 0;
+    const quantities = canPurchase
+      ? [1, 2, 3, 5].filter(quantity => product.stock === null || product.stock >= quantity)
+      : [];
+    const quantityButtons = quantities.map(quantity => ({
+      text: quantity + " pcs",
+      callback_data: "qty:" + product.sku + ":" + quantity
+    }));
+    const stockLabel = product.stock === null
+      ? "Tidak dibatasi"
+      : product.stock === 0 ? "Habis" : product.stock + " tersedia";
+    const productText = [
+      "📦 DETAIL PRODUK",
+      product.name,
+      "Harga: " + rupiah(product.price),
+      "Stok: " + stockLabel,
+      product.description,
+      canPurchase
+        ? "Pilih jumlah untuk melanjutkan:"
+        : "Stok sedang habis. Produk belum dapat dipesan."
+    ].filter(Boolean).join("\n");
+    const keyboard = {
+      inline_keyboard: [
+        ...(quantityButtons.length ? [quantityButtons] : []),
+        [{ text: "⬅️ Kembali ke Kategori", callback_data: "cat:items:" + categoryKey + ":" + returnPage }],
+        [{ text: "🗂️ Semua Kategori", callback_data: "nav:catalog" }]
+      ]
+    };
+
     await updateTelegramMessage(env, message, {
       text: productText,
       photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
       clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
-      replyMarkup: productKeyboard
+      replyMarkup: keyboard
     });
     return;
   }
@@ -1061,10 +1261,47 @@ async function handleTelegramCallback(env, query) {
     return;
   }
 
+  if (data === "nav:guide") {
+    await updateTelegramMessage(env, message, {
+      text: [
+        "🧭 CARA BELANJA DI SEITON.ID",
+        "",
+        "1. Buka Katalog Produk dan pilih kategori.",
+        "2. Pilih produk untuk melihat foto, harga, dan stok.",
+        "3. Tentukan jumlah serta metode pembayaran.",
+        "4. Periksa ringkasan, lalu tekan Buat Pesanan.",
+        "5. Ikuti instruksi pembayaran dan pantau status di Pesanan Saya.",
+        "",
+        "Anda cukup menggunakan tombol. Tidak perlu mengetik kode produk atau format pesanan."
+      ].join("\n"),
+      replyMarkup: { inline_keyboard: [
+        [
+          { text: "🛍️ Buka Katalog", callback_data: "nav:catalog" },
+          { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+        ],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
+      clearMedia: true
+    });
+    return;
+  }
+
   if (data === "nav:help") {
     await updateTelegramMessage(env, message, {
-      text: "Bantuan Seiton.id\nPilih Belanja Produk untuk membuat pesanan melalui tombol. Untuk bantuan admin, silakan hubungi admin toko.",
-      replyMarkup: customerMenuKeyboard(),
+      text: [
+        "💬 BANTUAN SEITON.ID",
+        "",
+        "Gunakan Katalog Produk untuk berbelanja dan Pesanan Saya untuk memeriksa pembayaran atau resi.",
+        "Jika ada kendala, hubungi admin toko melalui kanal bantuan yang tercantum di profil Seiton.id."
+      ].join("\n"),
+      replyMarkup: { inline_keyboard: [
+        [
+          { text: "🛍️ Katalog Produk", callback_data: "nav:catalog" },
+          { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+        ],
+        [{ text: "🧭 Cara Belanja", callback_data: "nav:guide" }],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
       clearMedia: true
     });
     return;
@@ -1393,43 +1630,6 @@ async function readTelegramCatalogRows(env, range = "Katalog_Produk!A2:G") {
     ]);
   const seen = new Set(rows.map(row => String(row[0] || "").trim().toUpperCase()));
   return rows.concat(extras.filter(row => !seen.has(String(row[0]).toUpperCase())));
-}
-
-async function showCustomerCatalogPage(env, message, page = 0) {
-  const rows = await readTelegramCatalogRows(env);
-  const products = rows.filter(r => r[0] && parseCatalogProduct(r).active);
-  if (!products.length) {
-    await updateTelegramMessage(env, message, { text: "Katalog belum memiliki produk aktif.", replyMarkup: customerMenuKeyboard() });
-    return;
-  }
-  const pageCount = products.length;
-  const current = Math.max(0, Math.min(pageCount - 1, Number.isInteger(page) ? page : 0));
-  const p = products[current];
-  const sku = String(p[0]).trim();
-  const parsedProduct = parseCatalogProduct(p);
-  const stock = !parsedProduct.stockValid ? "DATA STOK TIDAK VALID" : parsedProduct.stock === null ? "Tidak dibatasi" : parsedProduct.stock;
-  const caption = [
-    "🛍️ Katalog Produk (" + (current + 1) + "/" + pageCount + ")",
-    String(p[1] || sku),
-    "SKU: " + sku,
-    "Harga: " + rupiah(p[2]),
-    "Stok: " + stock,
-    p[6] ? String(p[6]) : ""
-  ].filter(Boolean).join("\n");
-  const nav = [];
-  if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "cat:page:" + (current - 1) });
-  if (current < pageCount - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "cat:page:" + (current + 1) });
-  const keyboard = { inline_keyboard: [
-    ...(parsedProduct.priceValid && parsedProduct.stockValid && parsedProduct.active ? [[{ text: "🛒 Pilih Produk Ini", callback_data: "buy:" + sku }]] : []),
-    ...(nav.length ? [nav] : []),
-    [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
-  ] };
-  await updateTelegramMessage(env, message, {
-    text: caption,
-    photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
-    clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
-    replyMarkup: keyboard
-  });
 }
 
 async function showAdminCatalogPage(env, message, page = 0) {
