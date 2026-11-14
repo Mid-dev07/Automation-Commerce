@@ -3432,7 +3432,7 @@ async function buildAdminReport(env) {
 
 function orderConfirmation(order, env) {
   const paymentInfo = order.paymentMethod === "QRIS"
-    ? "\n\n📲 QRIS dinamis diterbitkan khusus untuk nominal pesanan ini."
+    ? "\n\n📲 QRIS dinamis akan dikirim dalam layar pembayaran terpisah."
     : order.paymentMethod === "TRANSFER"
       ? "\n\n🏦 Instruksi transfer akan diberikan admin."
       : "\n\n🚚 Pembayaran COD dipilih.";
