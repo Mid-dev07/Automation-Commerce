@@ -3707,11 +3707,14 @@ function createMessagingServices(env) {
       };
     },
     createOrder(input) {
+      if (String(input?.paymentMethod || "").toUpperCase() === "QRIS") {
+        throw new Error("QRIS dinamis hanya tersedia melalui tombol checkout katalog. Ketik /start lalu pilih produk.");
+      }
       return createOrder(env, input);
     },
     getPaymentInstructions(order) {
       if (String(order.paymentMethod).toUpperCase() === "QRIS") {
-        return "Instruksi QRIS: " + String(env.LINK_QRIS_IMAGE || "Hubungi admin untuk mendapatkan QRIS.");
+        return "QRIS statis tidak digunakan. Buka katalog dan gunakan tombol checkout untuk mendapatkan QRIS dinamis.";
       }
       if (String(order.paymentMethod).toUpperCase() === "TRANSFER") {
         return "Instruksi transfer akan diberikan admin.";
