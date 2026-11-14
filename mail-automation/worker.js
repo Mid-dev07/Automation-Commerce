@@ -464,14 +464,16 @@ function formatDate(value) {
 function emailFor(alias) {
   return "receiver+" + alias.slug + "@inbox.seiton.biz.id";
 }
-function showAuth(configured) {\n  statusBox = byId("authStatus");
+function showAuth(configured) {
+  statusBox = byId("authStatus");
   byId("auth").hidden = false;
   byId("dashboard").hidden = true;
   byId("setupForm").hidden = configured;
   byId("loginForm").hidden = !configured;
   setStatus(configured ? "Masuk untuk membuka panel privat." : "Setup awal: gunakan bootstrap token yang diberikan owner.");
 }
-function showDashboard() {\n  statusBox = byId("dashboardStatus");
+function showDashboard() {
+  statusBox = byId("dashboardStatus");
   byId("auth").hidden = true;
   byId("dashboard").hidden = false;
   setStatus("Panel terhubung. Alias dan pesan tersimpan di database privat.");
@@ -1382,6 +1384,10 @@ async function handleInboundEmail(message, env) {
     return;
   }
   const raw = await new Response(message.raw).text();
+  if (raw.length > MAX_RAW_BYTES) {
+    message.setReject("Message exceeds the permitted size");
+    return;
+  }
   const parsed = parseEmail(raw);
   const sender = clean(message.from || parsed.from, 254);
   const subject = clean(parsed.subject || "(Tanpa subjek)", 300);
