@@ -188,6 +188,675 @@ async function createSession(env) {
 
 async function currentSession(request, env) {
   const token = getCookie(request, "__Host-mail_session");
+  if (!/^[a-f0-9]{64}$/.test(token)) return null;
+  const hash = await sha256Hex(token);
+  const now = Date.now();
+  const session = await env.MAIL_DB.prepare(
+    "SELECT session_hash,expires_at FROM mail_sessions WHERE session_hash=? AND expires_at>? LIMIT 1"
+  ).bind(hash, now).first();
+  if (!session) return null;
+  await env.MAIL_DB.prepare(
+    "UPDATE mail_sessions SET last_seen_at=? WHERE session_hash=?"
+  ).bind(now, hash).run();
+  return { tokenHash: hash, expiresAt: Number(session.expires_at) };
+}
+
+async function requireSession(request, env) {
+  const session = await currentSession(request, env);
+  if (!session) return null;
+  return session;
+}
+
+async function loginIpHash(request, env) {
+  const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+  return sha256Hex(String(env.MAIL_SESSION_SECRET || "") + ":" + ip);
+}
+
+async function checkLoginLockout(request, env, now) {
+  const ipHash = await loginIpHash(request, env);
+  const row = await env.MAIL_DB.prepare(
+    "SELECT attempts,window_started_at,blocked_until FROM mail_login_attempts WHERE ip_hash=? LIMIT 1"
+  ).bind(ipHash).first();
+  if (!row) return { ipHash, blocked: false };
+  const windowStarted = Number(row.window_started_at || 0);
+  if (now - windowStarted >= LOGIN_WINDOW_MS) {
+    await env.MAIL_DB.prepare("DELETE FROM mail_login_attempts WHERE ip_hash=?").bind(ipHash).run();
+    return { ipHash, blocked: false };
+  }
+  return {
+    ipHash,
+    blocked: Number(row.blocked_until || 0) > now,
+    retryAfter: Math.max(1, Math.ceil((Number(row.blocked_until || 0) - now) / 1000))
+  };
+}
+
+async function recordLoginFailure(env, ipHash, now) {
+  const row = await env.MAIL_DB.prepare(
+    "SELECT attempts,window_started_at FROM mail_login_attempts WHERE ip_hash=? LIMIT 1"
+  ).bind(ipHash).first();
+  let attempts = 1;
+  let windowStarted = now;
+  if (row && now - Number(row.window_started_at || 0) < LOGIN_WINDOW_MS) {
+    attempts = Number(row.attempts || 0) + 1;
+    windowStarted = Number(row.window_started_at);
+  }
+  const blockedUntil = attempts >= LOGIN_MAX_ATTEMPTS ? now + LOGIN_WINDOW_MS : 0;
+  await env.MAIL_DB.prepare(
+    "INSERT INTO mail_login_attempts(ip_hash,attempts,window_started_at,blocked_until) VALUES(?,?,?,?) " +
+    "ON CONFLICT(ip_hash) DO UPDATE SET attempts=excluded.attempts,window_started_at=excluded.window_started_at,blocked_until=excluded.blocked_until"
+  ).bind(ipHash, attempts, windowStarted, blockedUntil).run();
+  return blockedUntil;
+}
+
+async function handleSetup(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  if (!env.MAIL_SETUP_TOKEN || !env.MAIL_SESSION_SECRET) {
+    return responseJson({ ok: false, error: "Konfigurasi setup belum lengkap." }, 503);
+  }
+  if (await hasOwner(env)) return responseJson({ ok: false, error: "Panel sudah diinisialisasi." }, 409);
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Data setup tidak valid." }, 400); }
+  const bootstrapToken = typeof body.bootstrapToken === "string" ? body.bootstrapToken : "";
+  const password = typeof body.password === "string" ? body.password : "";
+  if (!constantTimeEqual(bootstrapToken, env.MAIL_SETUP_TOKEN)) {
+    return responseJson({ ok: false, error: "Bootstrap token tidak valid." }, 401);
+  }
+  if (password.length < 16 || password.length > 128) {
+    return responseJson({ ok: false, error: "Password harus 16–128 karakter." }, 400);
+  }
+  const salt = new Uint8Array(16);
+  crypto.getRandomValues(salt);
+  const hash = await passwordHash(password, salt);
+  const now = Date.now();
+  try {
+    await env.MAIL_DB.prepare(
+      "INSERT INTO mail_admin(id,password_salt,password_hash,created_at) VALUES('owner',?,?,?)"
+    ).bind(bytesToBase64(salt), hash, now).run();
+  } catch {
+    return responseJson({ ok: false, error: "Setup sudah diselesaikan pada sesi lain." }, 409);
+  }
+  const token = await createSession(env);
+  return responseJson(
+    { ok: true, configured: true },
+    200,
+    { "Set-Cookie": sessionCookie(token) }
+  );
+}
+
+async function handleLogin(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  if (!env.MAIL_SESSION_SECRET) return responseJson({ ok: false, error: "Panel belum dikonfigurasi." }, 503);
+  const now = Date.now();
+  const lock = await checkLoginLockout(request, env, now);
+  if (lock.blocked) {
+    return responseJson({ ok: false, error: "Login ditahan sementara. Coba beberapa saat lagi." }, 429, {
+      "Retry-After": String(lock.retryAfter)
+    });
+  }
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Data login tidak valid." }, 400); }
+  const password = typeof body.password === "string" ? body.password : "";
+  const owner = await env.MAIL_DB.prepare(
+    "SELECT password_salt,password_hash FROM mail_admin WHERE id='owner' LIMIT 1"
+  ).first();
+  if (!owner || password.length > 128) {
+    await recordLoginFailure(env, lock.ipHash, now);
+    return responseJson({ ok: false, error: "Password tidak valid." }, 401);
+  }
+  const computed = await passwordHash(password, base64ToBytes(owner.password_salt));
+  if (!constantTimeEqual(computed, owner.password_hash)) {
+    const blockedUntil = await recordLoginFailure(env, lock.ipHash, now);
+    return responseJson({ ok: false, error: blockedUntil ? "Terlalu banyak percobaan login. Coba 15 menit lagi." : "Password tidak valid." }, blockedUntil ? 429 : 401);
+  }
+  await env.MAIL_DB.prepare("DELETE FROM mail_login_attempts WHERE ip_hash=?").bind(lock.ipHash).run();
+  const token = await createSession(env);
+  return responseJson({ ok: true }, 200, { "Set-Cookie": sessionCookie(token) });
+}
+
+async function handleLogout(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  const session = await currentSession(request, env);
+  if (session) {
+    await env.MAIL_DB.prepare("DELETE FROM mail_sessions WHERE session_hash=?").bind(session.tokenHash).run();
+  }
+  return responseJson({ ok: true }, 200, { "Set-Cookie": clearedSessionCookie() });
+}
+
+async function handleAliasesGet(env) {
+  const result = await env.MAIL_DB.prepare(
+    "SELECT id,slug,label,status,created_at,expires_at,last_received_at,received_count " +
+    "FROM mail_aliases ORDER BY created_at DESC LIMIT 100"
+  ).all();
+  return responseJson({ ok: true, aliases: result.results || [] });
+}
+
+async function handleAliasCreate(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Data alias tidak valid." }, 400); }
+  const label = clean(body.label, 80);
+  const ttlSeconds = Number(body.ttlSeconds);
+  if (!ALLOWED_TTLS.has(ttlSeconds)) {
+    return responseJson({ ok: false, error: "Masa aktif alias tidak valid." }, 400);
+  }
+  const slug = randomHex(24);
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  const expiresAt = now + ttlSeconds * 1000;
+  await env.MAIL_DB.prepare(
+    "INSERT INTO mail_aliases(id,slug,label,status,created_at,expires_at,received_count) VALUES(?,?,?,'ACTIVE',?,?,0)"
+  ).bind(id, slug, label, now, expiresAt).run();
+  return responseJson({
+    ok: true,
+    alias: {
+      id,
+      email: BASE_LOCAL_PART + "+" + slug + "@" + MAIL_DOMAIN,
+      label,
+      status: "ACTIVE",
+      created_at: now,
+      expires_at: expiresAt,
+      received_count: 0
+    }
+  }, 201);
+}
+
+async function handleAliasRevoke(request, env, id) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return responseJson({ ok: false, error: "ID alias tidak valid." }, 400);
+  const now = Date.now();
+  await env.MAIL_DB.batch([
+    env.MAIL_DB.prepare("UPDATE mail_aliases SET status='REVOKED' WHERE id=?").bind(id),
+    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE alias_id=?").bind(id)
+  ]);
+  return responseJson({ ok: true, revoked_at: now });
+}
+
+async function handleMessagesGet(url, env) {
+  const aliasId = clean(url.searchParams.get("aliasId"), 64);
+  if (!/^[0-9a-f-]{36}$/i.test(aliasId)) return responseJson({ ok: false, error: "Pilih alias yang valid." }, 400);
+  const alias = await env.MAIL_DB.prepare(
+    "SELECT id,status,expires_at FROM mail_aliases WHERE id=? LIMIT 1"
+  ).bind(aliasId).first();
+  if (!alias) return responseJson({ ok: false, error: "Alias tidak ditemukan." }, 404);
+  const result = await env.MAIL_DB.prepare(
+    "SELECT id,sender,recipient,subject,body_text,verification_code,message_id,received_at " +
+    "FROM mail_messages WHERE alias_id=? ORDER BY received_at DESC LIMIT 50"
+  ).bind(aliasId).all();
+  return responseJson({ ok: true, messages: result.results || [] });
+}
+
+async function handleMessageDelete(request, env, id) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return responseJson({ ok: false, error: "ID pesan tidak valid." }, 400);
+  await env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE id=?").bind(id).run();
+  return responseJson({ ok: true });
+}
+
+async function api(request, env, url) {
+  if (request.method === "GET" && url.pathname === "/api/session") {
+    return responseJson({
+      ok: true,
+      configured: await hasOwner(env),
+      authenticated: Boolean(await currentSession(request, env))
+    });
+  }
+  if (request.method === "POST" && url.pathname === "/api/setup") return handleSetup(request, env);
+  if (request.method === "POST" && url.pathname === "/api/login") return handleLogin(request, env);
+  if (request.method === "POST" && url.pathname === "/api/logout") return handleLogout(request, env);
+
+  const session = await requireSession(request, env);
+  if (!session) return responseJson({ ok: false, error: "Sesi admin tidak valid atau sudah berakhir." }, 401);
+
+  if (request.method === "GET" && url.pathname === "/api/aliases") return handleAliasesGet(env);
+  if (request.method === "POST" && url.pathname === "/api/aliases") return handleAliasCreate(request, env);
+  if (request.method === "DELETE" && url.pathname.startsWith("/api/aliases/")) {
+    return handleAliasRevoke(request, env, url.pathname.slice("/api/aliases/".length));
+  }
+  if (request.method === "GET" && url.pathname === "/api/messages") return handleMessagesGet(url, env);
+  if (request.method === "DELETE" && url.pathname.startsWith("/api/messages/")) {
+    return handleMessageDelete(request, env, url.pathname.slice("/api/messages/".length));
+  }
+  return responseJson({ ok: false, error: "Endpoint tidak ditemukan." }, 404);
+}
+
+const CLIENT_SCRIPT = \`
+const byId = (id) => document.getElementById(id);
+let statusBox = byId("authStatus");
+let selectedAliasId = "";
+let aliasCache = [];
+
+function setStatus(message, bad) {
+  statusBox.textContent = message || "";
+  statusBox.className = bad ? "status error" : "status";
+}
+async function api(path, options) {
+  const config = Object.assign({ credentials: "same-origin" }, options || {});
+  config.headers = Object.assign({ "Accept": "application/json" }, config.headers || {});
+  if (config.body && typeof config.body !== "string") {
+    config.headers["Content-Type"] = "application/json";
+    config.body = JSON.stringify(config.body);
+  }
+  const response = await fetch(path, config);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) throw new Error(data.error || "Permintaan gagal.");
+  return data;
+}
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+async function copyText(value) {
+  try {
+    await navigator.clipboard.writeText(value);
+    setStatus("Berhasil disalin.");
+  } catch {
+    setStatus("Clipboard tidak tersedia pada browser ini.", true);
+  }
+}
+function formatDate(value) {
+  return new Date(Number(value)).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" });
+}
+function emailFor(alias) {
+  return "receiver+" + alias.slug + "@inbox.seiton.biz.id";
+}
+function showAuth(configured) {\n  statusBox = byId("authStatus");
+  byId("auth").hidden = false;
+  byId("dashboard").hidden = true;
+  byId("setupForm").hidden = configured;
+  byId("loginForm").hidden = !configured;
+  setStatus(configured ? "Masuk untuk membuka panel privat." : "Setup awal: gunakan bootstrap token yang diberikan owner.");
+}
+function showDashboard() {\n  statusBox = byId("dashboardStatus");
+  byId("auth").hidden = true;
+  byId("dashboard").hidden = false;
+  setStatus("Panel terhubung. Alias dan pesan tersimpan di database privat.");
+  loadAliases().catch((error) => setStatus(error.message, true));
+}
+function renderAliases() {
+  const target = byId("aliases");
+  target.replaceChildren();
+  if (!aliasCache.length) {
+    target.append(element("p", "empty", "Belum ada alamat. Buat alias pertama."));
+    return;
+  }
+  for (const alias of aliasCache) {
+    const card = element("article", "alias-card");
+    const heading = element("div", "alias-heading");
+    const title = element("strong", "", alias.label || "Alias tanpa label");
+    const state = element("span", "state " + String(alias.status).toLowerCase(), alias.status);
+    heading.append(title, state);
+    const address = element("code", "address", emailFor(alias));
+    const detail = element("p", "muted", "Berakhir: " + formatDate(alias.expires_at) + " • Email: " + alias.received_count);
+    const actions = element("div", "alias-actions");
+    const copy = element("button", "button small", "Salin alamat");
+    copy.type = "button";
+    copy.addEventListener("click", () => copyText(emailFor(alias)));
+    const open = element("button", "button secondary small", "Lihat inbox");
+    open.type = "button";
+    open.addEventListener("click", () => selectAlias(alias.id));
+    actions.append(copy, open);
+    if (alias.status === "ACTIVE" && Number(alias.expires_at) > Date.now()) {
+      const revoke = element("button", "button danger small", "Cabut");
+      revoke.type = "button";
+      revoke.addEventListener("click", () => revokeAlias(alias.id));
+      actions.append(revoke);
+    }
+    card.append(heading, address, detail, actions);
+    target.append(card);
+  }
+}
+async function loadAliases() {
+  const data = await api("/api/aliases");
+  aliasCache = data.aliases || [];
+  renderAliases();
+  byId("aliasCount").textContent = String(aliasCache.filter((item) => item.status === "ACTIVE" && Number(item.expires_at) > Date.now()).length);
+  if (!selectedAliasId && aliasCache.length) {
+    const first = aliasCache.find((item) => item.status === "ACTIVE" && Number(item.expires_at) > Date.now());
+    if (first) await selectAlias(first.id);
+  } else if (selectedAliasId) {
+    await loadMessages(selectedAliasId);
+  }
+}
+async function selectAlias(id) {
+  selectedAliasId = id;
+  const selected = aliasCache.find((item) => item.id === id);
+  byId("selectedAddress").textContent = selected ? emailFor(selected) : "Pilih alias";
+  await loadMessages(id);
+}
+async function loadMessages(id) {
+  const target = byId("messages");
+  target.replaceChildren();
+  if (!id) return;
+  const data = await api("/api/messages?aliasId=" + encodeURIComponent(id));
+  const messages = data.messages || [];
+  byId("messageCount").textContent = String(messages.length);
+  if (!messages.length) {
+    target.append(element("p", "empty", "Belum ada email masuk untuk alamat ini."));
+    return;
+  }
+  for (const item of messages) {
+    const card = element("article", "message-card");
+    const top = element("div", "message-top");
+    const title = element("strong", "", item.subject || "(Tanpa subjek)");
+    const date = element("span", "muted", formatDate(item.received_at));
+    top.append(title, date);
+    const sender = element("p", "muted", "Dari: " + (item.sender || "tidak diketahui"));
+    card.append(top, sender);
+    if (item.verification_code) {
+      const codeRow = element("div", "code-row");
+      const code = element("code", "otp-code", item.verification_code);
+      const copy = element("button", "button small", "Salin kode");
+      copy.type = "button";
+      copy.addEventListener("click", () => copyText(item.verification_code));
+      codeRow.append(code, copy);
+      card.append(codeRow);
+    } else {
+      card.append(element("p", "muted", "Kode tidak terdeteksi otomatis."));
+    }
+    const preview = element("pre", "body-preview", (item.body_text || "").slice(0, 1200));
+    card.append(preview);
+    const remove = element("button", "button danger small", "Hapus pesan");
+    remove.type = "button";
+    remove.addEventListener("click", async () => {
+      try {
+        await api("/api/messages/" + encodeURIComponent(item.id), { method: "DELETE" });
+        await loadMessages(id);
+        setStatus("Pesan dihapus.");
+      } catch (error) { setStatus(error.message, true); }
+    });
+    card.append(remove);
+    target.append(card);
+  }
+}
+async function revokeAlias(id) {
+  if (!window.confirm("Cabut alias ini dan hapus pesan yang tersimpan?")) return;
+  try {
+    await api("/api/aliases/" + encodeURIComponent(id), { method: "DELETE" });
+    if (selectedAliasId === id) {
+      selectedAliasId = "";
+      byId("selectedAddress").textContent = "Pilih alias";
+      byId("messages").replaceChildren();
+    }
+    await loadAliases();
+    setStatus("Alias dicabut dan pesan dihapus.");
+  } catch (error) { setStatus(error.message, true); }
+}
+byId("loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/login", { method: "POST", body: { password: byId("loginPassword").value } });
+    byId("loginPassword").value = "";
+    showDashboard();
+  } catch (error) { setStatus(error.message, true); }
+});
+byId("setupForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await api("/api/setup", {
+      method: "POST",
+      body: {
+        bootstrapToken: byId("bootstrapToken").value,
+        password: byId("setupPassword").value
+      }
+    });
+    byId("setupForm").reset();
+    await api("/api/login", { method: "POST", body: { password: byId("setupPassword").value } });
+    byId("setupPassword").value = "";
+    showDashboard();
+  } catch (error) { setStatus(error.message, true); }
+});
+byId("createAlias").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const data = await api("/api/aliases", {
+      method: "POST",
+      body: {
+        label: byId("aliasLabel").value,
+        ttlSeconds: Number(byId("aliasTtl").value)
+      }
+    });
+    byId("aliasLabel").value = "";
+    await loadAliases();
+    await copyText(data.alias.email);
+    await selectAlias(data.alias.id);
+    setStatus("Alamat baru dibuat dan disalin: " + data.alias.email);
+  } catch (error) { setStatus(error.message, true); }
+});
+byId("refresh").addEventListener("click", () => loadAliases().then(() => setStatus("Inbox diperbarui.")).catch((error) => setStatus(error.message, true)));
+byId("logout").addEventListener("click", async () => {
+  try {
+    await api("/api/logout", { method: "POST" });
+    selectedAliasId = "";
+    const state = await api("/api/session");
+    showAuth(state.configured);
+  } catch (error) { setStatus(error.message, true); }
+});
+(async function init() {
+  try {
+    const state = await api("/api/session");
+    if (state.authenticated) showDashboard();
+    else showAuth(state.configured);
+  } catch (error) {
+    showAuth(true);
+    setStatus(error.message, true);
+  }
+})();
+\`;
+
+function renderPanel(nonce, configured) {
+  const mode = configured ? "true" : "false";
+  return "<!doctype html><html lang=\\"id\\"><head><meta charset=\\"utf-8\\">" +
+    "<meta name=\\"viewport\\" content=\\"width=device-width,initial-scale=1\\">" +
+    "<meta name=\\"robots\\" content=\\"noindex,nofollow\\"><meta name=\\"referrer\\" content=\\"no-referrer\\">" +
+    "<title>Seiton Mail Automation</title><style nonce=\\"" + nonce + "\\">" +
+    " :root{color-scheme:dark;--bg:#080f1e;--surface:#111c2f;--surface2:#17243a;--line:#25354e;--text:#e7edf5;--muted:#9baabd;--accent:#10b981;--danger:#f87171}" +
+    " *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0%,#182b43 0,transparent 32%),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}" +
+    " main{max-width:1180px;margin:0 auto;padding:34px 22px 60px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:28px}.mark{width:42px;height:42px;border-radius:13px;background:var(--accent);color:#06271e;display:grid;place-items:center;font-weight:900;font-size:20px}.brand small{display:block;color:var(--muted)}" +
+    " h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:0 0 14px}.muted{color:var(--muted);font-size:13px}.panel{background:linear-gradient(180deg,var(--surface),#0e192b);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 18px 48px #0003}" +
+    " .auth{max-width:440px;margin:50px auto}.auth p{color:var(--muted)}label{display:block;color:#c6d1df;font-size:13px;margin:12px 0 6px}input,select{width:100%;background:#0b1526;border:1px solid var(--line);border-radius:10px;padding:12px;color:var(--text);font:inherit}button{cursor:pointer;font:inherit}.button{border:0;border-radius:10px;background:var(--accent);color:#06271e;font-weight:750;padding:10px 14px}.button.secondary{background:#26374e;color:var(--text)}.button.danger{background:#552f3a;color:#ffd8df}.button.small{padding:7px 10px;font-size:12px}.auth .button{width:100%;margin-top:18px}.status{min-height:24px;color:#9ce4c7;font-size:13px;margin:10px 0}.status.error{color:#fca5a5}.muted-note{color:var(--muted);font-size:12px;margin-top:14px}" +
+    " .topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.topbar p{margin:0;color:var(--muted)}.top-actions{display:flex;gap:8px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:minmax(280px,.8fr) minmax(0,1.5fr);gap:18px}.panel+.panel{margin-top:18px}.create-row{display:grid;grid-template-columns:1fr 180px auto;gap:10px;align-items:end}.create-row label{margin-top:0}.alias-list,.message-list{display:grid;gap:10px;margin-top:14px}" +
+    " .alias-card,.message-card{background:var(--surface2);border:1px solid var(--line);border-radius:13px;padding:14px;min-width:0}.alias-heading,.message-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.alias-heading strong,.message-top strong{overflow-wrap:anywhere}.state{font-size:10px;padding:3px 8px;border-radius:20px;background:#1a463b;color:#8df0cb}.state.expired,.state.revoked{background:#3d3340;color:#e8b7c6}.address{display:block;color:#a7f3d0;font-size:12px;overflow-wrap:anywhere;margin:10px 0}.alias-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.empty{color:var(--muted);padding:14px;text-align:center;border:1px dashed var(--line);border-radius:12px}.selected-address{font-size:12px;overflow-wrap:anywhere;color:#a7f3d0}" +
+    " .code-row{display:flex;align-items:center;gap:12px;margin:14px 0}.otp-code{font-size:22px;letter-spacing:3px;background:#08291f;border:1px solid #1c614a;color:#9cf2ce;border-radius:10px;padding:8px 12px}.body-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;background:#0a1423;border-radius:9px;padding:10px;font:12px/1.5 ui-monospace,monospace;color:#cbd5e1}.message-card .muted{margin:7px 0}.footnote{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.7}.stats{display:flex;gap:10px;margin:12px 0}.stat{background:#0b1526;border:1px solid var(--line);padding:8px 12px;border-radius:10px;color:var(--muted);font-size:12px}.stat strong{color:var(--text);font-size:16px;margin-right:5px}" +
+    " @media(max-width:820px){main{padding:22px 14px 40px}.grid{grid-template-columns:1fr}.create-row{grid-template-columns:1fr 1fr}.create-row .submit-cell{grid-column:1/-1}.create-row .button{width:100%}.topbar{align-items:flex-start;flex-direction:column}}@media(max-width:420px){.create-row{grid-template-columns:1fr}.create-row .submit-cell{grid-column:auto}.panel{padding:16px}.top-actions{width:100%}.top-actions button{flex:1}}" +
+    "</style></head><body><main><header class=\\"brand\\"><div class=\\"mark\\">S</div><div><strong>Seiton Mail Automation</strong><small>Private inbox alias manager · " + MAIL_DOMAIN + "</small></div></header>" +
+    "<section id=\\"auth\\" class=\\"panel auth\\"><h1>Panel privat</h1><p>Kelola alamat alias dan kode verifikasi yang masuk.</p>" +
+    "<form id=\\"setupForm\\" hidden><label for=\\"bootstrapToken\\">Bootstrap token sekali pakai</label><input id=\\"bootstrapToken\\" type=\\"password\\" autocomplete=\\"off\\" required><label for=\\"setupPassword\\">Buat password owner (min. 16 karakter)</label><input id=\\"setupPassword\\" type=\\"password\\" minlength=\\"16\\" maxlength=\\"128\\" autocomplete=\\"new-password\\" required><button class=\\"button\\" type=\\"submit\\">Inisialisasi panel</button></form>" +
+    "<form id=\\"loginForm\\" hidden><label for=\\"loginPassword\\">Password owner</label><input id=\\"loginPassword\\" type=\\"password\\" autocomplete=\\"current-password\\" required><button class=\\"button\\" type=\\"submit\\">Masuk</button></form>" +
+    "<div id=\\"authStatus\\"mail } from "./email-parser.js";
+
+const PANEL_ORIGIN = "https://mail.seiton.biz.id";
+const PANEL_HOST = "mail.seiton.biz.id";
+const MAIL_DOMAIN = "inbox.seiton.biz.id";
+const BASE_LOCAL_PART = "receiver";
+const MAX_RAW_BYTES = 1024 * 1024;
+const MAX_BODY_CHARS = 18000;
+const MAX_MESSAGES_PER_ALIAS = 100;
+const SESSION_TTL_SECONDS = 8 * 60 * 60;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 5;
+const ALLOWED_TTLS = new Set([900, 3600, 86400, 604800, 2592000]);
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+function responseJson(data, status = 200, headers = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "X-Robots-Tag": "noindex, nofollow",
+      ...headers
+    }
+  });
+}
+
+function securityHeaders(extra = {}) {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "X-Robots-Tag": "noindex, nofollow",
+    "Cache-Control": "no-store",
+    ...extra
+  };
+}
+
+function clean(value, max = 500) {
+  return String(value ?? "").replace(/\u0000/g, "").trim().slice(0, max);
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+function randomHex(length = 24) {
+  const bytes = new Uint8Array(Math.ceil(length / 2));
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes).slice(0, length);
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(String(value)));
+  return bytesToHex(new Uint8Array(digest));
+}
+
+function constantTimeEqual(leftValue, rightValue) {
+  const left = encoder.encode(String(leftValue ?? ""));
+  const right = encoder.encode(String(rightValue ?? ""));
+  let mismatch = left.length ^ right.length;
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    mismatch |= (left[index] || 0) ^ (right[index] || 0);
+  }
+  return mismatch === 0;
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function base64ToBytes(value) {
+  const binary = atob(String(value || ""));
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function passwordHash(password, saltBytes) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits({
+    name: "PBKDF2",
+    salt: saltBytes,
+    iterations: 120000,
+    hash: "SHA-256"
+  }, key, 256);
+  return bytesToHex(new Uint8Array(bits));
+}
+
+function parseAliasRecipient(value) {
+  const normalized = clean(value, 320).toLowerCase();
+  const at = normalized.lastIndexOf("@");
+  if (at <= 0 || normalized.slice(at + 1) !== MAIL_DOMAIN) return null;
+  const localPart = normalized.slice(0, at);
+  const match = localPart.match(/^receiver\+([a-f0-9]{24})$/);
+  if (!match) return null;
+  return { slug: match[1], address: normalized };
+}
+
+function extractVerificationCode(subjectValue, bodyValue) {
+  const subject = clean(subjectValue, 300);
+  const body = clean(bodyValue, MAX_BODY_CHARS);
+  const lines = (subject + "\n" + body).split(/\r?\n/).slice(0, 120);
+  const patterns = [
+    /(?:verification\s+code|verify(?:\s+your)?\s+account|security\s+code|authentication\s+code|one[\s-]?time(?:\s+password|\s+code)?|passcode|otp|kode\s+(?:verifikasi|otp|keamanan)|kode\s+anda|your\s+code|use\s+code|code\s+is)\D{0,45}([A-Z0-9]{4,10})/i,
+    /(?:G-|FB-)(\d{4,8})\b/i
+  ];
+  for (const line of lines) {
+    for (const pattern of patterns) {
+      const match = line.match(pattern);
+      if (match && match[1]) {
+        const code = match[1].toUpperCase();
+        if (/^\d{4,8}$/.test(code) || /^[A-Z0-9]{5,10}$/.test(code)) return code;
+      }
+    }
+  }
+  return "";
+}
+
+function getCookie(request, name) {
+  const cookie = request.headers.get("Cookie") || "";
+  for (const item of cookie.split(";")) {
+    const separator = item.indexOf("=");
+    if (separator < 0) continue;
+    if (item.slice(0, separator).trim() === name) {
+      return item.slice(separator + 1).trim();
+    }
+  }
+  return "";
+}
+
+function sessionCookie(token) {
+  return "__Host-mail_session=" + token +
+    "; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=" + SESSION_TTL_SECONDS;
+}
+
+function clearedSessionCookie() {
+  return "__Host-mail_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
+}
+
+function isSameOrigin(request) {
+  return request.headers.get("Origin") === PANEL_ORIGIN;
+}
+
+async function readJson(request, maxBytes = 8192) {
+  const length = Number(request.headers.get("Content-Length") || 0);
+  if (length > maxBytes) throw new Error("REQUEST_TOO_LARGE");
+  const text = await request.text();
+  if (text.length > maxBytes) throw new Error("REQUEST_TOO_LARGE");
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
+    return value;
+  } catch {
+    throw new Error("INVALID_JSON");
+  }
+}
+
+async function hasOwner(env) {
+  const row = await env.MAIL_DB.prepare(
+    "SELECT id FROM mail_admin WHERE id='owner' LIMIT 1"
+  ).first();
+  return Boolean(row);
+}
+
+async function createSession(env) {
+  const token = randomHex(64);
+  const tokenHash = await sha256Hex(token);
+  const now = Date.now();
+  const expiresAt = now + SESSION_TTL_SECONDS * 1000;
+  await env.MAIL_DB.prepare(
+    "INSERT INTO mail_sessions(session_hash,created_at,expires_at,last_seen_at) VALUES(?,?,?,?)"
+  ).bind(tokenHash, now, expiresAt, now).run();
+  return token;
+}
+
+async function currentSession(request, env) {
+  const token = getCookie(request, "__Host-mail_session");
   if (!/^[a-f0-9]{128}$/.test(token)) return null;
   const hash = await sha256Hex(token);
   const now = Date.now();
@@ -667,7 +1336,7 @@ function renderPanel(nonce, configured) {
     "<section id=\\"auth\\" class=\\"panel auth\\"><h1>Panel privat</h1><p>Kelola alamat alias dan kode verifikasi yang masuk.</p>" +
     "<form id=\\"setupForm\\" hidden><label for=\\"bootstrapToken\\">Bootstrap token sekali pakai</label><input id=\\"bootstrapToken\\" type=\\"password\\" autocomplete=\\"off\\" required><label for=\\"setupPassword\\">Buat password owner (min. 16 karakter)</label><input id=\\"setupPassword\\" type=\\"password\\" minlength=\\"16\\" maxlength=\\"128\\" autocomplete=\\"new-password\\" required><button class=\\"button\\" type=\\"submit\\">Inisialisasi panel</button></form>" +
     "<form id=\\"loginForm\\" hidden><label for=\\"loginPassword\\">Password owner</label><input id=\\"loginPassword\\" type=\\"password\\" autocomplete=\\"current-password\\" required><button class=\\"button\\" type=\\"submit\\">Masuk</button></form>" +
-    "<div id=\\"status\\" class=\\"status\\" role=\\"status\\" aria-live=\\"polite\\"></div><div class=\\"muted-note\\">Panel hanya menerima email masuk. Ini bukan layanan IMAP/POP dan tidak mengirim email keluar.</div></section>" +
+    "<div id=\\"dashboardStatus\\" class=\\"status\\" role=\\"status\\" aria-live=\\"polite\\"></div><div class=\\"muted-note\\">Panel hanya menerima email masuk. Ini bukan layanan IMAP/POP dan tidak mengirim email keluar.</div></section>" +
     "<section id=\\"dashboard\\" hidden><div class=\\"topbar\\"><div><h1>Inbox automation</h1><p>Generate alias, terima kode, lalu cabut alamat kapan saja.</p></div><div class=\\"top-actions\\"><button id=\\"refresh\\" class=\\"button secondary\\" type=\\"button\\">Perbarui inbox</button><button id=\\"logout\\" class=\\"button danger\\" type=\\"button\\">Keluar</button></div></div>" +
     "<div id=\\"status\\" class=\\"status\\" role=\\"status\\" aria-live=\\"polite\\"></div>" +
     "<div class=\\"stats\\"><div class=\\"stat\\"><strong id=\\"aliasCount\\">0</strong> alias aktif</div><div class=\\"stat\\"><strong id=\\"messageCount\\">0</strong> pesan di alias terpilih</div></div>" +
