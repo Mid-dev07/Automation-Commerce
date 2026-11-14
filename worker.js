@@ -1174,10 +1174,12 @@ async function handleTelegramCallback(env, query) {
       try {
         await sendQrisPaymentScreen(env, chatId, result);
       } catch (error) {
-        try { await setOrderStatus(env, result.orderId, "DIBATALKAN", "system:qris-charge-failed"); } catch {}
-        console.error(JSON.stringify({level:"error",event:"qris_charge_failed",order_id:result.orderId,message:String(error?.message||"QRIS_FAILED").slice(0,160)}));
+        console.error(JSON.stringify({level:"error",event:"qris_charge_or_delivery_failed",order_id:result.orderId,message:String(error?.message||"QRIS_FAILED").slice(0,160)}));
+        for (const adminId of String(env.ADMIN_CHAT_ID || "").split(",").map(value=>value.trim()).filter(Boolean)) {
+          try { await sendTelegram(env, adminId, "⚠️ QRIS untuk order " + result.orderId + " gagal dibuat/dikirim. Periksa transaksi Midtrans sebelum membatalkan order."); } catch {}
+        }
         await sendTelegram(env, chatId,
-          "⚠️ Kode QRIS belum berhasil dibuat. Pesanan " + result.orderId + " dibatalkan otomatis agar stok tidak tertahan. Silakan ulangi pesanan atau pilih Transfer Bank/COD.");
+          "⚠️ Kode QRIS belum dapat ditampilkan untuk order " + result.orderId + ". Jangan lakukan pembayaran dari kode lain. Pesanan belum dibatalkan; hubungi admin Seiton.id untuk pemeriksaan sebelum mencoba kembali.");
       }
       return;
     }
