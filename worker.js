@@ -244,6 +244,9 @@ export default {
         transaction_store: tx.ready ? "READY" : tx.configured ? "MIGRATION_REQUIRED" : "LEGACY",
         time: new Date().toISOString() });
     }
+    if (request.method === "POST" && url.pathname === "/webhooks/midtrans") {
+      return handleMidtransWebhook(request, env);
+    }
     if (request.method === "POST" && url.pathname === "/telegram") {
       return handleTelegram(request, env, ctx);
     }
@@ -1166,6 +1169,18 @@ async function handleTelegramCallback(env, query) {
     const result = await createOrder(env, { sku: sku.toUpperCase(), quantity: qty, paymentMethod: method,
       channel: "telegram", customerId: userId, customerName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" "),
       idempotencyKey: String(query.id || "") });
+    if (String(method).toUpperCase() === "QRIS") {
+      await deleteTelegramMessage(env, message);
+      try {
+        await sendQrisPaymentScreen(env, chatId, result);
+      } catch (error) {
+        try { await setOrderStatus(env, result.orderId, "DIBATALKAN", "system:qris-charge-failed"); } catch {}
+        console.error(JSON.stringify({level:"error",event:"qris_charge_failed",order_id:result.orderId,message:String(error?.message||"QRIS_FAILED").slice(0,160)}));
+        await sendTelegram(env, chatId,
+          "⚠️ Kode QRIS belum berhasil dibuat. Pesanan " + result.orderId + " dibatalkan otomatis agar stok tidak tertahan. Silakan ulangi pesanan atau pilih Transfer Bank/COD.");
+      }
+      return;
+    }
     await updateTelegramMessage(env, message, {
       text: orderConfirmation(result, env),
       replyMarkup: orderConfirmationKeyboard(result)
@@ -1405,6 +1420,11 @@ async function handleTelegramCallback(env, query) {
     }
     await recordAdminActivity(env, { actorId: userId, action: "REPORT_EXPORT_SENT", resourceType: "sales_export", summary: { report_types: types } });
     await updateTelegramMessage(env, message, { text: "✅ Laporan selesai dikirim.", replyMarkup: adminMenuKeyboard() });
+    return;
+  }
+
+  if (data.startsWith("qris:check:")) {
+    await handleQrisStatusCheck(env, message, chatId, userId, data.slice("qris:check:".length));
     return;
   }
 
