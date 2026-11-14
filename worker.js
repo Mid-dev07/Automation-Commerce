@@ -2545,7 +2545,7 @@ async function recordQrisNonPaidStatus(env, orderId, status, rawStatus) {
   await env.DB.prepare(
     "UPDATE qris_payments SET status=?,raw_provider_status=?,updated_at=? WHERE order_id=? AND status='PENDING'"
   ).bind(safeStatus, String(rawStatus || "").slice(0,40), new Date().toISOString(), orderId).run();
-  if (safeStatus === "EXPIRED") {
+  if (safeStatus === "EXPIRED" || safeStatus === "FAILED") {
     try { await setOrderStatus(env, orderId, "DIBATALKAN", "midtrans:webhook"); }
     catch (error) {
       console.warn(JSON.stringify({level:"warn",event:"qris_expired_order_cancel",order_id:orderId,message:String(error?.message||"CANCEL_FAILED").slice(0,120)}));
