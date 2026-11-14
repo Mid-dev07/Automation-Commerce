@@ -2,7 +2,7 @@ name: Mail automation checks
 
 on:
   push:
-    branches: [main, feat/fase-1-digital-delivery-otp]
+    branches: [main, "feat/**"]
     paths:
       - "mail-automation/**"
       - ".github/workflows/mail-automation.yml"
