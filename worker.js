@@ -3,11 +3,19 @@ import {
   findOrderTransactional, findOrderByLegacyRow, listOrdersTransactional,
   listProductsTransactional, findProductTransactional, saveProductTransactional,
   deleteProductTransactional, setLegacyRowTransactional, updateProofTransactional,
-  requestVerificationTransactional, approvePaymentTransactional, rejectPaymentTransactional,
+  requestVerificationTransactional, approvePaymentTransactional, settleQrisPaymentTransactional, rejectPaymentTransactional,
   setOrderStatusTransactional, markPickedUpTransactional, listDashboardDataTransactional,
   orderToSheetRow, OrderCoordinator, claimSheetMirrorOutbox,
   completeSheetMirrorOutbox, failSheetMirrorOutbox
 } from "./transaction-layer.js";
+import {
+  isDynamicQrisConfigured,
+  createMidtransQrisCharge,
+  getMidtransTransactionStatus,
+  verifyMidtransNotification,
+  parseMidtransAmount,
+  normalizeMidtransStatus
+} from "./qris.mjs";
 import {
   listDigitalStockD1,
   markDigitalDeliveredD1,
@@ -59,6 +67,7 @@ const ADMIN_DASHBOARD_HTML = "<!doctype html>\n<html lang=\"id\">\n<head>\n<meta
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const TELEGRAM_API = "https://api.telegram.org";
+const SEITON_LOGO_URL = "https://seiton.biz.id/logo-horizontal.png";
 const TZ = "Asia/Jakarta";
 const HEADERS = [
   "order_id", "created_at", "channel", "customer_id", "customer_name",
@@ -526,7 +535,7 @@ async function handleTelegram(request, env, ctx) {
     if (text.startsWith("/start") || text.startsWith("/help")) {
       const admin = isAdmin(chatId, env);
       if (admin) {
-        await sendTelegram(env, chatId, adminMenuText(), adminMenuKeyboard());
+        await sendSeitonWelcome(env, chatId, true);
         await recordAdminActivity(env, {
           actorId: customerId, action: "ADMIN_MENU_OPENED", resourceType: "admin_menu",
           summary: { entry_point: text.startsWith("/start") ? "start" : "help" }
@@ -540,7 +549,7 @@ async function handleTelegram(request, env, ctx) {
         await processMessagingEvent(env, event, createMessagingServices(env));
         await dispatchTelegramMessagingOutbox(env, 20);
       } else {
-        await sendTelegram(env, chatId, customerMenuText(), customerMenuKeyboard());
+        await sendSeitonWelcome(env, chatId, false);
       }
       return;
     }
@@ -599,38 +608,117 @@ async function handleTelegram(request, env, ctx) {
 
 
 function customerMenuText() {
-  return "🛍️ SELAMAT DATANG DI SEITON.ID\nPilih menu di bawah ini. Anda tidak perlu mengetik format pesanan.";
+  return [
+    "🛍️ SEITON.ID",
+    "Selamat datang! Pilih menu untuk mulai berbelanja.",
+    "Katalog, pesanan, dan bantuan tersedia melalui tombol."
+  ].join("\n");
 }
 function adminMenuText() {
-  return "🛠️ PANEL ADMIN SEITON.ID\nPilih tindakan yang ingin dilakukan.";
+  return "🛠️ SEITON.ID — PANEL ADMIN\nPilih area kerja. Menu dikelompokkan agar lebih ringkas.";
 }
 function customerMenuKeyboard() {
   return { inline_keyboard: [
-    [{ text: "🛍️ Belanja Produk", callback_data: "nav:catalog" }],
-    [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
-    [{ text: "💬 Bantuan", callback_data: "nav:help" }]
+    [
+      { text: "🛍️ Katalog Produk", callback_data: "nav:catalog" },
+      { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+    ],
+    [
+      { text: "🧭 Cara Belanja", callback_data: "nav:guide" },
+      { text: "💬 Bantuan", callback_data: "nav:help" }
+    ]
   ] };
 }
 function adminMenuKeyboard() {
   return { inline_keyboard: [
-    [{ text: "📊 Laporan Penjualan", callback_data: "adm:report" }],
-    [{ text: "🆘 Bantuan Pelanggan", callback_data: "adm:handoff" }],
-    [{ text: "📈 Dashboard Interaktif", callback_data: "adm:dashboard" }],
+    [
+      { text: "🧾 Pesanan", callback_data: "adm:orders" },
+      { text: "🛍️ Produk", callback_data: "adm:products" }
+    ],
+    [
+      { text: "📊 Laporan & Dashboard", callback_data: "adm:reports" },
+      { text: "💬 Bantuan Pelanggan", callback_data: "adm:support" }
+    ],
+    [
+      { text: "💳 Verifikasi Pembayaran", callback_data: "adm:paymentchecks" },
+      { text: "🎟️ Pengambilan", callback_data: "adm:pickup" }
+    ],
+    [{ text: "🛒 Tampilan Pelanggan", callback_data: "nav:home" }]
+  ] };
+}
+function adminOrdersKeyboard() {
+  return { inline_keyboard: [
+    [
+      { text: "📋 Pesanan Terbaru", callback_data: "adm:recent" },
+      { text: "🔄 Ubah Status", callback_data: "adm:statuslist" }
+    ],
+    [
+      { text: "💳 Verifikasi Bayar", callback_data: "adm:paymentchecks" },
+      { text: "🎟️ Antrean Ambil", callback_data: "adm:pickup" }
+    ],
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+  ] };
+}
+function adminProductsKeyboard() {
+  return { inline_keyboard: [
+    [
+      { text: "🗂️ Kelola Katalog", callback_data: "adm:catalog" },
+      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" }
+    ],
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+  ] };
+}
+function adminReportsKeyboard() {
+  return { inline_keyboard: [
+    [
+      { text: "📊 Ringkasan Penjualan", callback_data: "adm:report" },
+      { text: "📈 Dashboard", callback_data: "adm:dashboard" }
+    ],
     [{ text: "📥 Unduh Laporan", callback_data: "adm:exports" }],
-    [{ text: "💳 Konfirmasi Pembayaran", callback_data: "adm:paymentchecks" }],
-    [{ text: "📦 Validasi Pengambilan", callback_data: "adm:pickup" }],
-    [{ text: "📋 Pesanan Terbaru", callback_data: "adm:recent" }],
-    [{ text: "🔄 Perbarui Status Pesanan", callback_data: "adm:statuslist" }],
-    [{ text: "📦 Lihat Katalog", callback_data: "adm:catalog" }],
-    [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
-    [{ text: "🛍️ Tampilan Pelanggan", callback_data: "nav:home" }]
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+  ] };
+}
+function adminSupportKeyboard() {
+  return { inline_keyboard: [
+    [{ text: "🆘 Antrean Bantuan Pelanggan", callback_data: "adm:handoff" }],
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
   ] };
 }
 function adminCatalogKeyboard() {
   return { inline_keyboard: [
-    [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+    [
+      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" },
+      { text: "⬅️ Menu Admin", callback_data: "adm:products" }
+    ]
   ] };
+}
+const CUSTOMER_CATALOG_PAGE_SIZE = 5;
+const CUSTOMER_CATEGORY_META = {
+  digital: { title: "AI & Akun Digital", button: "🤖 AI & Digital" },
+  email: { title: "Email & OTP", button: "✉️ Email & OTP" },
+  website: { title: "Website & UMKM", button: "🌐 Website & UMKM" },
+  automation: { title: "Bot & Otomasi", button: "⚙️ Bot & Otomasi" },
+  other: { title: "Produk Lainnya", button: "📦 Produk Lainnya" }
+};
+const CUSTOMER_CATEGORY_ORDER = ["digital", "email", "website", "automation", "other"];
+function customerCategoryForProduct(row) {
+  const sku = String(row?.[0] || "").trim().toUpperCase();
+  const text = [row?.[1], row?.[6]].map(value => String(value || "").toLowerCase()).join(" ");
+  if (/^MUSE-|\bmuse\b|\bai\b|gemini|chatgpt|claude|grok|capcut|eleven.?labs/.test(sku + " " + text)) return "digital";
+  if (/^OTP-|\botp\b|email|e-mail|mailbox|domain/.test(sku + " " + text)) return "email";
+  if (/^SEI-|website|katalog|umkm/.test(sku + " " + text)) return "website";
+  if (/^S-|bot|automation|automated|otomasi|integrasi/.test(sku + " " + text)) return "automation";
+  return "other";
+}
+function customerCategoryTitle(key) {
+  return CUSTOMER_CATEGORY_META[key]?.title || "Semua Produk";
+}
+function activeCustomerCatalogProducts(rows) {
+  return (rows || []).filter(row => {
+    if (!row?.[0]) return false;
+    const product = parseCatalogProduct(row);
+    return product.active && product.priceValid && product.stockValid;
+  });
 }
 async function ensureCatalogHeaders(env) {
   const headers = await readSheet(env, "Katalog_Produk!A1:G1");
@@ -763,6 +851,17 @@ async function sendTelegramPhoto(env, chatId, photo, caption, replyMarkup = null
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
   });
   if (!response.ok) throw new Error("Telegram sendPhoto gagal (" + response.status + "): " + (await response.text()).slice(0,300));
+}
+
+async function sendSeitonWelcome(env, chatId, isAdminUser = false) {
+  const text = isAdminUser ? adminMenuText() : customerMenuText();
+  const keyboard = isAdminUser ? adminMenuKeyboard() : customerMenuKeyboard();
+  try {
+    await sendTelegramPhoto(env, chatId, SEITON_LOGO_URL, text, keyboard);
+  } catch (error) {
+    console.warn(JSON.stringify({level:"warn",event:"telegram_brand_image_fallback",message:String(error?.message||"IMAGE_SEND_FAILED").slice(0,100)}));
+    await sendTelegram(env, chatId, text, keyboard);
+  }
 }
 
 async function telegramApiRequest(env, method, payload) {
@@ -951,11 +1050,8 @@ async function handleTelegramCallback(env, query) {
 
   if (data === "nav:home" || data === "adm:home") {
     const showAdmin = data === "adm:home" && admin;
-    await updateTelegramMessage(env, message, {
-      text: showAdmin ? adminMenuText() : customerMenuText(),
-      replyMarkup: showAdmin ? adminMenuKeyboard() : customerMenuKeyboard(),
-      clearMedia: true
-    });
+    await deleteTelegramMessage(env, message);
+    await sendSeitonWelcome(env, chatId, showAdmin);
     return;
   }
 
@@ -1076,6 +1172,21 @@ async function handleTelegramCallback(env, query) {
       return;
     }
     const action = data.slice(4);
+    if (action === "orders" || action === "products" || action === "reports" || action === "support") {
+      const menus = {
+        orders: { title: "🧾 KELOLA PESANAN", description: "Pesanan masuk, pembayaran, status, dan pengambilan.", keyboard: adminOrdersKeyboard() },
+        products: { title: "🛍️ KELOLA PRODUK", description: "Atur katalog, harga, stok, foto, dan produk baru.", keyboard: adminProductsKeyboard() },
+        reports: { title: "📊 LAPORAN & ANALITIK", description: "Ringkasan transaksi, dashboard, dan ekspor data.", keyboard: adminReportsKeyboard() },
+        support: { title: "💬 LAYANAN PELANGGAN", description: "Tangani permintaan bantuan dan percakapan pelanggan.", keyboard: adminSupportKeyboard() }
+      };
+      const menu = menus[action];
+      await updateTelegramMessage(env, message, {
+        text: menu.title + "\n" + menu.description,
+        replyMarkup: menu.keyboard,
+        clearMedia: true
+      });
+      return;
+    }
     if (action === "handoff") {
       await showTelegramHandoffQueue(env, message, chatId);
       return;
