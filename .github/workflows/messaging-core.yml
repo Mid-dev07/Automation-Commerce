@@ -33,5 +33,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Check Telegram Worker syntax
+        run: node --check worker.js
+      - name: Run Telegram Worker contract tests
+        run: node --test tests/worker-contract.test.cjs
       - name: Run Messaging Core tests
         run: node --test tests/messaging-core.test.mjs
