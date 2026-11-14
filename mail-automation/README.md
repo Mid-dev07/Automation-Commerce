@@ -34,6 +34,7 @@ Ini adalah alamat penerima alias melalui Cloudflare Email Routing subaddressing,
 2. Set Worker secrets:
    - `MAIL_SETUP_TOKEN`: bootstrap token sekali pakai untuk menginisialisasi password owner.
    - `MAIL_SESSION_SECRET`: secret acak minimal 32 byte.
+   - `MAIL_MESSAGE_ENCRYPTION_KEY`: base64 dari 32 byte acak untuk AES-256-GCM; kunci ini mengenkripsi payload email sebelum disimpan ke D1.
 3. Tambahkan custom domain Worker `mail.seiton.biz.id`.
 4. Tambahkan subdomain Email Routing `inbox.seiton.biz.id`.
 5. Aktifkan `support_subaddress` pada Email Routing zone, lalu buat satu routing rule literal:
