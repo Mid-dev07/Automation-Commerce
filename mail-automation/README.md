@@ -45,3 +45,55 @@ Ini adalah alamat penerima alias melalui Cloudflare Email Routing subaddressing,
 6. Uji kirim dari mailbox eksternal sebelum panel dipakai untuk akun penting.
 
 Jangan aktifkan catch-all untuk `seiton.biz.id`. Subdomain `inbox.seiton.biz.id` dipakai khusus untuk alias generator.
+
+## Machine API untuk VM
+
+API machine-to-machine disediakan khusus untuk VM yang dipercaya. API ini tidak memakai sesi browser owner dan tidak membuka akses D1 langsung.
+
+### Authentication
+
+- Worker secret: `MAIL_VM_API_TOKEN` (Bearer token acak, minimal 40 karakter).
+- Kirim pada header `Authorization: Bearer <token>`.
+- Jangan masukkan token ke Git, log, URL query string, atau file yang dapat dibaca user lain.
+- Rate limit: 120 request/menit dan maksimum 20 alias baru per jam untuk token ini.
+- Token dapat dirotasi dengan mengganti Worker secret `MAIL_VM_API_TOKEN`.
+
+### Endpoint
+
+Create alias:
+
+```http
+POST /api/v1/machine/aliases
+Authorization: Bearer <MAIL_VM_API_TOKEN>
+Content-Type: application/json
+
+{
+  "label": "VM Muse",
+  "ttlSeconds": 3600,
+  "clientRef": "muse-registration-001"
+}
+```
+
+`clientRef` opsional dan idempotent: retry dengan referensi yang sama akan mengembalikan alias aktif yang sama, bukan membuat alias baru. Masa aktif mengikuti daftar TTL panel: 900, 3600, 86400, 604800, atau 2592000 detik.
+
+Read OTP messages:
+
+```http
+GET /api/v1/machine/messages?aliasId=<uuid>
+Authorization: Bearer <MAIL_VM_API_TOKEN>
+```
+
+Untuk polling bertahap, ambil `next_cursor.after` dan `next_cursor.afterId`, lalu kirim sebagai query `after` dan `afterId`. Maksimum 50 pesan per halaman. Respons hanya membuka `sender`, `subject`, `verification_code`, dan `received_at`; isi email lengkap dan kunci AES tidak pernah dikirim ke VM.
+
+Revoke machine alias:
+
+```http
+DELETE /api/v1/machine/aliases/<uuid>
+Authorization: Bearer <MAIL_VM_API_TOKEN>
+```
+
+Alias yang dibuat lewat Machine API ditandai pada `mail_machine_aliases`. Token hanya dapat membaca dan mencabut alias yang tercatat dengan token hash miliknya sendiri. Panel owner tetap memakai endpoint dan sesi browser yang sudah ada.
+
+### Database migration
+
+Jalankan `migrations/0003_machine_api.sql` pada D1 `seiton-mail-automation-prod` sebelum Worker versi baru dilayani.
