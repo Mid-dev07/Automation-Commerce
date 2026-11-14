@@ -1047,6 +1047,7 @@ export {
   encryptMessagePayload,
   extractVerificationCode,
   parseAliasRecipient,
+  parseBearerToken,
   passwordHash,
   randomHex
 };
