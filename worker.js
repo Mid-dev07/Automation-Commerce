@@ -1402,7 +1402,7 @@ async function handleTelegramCallback(env, query) {
     const qrisMode = getQrisCheckoutMode(env);
     if (availableMethods.includes("QRIS")) {
       paymentMethods.push([{
-        text: qrisMode === "DYNAMIC" ? "⚡ QRIS Dinamis" : "📷 QRIS",
+        text: qrisMode === "DYNAMIC" ? "⚡ QRIS Dinamis" : "📷 QRIS (Nominal Manual)",
         callback_data: "pay:" + sku + ":" + qty + ":QRIS"
       }]);
     }
