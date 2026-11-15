@@ -8,6 +8,11 @@ on:
       - "messaging-core.mjs"
       - "migrations/**"
       - "tests/messaging-core.test.mjs"
+      - "tests/qris.test.mjs"
+      - "tests/worker-contract.test.cjs"
+      - "tests/transaction-layer-contract.test.cjs"
+      - "transaction-layer.js"
+      - "qris.mjs"
       - "worker.js"
       - ".github/workflows/messaging-core.yml"
   pull_request:
