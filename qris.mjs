@@ -279,6 +279,8 @@ export async function getMidtransTransactionStatus(env, providerOrderId) {
     amount: parseMidtransAmount(result.gross_amount),
     paymentType: clean(result.payment_type, 24).toLowerCase(),
     currency: clean(result.currency, 8).toUpperCase(),
+    fraudStatus: clean(result.fraud_status, 24).toLowerCase(),
+    acquirer: clean(result.acquirer, 32).toLowerCase(),
     status: normalizeMidtransStatus(result.transaction_status),
     rawStatus: clean(result.transaction_status, 40),
     merchantId: clean(result.merchant_id, 80)
