@@ -4434,12 +4434,27 @@ function createMessagingServices(env) {
       }
       return createOrder(env, input);
     },
-    getPaymentInstructions(order) {
+    async getPaymentInstructions(order) {
       if (String(order.paymentMethod).toUpperCase() === "QRIS") {
         return "Untuk QRIS, gunakan tombol checkout katalog agar bot menampilkan QR yang sesuai serta nominal transfer dan kode unik.";
       }
       if (String(order.paymentMethod).toUpperCase() === "TRANSFER") {
-        return "Instruksi transfer akan diberikan admin.";
+        const config = await loadPaymentMethodConfiguration(env);
+        const accounts = config.bank_accounts.filter(account => account.enabled);
+        if (!accounts.length) throw new Error("Rekening transfer tidak aktif. Pilih metode pembayaran lain atau hubungi admin.");
+        return [
+          "🏦 REKENING RESMI SEITON.ID",
+          "Transfer tepat sesuai total pesanan. Jangan membulatkan nominal.",
+          "",
+          ...accounts.flatMap((account,index) => [
+            (index+1)+". "+account.bank_name,
+            "Nomor rekening: "+account.account_number,
+            "Atas nama: "+account.account_holder,
+            ...(account.note ? ["Catatan: "+account.note] : []),
+            ""
+          ]),
+          "Setelah transfer, unggah bukti untuk diverifikasi admin."
+        ].join("\\n");
       }
       return "Pembayaran COD dipilih.";
     },
