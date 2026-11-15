@@ -26,4 +26,4 @@ Canonical migration directory for `seiton-transactions-prod` is now `migrations/
 
 ## 0011_qris_payments.sql
 
-Additive schema for Midtrans dynamic QRIS provider transactions and idempotent webhook event history. Apply only during the QRIS release sequence after the provider merchant credentials and webhook configuration are ready. Default feature gate remains disabled until sandbox and live reconciliation complete.
+Creates the internal QRIS ledger: unique three-digit suffix and exact amount, dynamic MPM payload, Telegram proof reference, OCR extraction state, duplicate-file/reference protection, and admin review fields. This replaces the earlier, not-yet-applied Midtrans draft. Production D1 was inspected before this migration and had no QRIS tables. Keep the feature flag disabled until the merchant's own static QRIS payload is configured and the acquirer validates this issuance flow.
