@@ -109,3 +109,12 @@ AI may summarize and classify an incident, but must not approve payments, issue 
 - [ ] Sheets mirror reconciled after D1 is healthy.
 - [ ] R2 media references load.
 - [ ] Recovery event and owner approval recorded.
+
+
+## 8. Opt-in operational alerts
+
+The code branch introduces owner notifications for:
+- Failed `SHEET_MIRROR` or `CATALOG_MIRROR` outbox work.
+- Payment-verification claims waiting more than two hours.
+
+These alerts are deliberately disabled unless `OPERATIONAL_ALERTS_ENABLED=true` is explicitly configured on the order Worker. The feature also requires `migrations/0014_operational_alert_state.sql` to exist in the transaction D1 database. Do not enable the variable or deploy the migration as part of a source-only update. Run preview/UAT first and verify Telegram owner notifications. Notifications contain counts only; they do not include customer names, payment references, proof, or amounts.
