@@ -2852,7 +2852,7 @@ async function handleAdminDashboardExport(request, env) {
   }
   try {
     const report = (await buildReportExports(env,{from,to}))[type];
-    const rangeSuffix = from || to ? "_" + (from || "awal") + "_" + (to || "akhir") : "";
+    const rangeSuffix = type === "inventory" ? "_snapshot" : (from || to ? "_" + (from || "awal") + "_" + (to || "akhir") : "");
     const filename = report.filename.replace(/\.csv$/i,"") + rangeSuffix + ".csv";
     return new Response(report.csv, { headers: {
       "Content-Type": "text/csv; charset=utf-8",
