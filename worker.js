@@ -183,10 +183,15 @@ async function dispatchOperationalAlerts(env) {
   if (!env.DB) return { enabled:true, sent:0, reason:"D1_BINDING_MISSING" };
   const checkedAt = Date.now();
   const twoHoursAgo = new Date(checkedAt - 2 * 60 * 60 * 1000).toISOString();
-  const [mirrorResult, paymentResult] = await Promise.all([
+  const [mirrorResult, stalledMirrorResult, paymentResult] = await Promise.all([
     env.DB.prepare(
       "SELECT COUNT(*) AS total FROM outbox WHERE status='FAILED' " +
       "AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR')"
+    ).first(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM outbox WHERE status IN ('PENDING','PROCESSING') " +
+      "AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR') AND attempts>=5 " +
+      "AND julianday('now')-julianday(created_at)>=(1.0/24.0)"
     ).first(),
     env.DB.prepare(
       "SELECT COUNT(*) AS total FROM orders WHERE payment_confirmation_status='MENUNGGU_VERIFIKASI' " +
@@ -196,6 +201,8 @@ async function dispatchOperationalAlerts(env) {
   const alerts = [
     { key:"failed_mirror", count:Number(mirrorResult?.total||0),
       message:"⚠️ Seiton: ada "+Number(mirrorResult?.total||0)+" pekerjaan mirror Google Sheets berstatus FAILED. D1 tetap sumber data utama; periksa antrean dan rekonsiliasi SKU sebelum retry." },
+    { key:"stalled_mirror", count:Number(stalledMirrorResult?.total||0),
+      message:"⚠️ Seiton: ada "+Number(stalledMirrorResult?.total||0)+" pekerjaan mirror yang masih PENDING/PROCESSING setelah ≥5 percobaan dan ≥1 jam. Periksa antrean serta cocokkan SKU dengan Sheets sebelum retry." },
     { key:"stale_payment_review", count:Number(paymentResult?.total||0),
       message:"⏳ Seiton: ada "+Number(paymentResult?.total||0)+" verifikasi pembayaran menunggu lebih dari 2 jam. Cocokkan mutasi merchant/bank sebelum mengambil tindakan." }
   ].filter(item=>item.count>0);
@@ -2763,7 +2770,7 @@ async function handleAdminBotDiagnostics(request, env) {
     telegram: { reachable: false, webhook_configured: false, pending_update_count: null, bot_name: "", username: "", last_error_date: null, last_error_message: "" },
     catalog: { total: 0, active: 0, inactive: 0, stock_units: 0 },
     orders: { total: 0, today: 0, pending_payment: 0, pending_verification: 0 },
-    operations: { failed_mirror_outbox: 0, stale_payment_verification: 0 }
+    operations: { failed_mirror_outbox: 0, stalled_mirror_outbox: 0, stale_payment_verification: 0 }
   };
   if (!state.ready) diagnostics.worker.status = "DEGRADED";
   const [meResult, webhookResult, catalogResult, orderResult, operationsResult] = await Promise.allSettled([
@@ -2790,6 +2797,9 @@ async function handleAdminBotDiagnostics(request, env) {
     env.DB.prepare(
       "SELECT " +
       "(SELECT COUNT(*) FROM outbox WHERE status='FAILED' AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR')) AS failed_mirror_outbox, " +
+      "(SELECT COUNT(*) FROM outbox WHERE status IN ('PENDING','PROCESSING') " +
+      "AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR') AND attempts>=5 " +
+      "AND julianday('now')-julianday(created_at)>=(1.0/24.0)) AS stalled_mirror_outbox, " +
       "(SELECT COUNT(*) FROM orders WHERE payment_confirmation_status='MENUNGGU_VERIFIKASI' " +
       "AND payment_requested_at<>'' AND julianday('now')-julianday(payment_requested_at)>=(2.0/24.0)) AS stale_payment_verification"
     ).first()
@@ -2826,6 +2836,7 @@ async function handleAdminBotDiagnostics(request, env) {
   }
   if (operationsResult.status === "fulfilled" && operationsResult.value) {
     diagnostics.operations.failed_mirror_outbox = Number(operationsResult.value.failed_mirror_outbox || 0);
+    diagnostics.operations.stalled_mirror_outbox = Number(operationsResult.value.stalled_mirror_outbox || 0);
     diagnostics.operations.stale_payment_verification = Number(operationsResult.value.stale_payment_verification || 0);
   } else {
     diagnostics.worker.status = "DEGRADED";
