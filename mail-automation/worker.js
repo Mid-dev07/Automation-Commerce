@@ -515,8 +515,8 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
     const existing = await env.MAIL_DB.prepare(
       "SELECT a.id,a.slug,a.label,a.status,a.created_at,a.expires_at,a.received_count " +
       "FROM mail_machine_aliases m JOIN mail_aliases a ON a.id=m.alias_id " +
-      "WHERE m.client_ref=? LIMIT 1"
-    ).bind(clientRef).first();
+      "WHERE m.client_ref=? AND m.token_hash=? LIMIT 1"
+    ).bind(clientRef, tokenHash).first();
     if (existing) {
       if (existing.status !== "ACTIVE" || Number(existing.expires_at) <= Date.now()) {
         return responseJson({ ok: false, error: "clientRef sudah pernah dipakai dan aliasnya tidak lagi aktif." }, 409);
@@ -539,8 +539,8 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
 
   const now = Date.now();
   const hourly = await env.MAIL_DB.prepare(
-    "SELECT COUNT(*) AS total FROM mail_machine_aliases WHERE created_at>?"
-  ).bind(now - 60 * 60 * 1000).first();
+    "SELECT COUNT(*) AS total FROM mail_machine_aliases WHERE token_hash=? AND created_at>?"
+  ).bind(tokenHash, now - 60 * 60 * 1000).first();
   if (Number(hourly?.total || 0) >= MACHINE_ALIAS_HOURLY_LIMIT) {
     return responseJson({ ok: false, error: "Batas pembuatan alias mesin per jam tercapai." }, 429, {
       "Retry-After": "3600"
