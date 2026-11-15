@@ -143,4 +143,18 @@ Safe reconciliation procedure:
 6. If multiple SKU rows exist, stop and manually deduplicate with an export/backup first. Do not auto-append or bulk retry.
 7. Record before/after counts and preserve D1 as the source of truth.
 
+### Mirror writer behavior and duplicate-SKU guard
+
+The current writer reads `Katalog_Produk!A2:G`, matches column A after trimming and case-normalizing the SKU, updates columns A:G when one row matches, and appends A:G when no row matches. The previous implementation selected only the first matching row; it could therefore leave additional duplicate rows untouched while reporting success.
+
+A source hardening change is under review in branch `fix/catalog-mirror-duplicate-guard`:
+- Zero matches: append.
+- Exactly one match: update that row.
+- More than one match: stop the mirror operation and log the conflicting Sheet row numbers. The writer must not update one arbitrary duplicate or append another row.
+- Empty SKU: stop without writing.
+
+This guard is not active in production until its pull request is reviewed, merged, and the Worker is deployed. Until then, manual duplicate counting remains mandatory. The guard does not deduplicate existing rows and does not automatically resolve a failed outbox event.
+
+The `outbox` table stores status, attempts, and timing but no dedicated last-error column. The immediate failure reason is emitted to Worker logs; use the `catalog_sheet_mirror` and `sheet_mirror_retry` log events to diagnose the original failure before retrying. Do not infer the error cause from the `FAILED` status alone.
+
 The new owner diagnostics expose mirror failure counts. Opt-in Telegram alerts are guarded by `OPERATIONAL_ALERTS_ENABLED` and migration `0014_operational_alert_state.sql`; both remain off/pending release until preview UAT and owner approval.
