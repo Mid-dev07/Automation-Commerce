@@ -20,7 +20,7 @@ Canonical migration directory for `seiton-transactions-prod` is now `migrations/
 
 ## Important
 
-- Before deploying code that reads migration 0013, apply `0013_payment_methods_and_bank_accounts.sql` to `seiton-transactions-prod`. It is additive and seeds QRIS, Transfer Bank, and COD as enabled; Transfer Bank remains unavailable to customers until at least one active bank account is added.
+- Before changing payment settings schema, compare the complete production D1 schema (tables, columns, indexes, constraints, and data) with `0013_payment_methods_and_bank_accounts.sql`. The method/account tables are present in production; the migration registry was not found. Do not reapply or overwrite these settings blindly. Apply only missing, reviewed schema changes after an isolated preview test and explicit release approval.
 - A read-only production D1 inspection on 15 November found `payment_method_settings` and `payment_bank_accounts` present, including QRIS enabled, Transfer/COD disabled, and one active bank destination. The `d1_migrations` registry was not present, so this observation does not prove which migration artifact or command created the schema. Compare the entire schema to migration 0013 before any future change; do not reapply it blindly.
 - This is a source-of-truth consolidation and deployment index.
 - Migrations 0001–0011 are present in the Seiton production D1 schema; migration 0012 is applied as part of the static fallback/product wizard release.
