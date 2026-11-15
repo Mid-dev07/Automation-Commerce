@@ -234,3 +234,56 @@ test("Midtrans QRIS expiry is estimated from provider transaction time by acquir
     globalThis.fetch = originalFetch;
   }
 });
+
+test("internal QRIS gate requires enabled flag and a valid static merchant template", async () => {
+  const { isInternalQrisConfigured, extractQrisMerchantProfile } = await import("../qris.mjs");
+  const template = staticMerchantTemplate();
+  assert.equal(isInternalQrisConfigured({ QRIS_INTERNAL_ENABLED: "true", QRIS_STATIC_PAYLOAD: template }), true);
+  assert.equal(isInternalQrisConfigured({ QRIS_INTERNAL_ENABLED: "false", QRIS_STATIC_PAYLOAD: template }), false);
+  assert.equal(isInternalQrisConfigured({ QRIS_INTERNAL_ENABLED: "true", QRIS_STATIC_PAYLOAD: "broken" }), false);
+  assert.deepEqual(extractQrisMerchantProfile(template), {
+    merchantName: "SEITON.ID", merchantCity: "JEMBER", country: "ID", currency: "360"
+  });
+});
+
+test("QRIS unique suffix is always three digits between 001 and 999", async () => {
+  const { generateQrisUniqueCode } = await import("../qris.mjs");
+  for (let index = 0; index < 100; index++) {
+    const code = generateQrisUniqueCode();
+    assert.match(code, /^\\d{3}$/);
+    assert.ok(Number(code) >= 1 && Number(code) <= 999);
+  }
+});
+
+test("receipt amount parser handles Indonesian and plain IDR formats", async () => {
+  const { parseReceiptAmount } = await import("../qris.mjs");
+  assert.equal(parseReceiptAmount("Rp 75.037"), 75037);
+  assert.equal(parseReceiptAmount("75.037,00"), 75037);
+  assert.equal(parseReceiptAmount("75037"), 75037);
+  assert.equal(parseReceiptAmount("75,50"), null);
+  assert.equal(parseReceiptAmount("Rp 75.038"), 75038);
+});
+
+test("receipt OCR evaluation is deterministic and never certifies settlement", async () => {
+  const { evaluateQrisReceipt } = await import("../qris.mjs");
+  const result = evaluateQrisReceipt({
+    expectedAmount: 75037,
+    merchantName: "SEITON.ID",
+    createdAt: new Date(Date.now() - 60_000).toISOString()
+  }, {
+    amount: "75.037",
+    merchant_name: "SEITON ID",
+    transaction_datetime: new Date().toISOString(),
+    transaction_reference: "TRX-ABC-123",
+    confidence: 0.95
+  });
+  assert.equal(result.status, "MATCHED");
+  assert.equal(result.amount, 75037);
+  assert.equal(result.reference, "TRX-ABC-123");
+  assert.equal("paid" in result, false);
+  const mismatch = evaluateQrisReceipt({
+    expectedAmount: 75037, merchantName: "SEITON.ID",
+    createdAt: new Date(Date.now() - 60_000).toISOString()
+  }, { amount: 75038, merchant_name: "SEITON ID", transaction_datetime: new Date().toISOString() });
+  assert.equal(mismatch.status, "MISMATCH");
+});
