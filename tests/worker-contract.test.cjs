@@ -287,6 +287,7 @@ test("admin QRIS preview composes a real merchant QR without creating an order o
   assert.match(command, /message\.chat\.type !== "private"/);
   assert.match(command, /isAdmin\(customerId, env\)/);
   assert.match(command, /buildDynamicQrisPayload\(env\.QRIS_STATIC_PAYLOAD, amount\)/);
+  assert.match(command, /if \(!merchant\.merchantName\)/);
   assert.match(command, /qris_payments WHERE expected_amount/);
   assert.match(command, /QRIS_TEST_QR_GENERATED/);
   assert.doesNotMatch(command, /INSERT INTO qris_payments|createOrder\(/);
