@@ -352,3 +352,35 @@ test("bot diagnostics endpoint is only exposed under an authenticated admin rout
   assert.match(worker, /url\.pathname === "\/api\/admin\/bot\/diagnostics"[\s\S]{0,150}handleAdminBotDiagnostics/);
   assert.match(worker, /async function handleAdminBotDiagnostics/);
 });
+
+
+test("admin can manage payment methods and bank destinations through authenticated APIs", () => {
+  assert.match(worker, /async function handleAdminPaymentMethods/);
+  assert.match(worker, /verifyDashboardAccess\(request, env\)/);
+  assert.match(worker, /payment_method_settings/);
+  assert.match(worker, /payment_bank_accounts/);
+  assert.match(worker, /data-method-toggle/);
+  assert.match(worker, /data-bank-toggle/);
+  assert.match(worker, /bankAccountForm/);
+});
+
+test("checkout only offers admin-enabled methods and transfer requires an active destination", () => {
+  assert.match(worker, /async function getAvailablePaymentMethods/);
+  assert.match(worker, /method\.available/);
+  assert.match(worker, /accounts\.filter\(account => account\.enabled\)/);
+  assert.match(worker, /availableMethods\.includes\(method\)/);
+  assert.match(worker, /Metode pembayaran tersebut baru saja dinonaktifkan/);
+});
+
+test("QRIS approval blocks amount and receipt mismatches and verifies payload amount", () => {
+  assert.match(worker, /ocrStatus === "MISMATCH"/);
+  assert.match(worker, /expectedAmount !== baseAmount \+ uniqueCode/);
+  assert.match(worker, /parsedPayload\.amount !== expectedAmount/);
+  assert.match(worker, /Bukti QRIS terdeteksi tidak cocok dengan nominal tagihan/);
+});
+
+test("repeated payment approval never sends a second receipt or digital fulfillment", () => {
+  assert.match(worker, /if \(approved\.alreadyApproved\) \{[\s\S]{0,300}Tidak ada persetujuan atau pengiriman resi kedua/);
+  assert.match(worker, /already_approved:true/);
+  assert.match(worker, /Sudah disetujui sebelumnya; tidak ada persetujuan ulang/);
+});
