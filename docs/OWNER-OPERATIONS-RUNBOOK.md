@@ -118,3 +118,29 @@ The code branch introduces owner notifications for:
 - Payment-verification claims waiting more than two hours.
 
 These alerts are deliberately disabled unless `OPERATIONAL_ALERTS_ENABLED=true` is explicitly configured on the order Worker. The feature also requires `migrations/0014_operational_alert_state.sql` to exist in the transaction D1 database. Do not enable the variable or deploy the migration as part of a source-only update. Run preview/UAT first and verify Telegram owner notifications. Notifications contain counts only; they do not include customer names, payment references, proof, or amounts.
+
+
+## 9. Read-only reconciliation snapshot — 15 November 2026
+
+A follow-up read-only query of `seiton-transactions-prod` confirmed five failed `CATALOG_MIRROR` outbox entries (all at eight attempts):
+
+| Outbox ID | SKU | D1 catalog row |
+|---:|---|---|
+| 1 | `S-01` | Present, active |
+| 2 | `SEI-001` | Present, active |
+| 15 | `MUSE-STARTER` | Present, active |
+| 16 | `MUSE-BISNIS` | Present, active |
+| 17 | `OTP-SETUP` | Present, active |
+
+The authoritative D1 rows and outbox records were read successfully. The corresponding Google Sheets rows were not read during this inspection. Therefore, the cause of each failure is not yet proven, and **none of these five rows was reset or retried**.
+
+Safe reconciliation procedure:
+1. Read `Katalog_Produk!A2:G` from the reporting Sheet and count every occurrence of each SKU.
+2. Compare all seven fields against D1: SKU, name, price, stock, active, photo URL, and description.
+3. If exactly one row exists and all fields already match, record the evidence and mark the mirror event complete only through a reviewed, audited reconciliation path.
+4. If exactly one row exists but differs, update only that exact row from D1, then verify the result before resolving the outbox item.
+5. If no row exists, append only after a fresh duplicate check and verify exactly one SKU row exists afterward.
+6. If multiple SKU rows exist, stop and manually deduplicate with an export/backup first. Do not auto-append or bulk retry.
+7. Record before/after counts and preserve D1 as the source of truth.
+
+The new owner diagnostics expose mirror failure counts. Opt-in Telegram alerts are guarded by `OPERATIONAL_ALERTS_ENABLED` and migration `0014_operational_alert_state.sql`; both remain off/pending release until preview UAT and owner approval.
