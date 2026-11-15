@@ -111,10 +111,11 @@ test("Mail panel only loads message bodies and OTP after an explicit message sel
   assert.ok(script.includes("verification_code"));
 });
 
-test("Generated aliases and inbound validation use seiton.my.id root domain without inbox subdomain", () => {
+test("New aliases use seiton.my.id while legacy inbox aliases remain accepted during cutover", () => {
   assert.ok(mailWorker.includes('const MAIL_DOMAIN = "seiton.my.id";'));
-  assert.ok(mailWorker.includes('normalized.slice(at + 1) !== MAIL_DOMAIN'));
+  assert.ok(mailWorker.includes('const LEGACY_MAIL_DOMAIN = "inbox.seiton.biz.id";'));
+  assert.ok(mailWorker.includes('const recipientDomain = normalized.slice(at + 1);'));
+  assert.ok(mailWorker.includes('recipientDomain !== MAIL_DOMAIN && recipientDomain !== LEGACY_MAIL_DOMAIN'));
   assert.ok(mailWorker.includes('return "receiver+" + alias.slug + "@seiton.my.id";'));
-  assert.equal(mailWorker.includes("@inbox.seiton.biz.id"), false);
   assert.equal(mailWorker.includes('const PANEL_ORIGIN = "https://mail.seiton.biz.id";'), true);
 });
