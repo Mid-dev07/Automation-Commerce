@@ -164,12 +164,8 @@ test("scheduled outbox dispatch handles both order and catalog mirrors", () => {
 });
 
 
-test("Midtrans QRIS settlement is a separate verified transaction operation", () => {
-  assert.match(layer, /async function settleQrisPaymentD1\(db,id,input\)/);
-  assert.match(layer, /payment_method\)\.toUpperCase\(\)!=="QRIS"/);
-  assert.match(layer, /Nominal settlement QRIS tidak cocok/);
-  assert.match(layer, /provider_transaction_id/);
-  assert.match(layer, /qris_webhook_events/);
-  assert.match(layer, /export async function settleQrisPaymentTransactional/);
-  assert.match(layer, /async settleQrisPayment\(id,input\)/);
+
+
+test("transaction layer does not expose a gateway-based QRIS settlement path", () => {
+  assert.doesNotMatch(layer, /Midtrans|midtrans|settleQrisPayment|qris_webhook_events/);
 });
