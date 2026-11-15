@@ -325,25 +325,73 @@ async function approvePaymentD1(db,id,actor="admin") {
   await requireReady(db);
   const o=await getOrderD1(db,id);
   if(!o)throw new Error("Pesanan tidak ditemukan.");
-  if(!ONLINE_METHODS.has(String(o.payment_method).toUpperCase()))throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi.");
+  const method=String(o.payment_method||"").toUpperCase();
+  if(!ONLINE_METHODS.has(method))throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi.");
   if(CANCELLED_STATUSES.has(String(o.status).toUpperCase()))throw new Error("Pesanan sudah dibatalkan.");
   if (String(o.payment_confirmation_status).toUpperCase() === "DISETUJUI" && o.receipt_code) {
     return { ...o, alreadyApproved: true };
   }
+
+  // QRIS approval is guarded by the payment ledger, not just by the order row.
+  // A readable amount mismatch or a reused/mismatched receipt must never be approved.
+  const isQris=method==="QRIS";
+  if(isQris){
+    const payment=await db.prepare(
+      "SELECT status,base_amount,unique_code,expected_amount,receipt_file_id,ocr_status,ocr_amount " +
+      "FROM qris_payments WHERE order_id=? LIMIT 1"
+    ).bind(id).first();
+    if(!payment||!String(payment.receipt_file_id||"")) {
+      throw new Error("Bukti QRIS belum tersedia. Minta pelanggan mengunggah bukti pembayaran.");
+    }
+    const base=Number(payment.base_amount),suffix=Number(payment.unique_code),expected=Number(payment.expected_amount);
+    if(!Number.isSafeInteger(base)||base!==Number(o.total)||!Number.isInteger(suffix)||suffix<1||suffix>999
+      ||!Number.isSafeInteger(expected)||expected!==base+suffix) {
+      throw new Error("Nominal QRIS tidak konsisten dengan total pesanan. Tahan persetujuan dan periksa transaksi.");
+    }
+    if(String(payment.status||"").toUpperCase()==="PAID") {
+      throw new Error("QRIS sudah tercatat lunas, tetapi status pesanan belum sinkron. Jangan setujui ulang; lakukan rekonsiliasi.");
+    }
+    if(String(payment.ocr_status||"").toUpperCase()==="MISMATCH"
+      ||String(payment.status||"").toUpperCase()==="OCR_MISMATCH"
+      ||(payment.ocr_amount!==null&&payment.ocr_amount!==undefined&&Number(payment.ocr_amount)!==expected)) {
+      throw new Error("Bukti QRIS terdeteksi tidak cocok dengan nominal tagihan. Minta bukti yang benar sebelum menyetujui.");
+    }
+  }
+
   const at=nowJakarta(), code="SEI-"+dateStamp(at)+"-"+crypto.randomUUID().slice(0,6).toUpperCase();
   const sourceKey = "approve:" + code;
-  const results=await db.batch([
+  const statements=[
     db.prepare(`UPDATE orders SET status='DIBAYAR',payment_confirmation_status='DISETUJUI',
       payment_confirmed_at=?,receipt_code=?,pickup_status='BELUM_DIAMBIL',updated_at=?
       WHERE order_id=? AND payment_confirmation_status='MENUNGGU_VERIFIKASI'
-        AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')`).bind(at,code,at,id),
+        AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')
+        AND (payment_method<>'QRIS' OR EXISTS (
+          SELECT 1 FROM qris_payments qp WHERE qp.order_id=orders.order_id
+            AND qp.status<>'PAID' AND qp.receipt_file_id<>''
+            AND qp.base_amount=orders.total AND qp.expected_amount=qp.base_amount+qp.unique_code
+            AND qp.ocr_status<>'MISMATCH'
+            AND (qp.ocr_amount IS NULL OR qp.ocr_amount=qp.expected_amount)
+        ))`).bind(at,code,at,id)
+  ];
+  if(isQris){
+    statements.push(db.prepare(`UPDATE qris_payments SET status='PAID',reviewed_by=?,reviewed_at=?,paid_at=?,updated_at=?
+      WHERE order_id=? AND status<>'PAID' AND receipt_file_id<>''
+        AND base_amount=? AND expected_amount=base_amount+unique_code
+        AND ocr_status<>'MISMATCH' AND (ocr_amount IS NULL OR ocr_amount=expected_amount)
+        AND EXISTS (SELECT 1 FROM orders o WHERE o.order_id=qris_payments.order_id
+          AND o.payment_confirmation_status='DISETUJUI' AND o.receipt_code=?)`)
+      .bind(clean(actor,100),at,at,at,id,Number(o.total),code));
+  }
+  statements.push(
     db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
       SELECT order_id,'PAYMENT_APPROVED',?,'DIBAYAR',?,?, '{}',? FROM orders
       WHERE order_id=? AND receipt_code=?`).bind(o.status,clean(actor,128),sourceKey,at,id,code),
     adminActivityAuditStatement(db,actor,"PAYMENT_APPROVED",id,{from_status:String(o.status||""),to_status:"DIBAYAR",transition_type:"order_status"},at,sourceKey),
     sheetMirrorStatement(db,id,at)
-  ].filter(Boolean));
+  );
+  const results=await db.batch(statements.filter(Boolean));
   checkChanges(results[0],"Permintaan pembayaran sudah diproses atau status pesanan tidak memenuhi syarat.");
+  if(isQris)checkChanges(results[1],"Pembaruan QRIS tidak berhasil. Status pembayaran tidak dapat disahkan.");
   return getOrderD1(db,id);
 }
 
