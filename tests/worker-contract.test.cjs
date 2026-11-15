@@ -263,7 +263,7 @@ test("Telegram storefront uses branded menus and grouped admin navigation", () =
 });
 
 test("QRIS checkout uses internal static-payload composition and unique-code receipt review", () => {
-  assert.match(worker, /isInternalQrisConfigured/);
+  assert.match(worker, /getQrisCheckoutMode/);
   assert.match(worker, /QRIS_INTERNAL_NOT_CONFIGURED/);
   assert.match(worker, /buildDynamicQrisPayload/);
   assert.match(worker, /generateQrisUniqueCode/);
