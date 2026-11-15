@@ -7,6 +7,8 @@ import {
   verifyQrisPayload,
   parseQrisPayload,
   buildDynamicQrisPayload,
+  MAX_QRIS_TRANSACTION_AMOUNT,
+  generateQrisUniqueCode,
   isInternalQrisConfigured,
   isStaticQrisFallbackConfigured,
   getQrisCheckoutMode
@@ -141,13 +143,26 @@ test("internal QRIS gate requires enabled flag and a valid static merchant templ
   });
 });
 
-test("QRIS unique suffix is always three digits between 001 and 999", async () => {
-  const { generateQrisUniqueCode } = await import("../qris.mjs");
-  for (let index = 0; index < 100; index++) {
-    const code = generateQrisUniqueCode();
-    assert.match(code, /^[0-9]{3}$/);
-    assert.ok(Number(code) >= 1 && Number(code) <= 999);
+test("QRIS unique suffix stays inside the available transaction-limit budget", () => {
+  for (const max of [1, 7, 250, 999]) {
+    for (let index = 0; index < 40; index++) {
+      const code = generateQrisUniqueCode(max);
+      assert.match(code, /^[0-9]{3}$/);
+      assert.ok(Number(code) >= 1 && Number(code) <= max);
+    }
   }
+  assert.throws(() => generateQrisUniqueCode(0), /RANGE_INVALID/);
+  assert.throws(() => generateQrisUniqueCode(1000), /RANGE_INVALID/);
+});
+
+test("dynamic QRIS payload enforces the Bank Indonesia per-transaction ceiling", () => {
+  const template = staticMerchantTemplate();
+  assert.equal(MAX_QRIS_TRANSACTION_AMOUNT, 10_000_000);
+  assert.equal(parseQrisPayload(buildDynamicQrisPayload(template, 10_000_000)).amount, 10_000_000);
+  assert.throws(
+    () => buildDynamicQrisPayload(template, MAX_QRIS_TRANSACTION_AMOUNT + 1),
+    /AMOUNT_INVALID/
+  );
 });
 
 test("receipt amount parser handles Indonesian and plain IDR formats", async () => {
