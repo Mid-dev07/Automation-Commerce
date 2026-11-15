@@ -2091,7 +2091,27 @@ function localDateKey(value) {
 }
 async function loadAdminDashboardData(env) {
   const state = await transactionReadiness(env);
-  if (state.ready) return listDashboardDataTransactional(env);
+  if (state.ready) {
+    const dashboard = await listDashboardDataTransactional(env);
+    const paymentResult = await env.DB.prepare(
+      "SELECT order_id,status,ocr_status,ocr_amount,expected_amount,unique_code,qris_mode FROM qris_payments"
+    ).all();
+    const payments = new Map((paymentResult.results || []).map(payment => [String(payment.order_id), payment]));
+    dashboard.orders = (dashboard.orders || []).map(order => {
+      const payment = payments.get(String(order.order_id));
+      if (!payment) return order;
+      return {
+        ...order,
+        qris_status: String(payment.status || ""),
+        qris_ocr_status: String(payment.ocr_status || "NOT_RUN"),
+        qris_ocr_amount: payment.ocr_amount == null ? null : Number(payment.ocr_amount),
+        qris_expected_amount: Number(payment.expected_amount),
+        qris_unique_code: Number(payment.unique_code),
+        qris_mode: String(payment.qris_mode || "DYNAMIC")
+      };
+    });
+    return dashboard;
+  }
   await ensurePaymentWorkflowHeaders(env);
   const [orderRows, productRows] = await Promise.all([
     readSheet(env, "Pesanan!A2:T"),
@@ -2482,6 +2502,81 @@ async function handleAdminWebSessionRevoke(request, env) {
   ).bind(now, tokenHash, now).first();
   if (!revoked) return json({ ok:false, error:"Sesi tidak ditemukan, kedaluwarsa, atau sudah dicabut." }, 404);
   return json({ ok:true, revoked:true });
+}
+async function handleAdminPaymentMethods(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) {
+    return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
+  }
+  if (!env.DB) return json({ok:false,error:"D1 tidak tersedia."},503);
+  try {
+    if (request.method === "GET") {
+      return json({ok:true,...await loadPaymentMethodConfiguration(env)});
+    }
+    let body;
+    try { body = await request.json(); } catch { return json({ok:false,error:"Data pengaturan tidak valid."},400); }
+    const now = new Date().toISOString();
+    const actor = webAdminPayloadFromRequest(request);
+    const actorId = String(actor?.sub || "web-admin").slice(0,128);
+    let action = String(body.action || "");
+
+    if (action === "set_method") {
+      const key = String(body.method_key || "").toUpperCase();
+      if (!PAYMENT_METHOD_KEYS.includes(key) || typeof body.enabled !== "boolean") {
+        return json({ok:false,error:"Metode atau status tidak valid."},400);
+      }
+      const fallback = PAYMENT_METHOD_DEFAULTS[key];
+      await env.DB.prepare(
+        "INSERT INTO payment_method_settings(method_key,display_name,enabled,instructions,updated_at) VALUES(?,?,?,?,?) " +
+        "ON CONFLICT(method_key) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at"
+      ).bind(key,fallback.display_name,body.enabled ? 1 : 0,fallback.instructions,now).run();
+      await recordAdminActivity(env,{
+        actorChannel:"web",actorId,action:"PAYMENT_METHOD_UPDATED",resourceType:"payment_method",
+        resourceId:key,summary:{enabled:body.enabled}
+      });
+    } else if (action === "save_bank") {
+      const accountId = String(body.account_id || crypto.randomUUID()).trim().slice(0,80);
+      const bankName = String(body.bank_name || "").trim().slice(0,80);
+      const accountHolder = String(body.account_holder || "").trim().slice(0,100);
+      const accountNumber = String(body.account_number || "").replace(/[\\s-]/g,"");
+      const note = String(body.note || "").trim().slice(0,200);
+      const enabled = body.enabled !== false;
+      if (!/^[A-Za-z0-9_-]{8,80}$/.test(accountId)
+        || !bankName || !accountHolder || !/^\\d{5,32}$/.test(accountNumber)) {
+        return json({ok:false,error:"Lengkapi nama bank, nama pemilik, dan nomor rekening yang valid (5–32 digit)."},400);
+      }
+      await env.DB.prepare(
+        "INSERT INTO payment_bank_accounts(account_id,bank_name,account_holder,account_number,note,enabled,sort_order,created_at,updated_at) " +
+        "VALUES(?,?,?,?,?,?,0,?,?) ON CONFLICT(account_id) DO UPDATE SET " +
+        "bank_name=excluded.bank_name,account_holder=excluded.account_holder,account_number=excluded.account_number," +
+        "note=excluded.note,enabled=excluded.enabled,updated_at=excluded.updated_at"
+      ).bind(accountId,bankName,accountHolder,accountNumber,note,enabled ? 1 : 0,now,now).run();
+      await recordAdminActivity(env,{
+        actorChannel:"web",actorId,action:"PAYMENT_BANK_ACCOUNT_SAVED",resourceType:"payment_bank_account",
+        resourceId:accountId,summary:{bank_name:bankName,account_holder:accountHolder,account_number_last4:accountNumber.slice(-4),enabled}
+      });
+    } else if (action === "toggle_bank") {
+      const accountId = String(body.account_id || "").trim().slice(0,80);
+      if (!/^[A-Za-z0-9_-]{8,80}$/.test(accountId) || typeof body.enabled !== "boolean") {
+        return json({ok:false,error:"Rekening atau status tidak valid."},400);
+      }
+      const result = await env.DB.prepare(
+        "UPDATE payment_bank_accounts SET enabled=?,updated_at=? WHERE account_id=?"
+      ).bind(body.enabled ? 1 : 0,now,accountId).run();
+      if (Number(result.meta?.changes || 0) !== 1) return json({ok:false,error:"Rekening tidak ditemukan."},404);
+      await recordAdminActivity(env,{
+        actorChannel:"web",actorId,action:body.enabled ? "PAYMENT_BANK_ACCOUNT_ENABLED" : "PAYMENT_BANK_ACCOUNT_DISABLED",
+        resourceType:"payment_bank_account",resourceId:accountId,summary:{enabled:body.enabled}
+      });
+    } else {
+      return json({ok:false,error:"Aksi pengaturan pembayaran tidak dikenal."},400);
+    }
+    return json({ok:true,...await loadPaymentMethodConfiguration(env)});
+  } catch (error) {
+    const message = String(error?.message || "");
+    const duplicateAccount = /payment_bank_accounts_bank_number_uq|UNIQUE constraint failed/i.test(message);
+    console.error(JSON.stringify({level:"error",event:"admin_payment_methods",code:duplicateAccount ? "DUPLICATE_BANK_ACCOUNT" : "PAYMENT_METHOD_SETTINGS_FAILED"}));
+    return json({ok:false,error:duplicateAccount ? "Rekening tersebut sudah terdaftar." : "Pengaturan pembayaran gagal disimpan. Periksa migrasi D1 dan coba lagi."},duplicateAccount ? 409 : 500);
+  }
 }
 async function handleAdminPaymentAction(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ok:false,error:"Sesi admin tidak valid atau kedaluwarsa."},401);
