@@ -131,3 +131,6 @@ Read-only Cloudflare inspection found:
 - No production binding, secret, Worker, D1, DNS, or Email Routing configuration was changed by P3 source work.
 
 P3 note: the production Mail D1 schema currently has a globally unique `client_ref` constraint. Runtime lookups and quotas are token-hash scoped, but true multi-token idempotency needs a reviewed schema migration to `UNIQUE(token_hash, client_ref)`. P3 does not apply that migration and does not claim multi-token readiness.
+
+### Domain migration gate
+The requested target zone `seiton.my.id` currently remains `pending` in Cloudflare, with parked-domain DNS records and Email Routing disabled/unconfigured. The deployed Mail Worker still uses `mail.seiton.biz.id` as its panel origin and `inbox.seiton.biz.id` for aliases. Keep the old route operational during migration; do not release the new Owner panel integration until the Mail Worker origin/domain configuration and the new zone's Email Routing rule have been migrated and verified end-to-end.
