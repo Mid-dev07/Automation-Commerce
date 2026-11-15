@@ -16,11 +16,12 @@ Canonical migration directory for `seiton-transactions-prod` is now `migrations/
 | `0010_digital_products.sql` | Digital product inventory and fulfillment | Existing |
 | `0011_qris_payments.sql` | QRIS order ledger, unique amount, and receipt OCR | Applied to production D1 |
 | `0012_qris_static_fallback_product_form.sql` | Static QRIS fallback mode and Telegram product form drafts | Applied to production D1 |
-| `0013_payment_methods_and_bank_accounts.sql` | Admin-controlled checkout methods and multiple bank transfer accounts | Pending release |
+| `0013_payment_methods_and_bank_accounts.sql` | Admin-controlled checkout methods and multiple bank transfer accounts | Tables observed in production 15 Nov; migration registry unverified |
+| `0014_operational_alert_state.sql` | Cooldown state for opt-in owner operational alerts | Pending release |
 
 ## Important
 
-- Before deploying code that reads migration 0013, apply `0013_payment_methods_and_bank_accounts.sql` to `seiton-transactions-prod`. It is additive and seeds QRIS, Transfer Bank, and COD as enabled; Transfer Bank remains unavailable to customers until at least one active bank account is added.
+- A read-only production D1 inspection on 15 Nov found `payment_method_settings` and `payment_bank_accounts` present with QRIS enabled, Transfer and COD disabled, and one active bank destination. The same inspection found no `d1_migrations` table, so the migration registry and exact application path were not independently verified. Compare the full production schema to migration 0013 before any apply; do not blindly re-run or alter live payment settings.
 - This is a source-of-truth consolidation and deployment index.
 - Migrations 0001–0011 are present in the Seiton production D1 schema; migration 0012 is applied as part of the static fallback/product wizard release.
 - The historical copy under the website repository is retained for traceability. Do not apply both copies.
@@ -41,3 +42,8 @@ Adds `qris_mode` to the QRIS ledger so each order remembers whether its QR image
 ## 0013_payment_methods_and_bank_accounts.sql
 
 Adds admin-managed enabled/disabled state for QRIS, Transfer Bank, and COD plus multiple bank account destinations. Disabling a method or account affects new checkout sessions only; existing orders and their payment-verification state remain unchanged. Bank account records are soft-disabled rather than deleted, and bank/number duplicates are blocked by a unique index.
+
+
+## 0014_operational_alert_state.sql
+
+Stores alert cooldown metadata only. The Worker sends owner notifications for failed Google Sheets/catalog mirror outbox work and payment verifications waiting more than two hours only when the explicit Worker variable `OPERATIONAL_ALERTS_ENABLED=true` is set. The default is disabled. Before enabling: verify this migration in the transaction D1 schema, run preview tests, confirm owner notification routing, and obtain approval. Alerts never approve payments or mutate order state.
