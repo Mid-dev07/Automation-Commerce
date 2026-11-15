@@ -272,3 +272,13 @@ test("QRIS checkout is disabled without a configured merchant and dynamic paymen
   assert.match(worker, /callback_data: "qris:check:"/);
   assert.doesNotMatch(worker, /LINK_QRIS_IMAGE/);
 });
+
+
+test("customers can re-display their own active dynamic QRIS from Pesanan Saya", () => {
+  assert.match(worker, /async function handleQrisPaymentShow\(env, message, chatId, userId, orderId\)/);
+  assert.match(worker, /data\.startsWith\("qris:show:"\)/);
+  assert.match(worker, /callback_data: "qris:show:" \+ orderId/);
+  assert.match(worker, /text: "📲 Tampilkan QR Lagi"/);
+  assert.match(worker, /String\(order\.customer_id\) !== String\(userId\)/);
+  assert.match(worker, /payment\.status === "EXPIRED" \|\| payment\.status === "FAILED"/);
+});

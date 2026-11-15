@@ -1208,6 +1208,7 @@ async function handleTelegramCallback(env, query) {
       } else if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
         buttons.push([{ text: "📎 Kirim / Perbarui Bukti " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
       } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+        buttons.push([{ text: "📲 Tampilkan QR " + orderId.slice(-8), callback_data: "qris:show:" + orderId }]);
         buttons.push([{ text: "⚡ Periksa QRIS " + orderId.slice(-8), callback_data: "qris:check:" + orderId }]);
       } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() !== "COD") {
         buttons.push([{ text: "💳 Konfirmasi Bayar " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
@@ -1424,6 +1425,11 @@ async function handleTelegramCallback(env, query) {
     }
     await recordAdminActivity(env, { actorId: userId, action: "REPORT_EXPORT_SENT", resourceType: "sales_export", summary: { report_types: types } });
     await updateTelegramMessage(env, message, { text: "✅ Laporan selesai dikirim.", replyMarkup: adminMenuKeyboard() });
+    return;
+  }
+
+  if (data.startsWith("qris:show:")) {
+    await handleQrisPaymentShow(env, message, chatId, userId, data.slice("qris:show:".length));
     return;
   }
 
@@ -2528,6 +2534,7 @@ async function sendQrisPaymentScreen(env, chatId, order) {
   ].join("\n");
   await sendTelegramPhotoBlob(env, chatId, image, caption, {
     inline_keyboard: [
+      [{ text: "📲 Tampilkan QR Lagi", callback_data: "qris:show:" + order.orderId }],
       [{ text: "🔄 Periksa Pembayaran", callback_data: "qris:check:" + order.orderId }],
       [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]
     ]
@@ -2602,6 +2609,46 @@ async function reconcileQrisProviderStatus(env, order, payment, status, source) 
   }
   await recordQrisNonPaidStatus(env, order.order_id, status.status, status.rawStatus);
   return { status: status.status };
+}
+
+async function handleQrisPaymentShow(env, message, chatId, userId, orderId) {
+  if (!isDynamicQrisConfigured(env)) throw new Error("QRIS dinamis belum diaktifkan.");
+  const order = await findOrderTransactional(env, orderId);
+  if (!order || String(order.customer_id) !== String(userId)
+    || String(order.payment_method || "").toUpperCase() !== "QRIS") {
+    throw new Error("Pesanan QRIS tidak ditemukan untuk akun Telegram ini.");
+  }
+  const payment = await getQrisPaymentForOrder(env, orderId);
+  if (!payment) {
+    throw new Error("QRIS belum berhasil diterbitkan. Hubungi admin untuk pemeriksaan transaksi.");
+  }
+  if (payment.status === "PAID" || String(order.payment_confirmation_status).toUpperCase() === "DISETUJUI") {
+    await updateTelegramMessage(env, message, {
+      text: "✅ Pembayaran QRIS sudah terverifikasi. Resi tersedia di menu Pesanan Saya.",
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
+    });
+    return;
+  }
+  if (payment.status === "EXPIRED" || payment.status === "FAILED") {
+    await updateTelegramMessage(env, message, {
+      text: "⌛ QRIS sudah tidak berlaku. Buat pesanan baru untuk mendapatkan QR baru.",
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
+    });
+    return;
+  }
+  const displayOrder = {
+    orderId: order.order_id,
+    total: Number(order.total),
+    sku: order.sku,
+    product: order.product_name,
+    unitPrice: Number(order.unit_price),
+    quantity: Number(order.quantity),
+    shipping: Number(order.shipping || 0)
+  };
+  await deleteTelegramMessage(env, message);
+  await sendQrisPaymentScreen(env, chatId, displayOrder);
 }
 
 async function handleQrisStatusCheck(env, message, chatId, userId, orderId) {
