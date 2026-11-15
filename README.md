@@ -1,5 +1,16 @@
 # Automation-Commerce
 
+## Master business and infrastructure handoff
+
+The business and public website context is maintained in the public repository:
+
+- https://github.com/midznight/seiton.id
+- [AI Start Here](https://github.com/midznight/seiton.id/blob/main/docs/AI-START-HERE.md)
+- [Master Infrastructure Directory](https://github.com/midznight/seiton.id/blob/main/docs/MASTER-INFRASTRUCTURE-DIRECTORY.md)
+- [Business, Product & Operating Knowledge](https://github.com/midznight/seiton.id/blob/main/docs/SEITON-BUSINESS-AND-PRODUCT-KNOWLEDGE.md)
+
+This repository is the authoritative private source for backend Workers, transaction processing, D1 migrations, QRIS, Messaging Core, Site Admin, and OTP Portal. The public repository is authoritative for the Astro website, public service catalogue, brand, published routes, and public content. Mail Automation is currently a Cloudflare runtime component whose complete source is not yet present in these two repositories. Read the runtime audit documents before deployment; never publish secrets or mailbox access links.
+
 ## Fase 1 — produk digital dan portal mailbox privat
 
 Implementasi bertahap berada pada branch `feat/fase-1-digital-delivery-otp`:
