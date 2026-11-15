@@ -41,3 +41,8 @@ Adds `qris_mode` to the QRIS ledger so each order remembers whether its QR image
 ## 0013_payment_methods_and_bank_accounts.sql
 
 Adds admin-managed enabled/disabled state for QRIS, Transfer Bank, and COD plus multiple bank account destinations. Disabling a method or account affects new checkout sessions only; existing orders and their payment-verification state remain unchanged. Bank account records are soft-disabled rather than deleted, and bank/number duplicates are blocked by a unique index.
+
+
+## 0014_operational_alert_state.sql
+
+Adds cooldown state for opt-in Telegram alerts about failed/stalled Google Sheets mirrors and payment verification older than two hours. This migration is pending release. Do not set `OPERATIONAL_ALERTS_ENABLED=true` or deploy the alert code until the schema is applied to an isolated preview database and notification UAT succeeds.

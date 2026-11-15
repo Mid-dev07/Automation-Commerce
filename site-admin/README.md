@@ -97,3 +97,22 @@ A post-merge source review found that the P1 event-handler block had been append
 - Worker audit CI still runs all `tests/*.test.cjs` and `tests/*.test.mjs`, plus Worker syntax checks.
 - Browser UAT and end-to-end export/download checks remain required before merge/deploy.
 - No production Worker, Pages configuration, D1, QRIS flag, Telegram webhook, or Google Analytics setting was changed.
+
+
+## CRM & Manajemen Proyek dalam Owner Control Center
+
+CRM jasa terintegrasi sebagai tab di panel owner yang sama; bukan panel kedua. API menggunakan sesi owner aktif, allowlist origin untuk mutasi, dan database panel `SITE_DB` yang terpisah dari buku pesanan checkout.
+
+### Data yang dicatat
+- Pelanggan dan kanal kontak.
+- Proyek, layanan, lingkup kerja, nilai penawaran, DP target, tanggal target, dan batas revisi.
+- Tahap pipeline dan riwayat perubahan.
+- Pembayaran jasa dan pengembalian dana yang harus dikonfirmasi oleh owner.
+
+Jangan simpan password, OTP, access token, QRIS payload, private key, atau kredensial pihak ketiga pada CRM. Buku pembayaran proyek terpisah dari ledger QRIS/order checkout. Pengembalian tidak boleh melebihi pembayaran bersih yang tercatat.
+
+### Migration dan release gate
+- `site-admin/migrations/0002_owner_project_pipeline.sql` membuat tabel CRM/proyek, ledger pembayaran proyek, indeks, dan refund guard.
+- Migration belum diterapkan ke database produksi pada branch ini.
+- Terapkan hanya ke database preview terisolasi, uji create/update/event/payment/refund serta akses owner, lalu minta persetujuan eksplisit sebelum migrasi dan deployment produksi.
+- CRM tidak otomatis membuat invoice, mengirim reminder ke pelanggan, atau mengubah status checkout.
