@@ -250,7 +250,7 @@ test("QRIS unique suffix is always three digits between 001 and 999", async () =
   const { generateQrisUniqueCode } = await import("../qris.mjs");
   for (let index = 0; index < 100; index++) {
     const code = generateQrisUniqueCode();
-    assert.match(code, /^\\d{3}$/);
+    assert.match(code, /^[0-9]{3}$/);
     assert.ok(Number(code) >= 1 && Number(code) <= 999);
   }
 });
@@ -281,6 +281,14 @@ test("receipt OCR evaluation is deterministic and never certifies settlement", a
   assert.equal(result.amount, 75037);
   assert.equal(result.reference, "TRX-ABC-123");
   assert.equal("paid" in result, false);
+  const uncertain = evaluateQrisReceipt({
+    expectedAmount: 75037, merchantName: "SEITON.ID",
+    createdAt: new Date(Date.now() - 60_000).toISOString()
+  }, {
+    amount: 75037, merchant_name: "SEITON ID",
+    transaction_datetime: new Date().toISOString(), confidence: 0.3
+  });
+  assert.equal(uncertain.status, "REVIEW");
   const mismatch = evaluateQrisReceipt({
     expectedAmount: 75037, merchantName: "SEITON.ID",
     createdAt: new Date(Date.now() - 60_000).toISOString()
