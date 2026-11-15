@@ -1,44 +1,43 @@
-# Dynamic QRIS — Seiton Core + Midtrans
+# Internal QRIS + unique-code receipt verification — Seiton Core
 
-The Worker contains a first-party EMV TLV/CRC16 QRIS module and a direct Midtrans HTTP adapter. No third-party QRIS SDK is required.
+Seiton checkout composes a transaction-specific QRIS MPM payload from the merchant's own acquirer-issued static QRIS template. It does not request a charge from Midtrans or another payment gateway.
 
-## Runtime settings
+## Worker configuration
 
-- QRIS_DYNAMIC_ENABLED=false (keep closed until sandbox and live checks pass)
-- MIDTRANS_ENV=sandbox for testing, production for live
-- MIDTRANS_QRIS_ACQUIRER=gopay (or airpay_shopee, if enabled for this merchant)
-- MIDTRANS_SERVER_KEY — Cloudflare Worker Secret. Never commit this value or send it in chat.
+Configure the Cloudflare Worker `seiton-order-bot`:
 
-## Merchant setup gate
+- `QRIS_INTERNAL_ENABLED=true` — keep false until the acquirer confirms this static-template-to-dynamic issuance flow is supported.
+- `QRIS_STATIC_PAYLOAD` — exact EMVCo/QRIS payload decoded from Seiton.id's own static merchant QR. Store as a Cloudflare Worker Secret; never commit it or send it in chat.
+- Add Workers AI binding named `AI`. Receipt image extraction uses `@cf/moondream/moondream3.1-9B-A2B`.
 
-The merchant must own an activated Midtrans merchant account, enable QRIS for the selected acquirer, and use that merchant's Server Key. Configure this public HTTPS endpoint as the Payment Notification URL in the Midtrans Dashboard:
+The Worker validates the static payload CRC, merchant-account information, country/currency, and static point-of-initiation before exposing QRIS checkout. Each order receives a random three-digit unique suffix (`001`–`999`); exact expected amount is base order total plus that suffix. D1 enforces globally unique expected amounts so the same amount is never assigned to a second order.
 
-https://<worker-hostname>/webhooks/midtrans
+## Checkout and evidence flow
 
-The Worker validates the Midtrans SHA-512 signature_key, order ID, QRIS payment type, currency, exact amount, and provider transaction mapping before marking an order paid.
+1. The customer creates a QRIS order.
+2. The Worker changes point-of-initiation to `12`, inserts tag `54` with the exact expected amount, and recalculates tag `63` CRC16/CCITT-FALSE.
+3. The QR payload is rendered to PNG and sent in Telegram, along with base total, unique code, and exact transfer amount.
+4. The customer uploads a screenshot as a Telegram photo or image document. PDF remains accepted but routes to manual review because the configured vision model accepts images, not raw PDF files.
+5. Workers AI extracts visible amount, merchant, transaction timestamp, and reference. Deterministic server code compares them to the D1 order and rejects re-use of evidence or transaction references.
+6. Admin sees both the original evidence and OCR assessment, then checks the merchant account's actual transaction history before approving and issuing a pickup receipt.
 
-## Flow
+## Important security boundaries
 
-1. Telegram displays QRIS only when the feature flag and Server Key are configured.
-2. The Worker creates the order, requests a transaction from Midtrans, and stores the provider transaction mapping in D1.
-3. The Worker retrieves the provider QR image server-side and sends it to Telegram.
-4. The provider webhook, or a customer status refresh using the authenticated Status API, updates the payment.
-5. Only a verified settlement for the exact order and amount triggers automatic order approval, receipt generation, and digital fulfillment.
+- OCR does **not** prove settlement. Screenshots may be edited. Even `OCR_MATCHED` is only a screening state and never changes the order to `PAID`.
+- Only admin approval after verifying the merchant's actual transaction history changes the order to paid.
+- Unreadable/uncertain/mismatched OCR is routed to manual review; OCR does not automatically reject a customer claim.
+- The payload composer does not create acquiring rights or guarantee issuer/acquirer acceptance. Obtain confirmation from the QRIS acquirer and test the resulting dynamic payload in multiple payment apps before enabling production checkout.
+- QR PNG rendering uses QuickChart with only the QRIS payload as its input; customer name, Telegram ID, and order ID are not sent. For strict all-internal processing, replace this renderer with a bundled QR encoder before enabling the feature.
+- Moondream is a third-party vision model hosted by Cloudflare Workers AI; OCR may misread cropped, blurred, or small text. The evidence itself remains retrievable from Telegram via its file ID.
 
-## Internal QRIS core
+## Release order
 
-buildDynamicQrisPayload() validates an acquirer-issued static MPM merchant template, changes point of initiation to dynamic MPM, inserts or replaces the exact transaction amount, and recalculates CRC16/CCITT-FALSE.
+1. Pass CI and tests.
+2. Apply `migrations/0011_qris_payments.sql` to `seiton-transactions-prod`.
+3. Add the Workers AI binding named `AI`.
+4. Store `QRIS_STATIC_PAYLOAD` as a Worker Secret and leave `QRIS_INTERNAL_ENABLED=false`.
+5. Obtain acquirer confirmation for static-to-dynamic payload issuance.
+6. Test exact amount, merchant credit, and receipt matching using small transactions and different issuer apps.
+7. Only after the checks above, set `QRIS_INTERNAL_ENABLED=true`.
 
-This is a local payload composer and validator. It does not create merchant acquiring rights, settle money, or replace the merchant's acquirer. Do not use it to alter a third-party QR payload without written/acquirer approval. The actual checkout QR must be issued by Midtrans and the actual settlement must be confirmed by its authenticated notification/status API.
-
-## Deployment sequence
-
-1. Pass CI and unit tests.
-2. Apply migrations/0011_qris_payments.sql to the production D1 database during the release window.
-3. Add MIDTRANS_SERVER_KEY as a Worker Secret and configure non-secret settings.
-4. Configure the public notification URL in the Midtrans Dashboard.
-5. Keep QRIS_DYNAMIC_ENABLED=false while testing in sandbox.
-6. Verify provider settlement, expiry, wrong-amount rejection, and duplicate webhook delivery.
-7. Switch to production credentials and activate only after a small real transaction has been reconciled in the Midtrans Dashboard.
-
-No live payment transaction can be created without the merchant's own credentials and approved QRIS acquirer configuration.
+No QRIS option appears while the feature flag is disabled or the static payload is absent/invalid.

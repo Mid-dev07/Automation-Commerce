@@ -151,6 +151,122 @@ export function buildDynamicQrisPayload(staticPayload, amount) {
   return dynamicPayload;
 }
 
+
+/** Internal Seiton QRIS issuance gate. */
+export function isInternalQrisConfigured(env) {
+  if (String(env?.QRIS_INTERNAL_ENABLED || "false").toLowerCase() !== "true") return false;
+  const template = clean(env?.QRIS_STATIC_PAYLOAD, 4096);
+  if (!template) return false;
+  try {
+    const parsed = parseQrisPayload(template);
+    return parsed.pointOfInitiation === "11"
+      && Boolean(parsed.merchantName)
+      && parsed.values["53"] === "360"
+      && parsed.values["58"] === "ID"
+      && parsed.fields.some(field => Number(field.tag) >= 26 && Number(field.tag) <= 51);
+  } catch {
+    return false;
+  }
+}
+
+export function extractQrisMerchantProfile(payload) {
+  const parsed = parseQrisPayload(payload);
+  return {
+    merchantName: clean(parsed.merchantName, 80),
+    merchantCity: clean(parsed.merchantCity, 80),
+    country: clean(parsed.values["58"], 2),
+    currency: clean(parsed.values["53"], 3)
+  };
+}
+
+export function generateQrisUniqueCode() {
+  const random = new Uint32Array(1);
+  crypto.getRandomValues(random);
+  return String((random[0] % 999) + 1).padStart(3, "0");
+}
+
+export function parseReceiptAmount(value) {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  let text = String(value ?? "").trim().replace(/^(?:IDR|RP)\s*/i, "").replace(/\s/g, "");
+  if (!text) return null;
+  if (/^\d{1,3}(?:\.\d{3})+(?:,\d{1,2})?$/.test(text)) {
+    const decimal = text.split(",")[1];
+    if (decimal && !/^0{1,2}$/.test(decimal)) return null;
+    text = text.replace(/\./g, "").split(",")[0];
+  } else if (/^\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?$/.test(text)) {
+    const decimal = text.split(".")[1];
+    if (decimal && !/^0{1,2}$/.test(decimal)) return null;
+    text = text.replace(/,/g, "").split(".")[0];
+  } else if (/^\d+(?:[,.]\d{1,2})$/.test(text)) {
+    const decimal = text.slice(-2);
+    if (!/^0{1,2}$/.test(decimal)) return null;
+    text = text.slice(0, -3);
+  }
+  if (!/^\d+$/.test(text)) return null;
+  const amount = Number(text);
+  return Number.isSafeInteger(amount) && amount >= 0 ? amount : null;
+}
+
+function receiptDate(value) {
+  let text = clean(value, 100);
+  if (!text) return null;
+  text = text.replace(/\bWIB\b/i, "+07:00").replace(/\bWITA\b/i, "+08:00").replace(/\bWIT\b/i, "+09:00");
+  const idDate = text.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})[ ,]+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (idDate) {
+    const [,day,month,year,hour,minute,second="00"] = idDate;
+    const zone = text.includes("+") ? text.slice(text.lastIndexOf("+")) : "+07:00";
+    text = year+"-"+month.padStart(2,"0")+"-"+day.padStart(2,"0")+"T"+hour.padStart(2,"0")+":"+minute+":"+second+zone;
+  } else if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(text) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(text)) {
+    text = text.replace(" ","T") + "+07:00";
+  }
+  const millis = Date.parse(text);
+  return Number.isFinite(millis) ? new Date(millis).toISOString() : null;
+}
+
+function normalizedMerchantTokens(value) {
+  return String(value ?? "").toUpperCase().replace(/[^A-Z0-9]+/g, " ")
+    .split(/\s+/)
+    .filter(token => token.length >= 3 && !["TOKO","PT","CV","TBK","IDR","INDONESIA"].includes(token));
+}
+
+/** Extracted fields are a screening signal only, never proof of settlement. */
+export function evaluateQrisReceipt(expected, extracted) {
+  const expectedAmount = Number(expected?.expectedAmount);
+  const actualAmount = parseReceiptAmount(extracted?.amount);
+  const expectedMerchant = clean(expected?.merchantName, 100);
+  const actualMerchant = clean(extracted?.merchant_name || extracted?.merchantName, 100);
+  const expectedTokens = normalizedMerchantTokens(expectedMerchant);
+  const actualTokens = new Set(normalizedMerchantTokens(actualMerchant));
+  const overlap = expectedTokens.filter(token => actualTokens.has(token)).length;
+  const merchantStatus = !actualMerchant || !expectedTokens.length ? "UNKNOWN"
+    : overlap === expectedTokens.length ? "MATCHED" : overlap === 0 ? "MISMATCH" : "UNCERTAIN";
+  const extractedAt = receiptDate(extracted?.transaction_datetime || extracted?.transaction_at || extracted?.date);
+  const createdAt = Date.parse(String(expected?.createdAt || ""));
+  const timestampStatus = !extractedAt || !Number.isFinite(createdAt) ? "UNKNOWN"
+    : Date.parse(extractedAt) < createdAt - 5 * 60 * 1000 || Date.parse(extractedAt) > Date.now() + 5 * 60 * 1000
+      ? "MISMATCH" : "MATCHED";
+  const confidence = Number(extracted?.confidence);
+  const reasons = [];
+  if (actualAmount === null) reasons.push("AMOUNT_NOT_READ");
+  else if (actualAmount !== expectedAmount) reasons.push("AMOUNT_MISMATCH");
+  if (merchantStatus === "MISMATCH") reasons.push("MERCHANT_MISMATCH");
+  else if (merchantStatus !== "MATCHED") reasons.push("MERCHANT_UNCERTAIN");
+  if (timestampStatus === "MISMATCH") reasons.push("TIMESTAMP_OUT_OF_RANGE");
+  else if (timestampStatus !== "MATCHED") reasons.push("TIMESTAMP_NOT_READ");
+  let status = "REVIEW";
+  if (actualAmount !== null && actualAmount !== expectedAmount) status = "MISMATCH";
+  else if (merchantStatus === "MISMATCH" || timestampStatus === "MISMATCH") status = "MISMATCH";
+  else if (actualAmount === expectedAmount && merchantStatus === "MATCHED" && timestampStatus === "MATCHED"
+    && confidence !== null && confidence >= 0.65) status = "MATCHED";
+  return {
+    status, amount: actualAmount, merchantName: actualMerchant, merchantStatus,
+    transactionAt: extractedAt, timestampStatus,
+    reference: clean(extracted?.transaction_reference || extracted?.reference, 120),
+    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence)) : null,
+    reasons
+  };
+}
+
 export function normalizeMidtransStatus(status) {
   const value = String(status ?? "").trim().toLowerCase();
   if (value === "settlement") return "PAID";
