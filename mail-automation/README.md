@@ -28,3 +28,6 @@ Alias creation idempotency and hourly quota are scoped by `token_hash`; one mach
 
 ## Release boundary
 This branch is source/code work only. No production Worker, D1 migration, secret, service binding, DNS, or Email Routing configuration has been changed. Before release, reconcile bindings and secret names, run CI, deploy to a preview/staging environment, and perform authenticated desktop/mobile UAT plus a controlled inbound-email test.
+
+## Known schema constraint
+The current production schema defines `mail_machine_aliases.client_ref` as globally UNIQUE, not UNIQUE per `token_hash`. The application lookup and hourly quota are token-hash scoped, but a future second machine token using the same client reference could still hit a database uniqueness conflict. This is not an authorization bypass; it is a multi-token compatibility limitation. Do not claim multi-token isolation until a reviewed D1 table-rebuild migration changes the constraint to `UNIQUE(token_hash, client_ref)` and passes migration tests. No migration has been applied.
