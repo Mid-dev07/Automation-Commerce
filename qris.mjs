@@ -245,6 +245,7 @@ export function evaluateQrisReceipt(expected, extracted) {
   const timestampStatus = !extractedAt || !Number.isFinite(createdAt) ? "UNKNOWN"
     : Date.parse(extractedAt) < createdAt - 5 * 60 * 1000 || Date.parse(extractedAt) > Date.now() + 5 * 60 * 1000
       ? "MISMATCH" : "MATCHED";
+  const confidence = Number(extracted?.confidence);
   const reasons = [];
   if (actualAmount === null) reasons.push("AMOUNT_NOT_READ");
   else if (actualAmount !== expectedAmount) reasons.push("AMOUNT_MISMATCH");
@@ -257,7 +258,6 @@ export function evaluateQrisReceipt(expected, extracted) {
   else if (merchantStatus === "MISMATCH" || timestampStatus === "MISMATCH") status = "MISMATCH";
   else if (actualAmount === expectedAmount && merchantStatus === "MATCHED" && timestampStatus === "MATCHED"
     && confidence !== null && confidence >= 0.65) status = "MATCHED";
-  const confidence = Number(extracted?.confidence);
   return {
     status, amount: actualAmount, merchantName: actualMerchant, merchantStatus,
     transactionAt: extractedAt, timestampStatus,
