@@ -232,6 +232,9 @@ export default {
     if (request.method === "GET" && url.pathname === "/api/admin/data") {
       return handleAdminDashboardData(request, env);
     }
+    if (request.method === "GET" && url.pathname === "/api/admin/bot/diagnostics") {
+      return handleAdminBotDiagnostics(request, env);
+    }
     if (request.method === "GET" && url.pathname === "/api/admin/activity-audit") {
       return handleAdminActivityAudit(request, env);
     }
@@ -2505,6 +2508,79 @@ async function handleAdminPaymentProof(request, env) {
   if(!file.ok)return json({ok:false,error:"Gagal mengunduh bukti pembayaran dari Telegram."},502);
   const type=String(found.row[15]||"")==="PHOTO"?"image/jpeg":(file.headers.get("content-type")||"application/octet-stream");
   return new Response(file.body,{headers:{"Content-Type":type,"Content-Disposition":"inline; filename=\"payment-proof\"","Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"}});
+}
+
+async function handleAdminBotDiagnostics(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) {
+    return json({ ok: false, error: "Sesi admin tidak valid atau kedaluwarsa." }, 401);
+  }
+  const checkedAt = new Date().toISOString();
+  const expectedWebhookUrl = "https://automate-bot.seiton.biz.id/telegram";
+  const state = await transactionReadiness(env);
+  const diagnostics = {
+    ok: true,
+    service: "seiton-order-bot",
+    checked_at: checkedAt,
+    worker: { status: "HEALTHY", transaction_store: state.ready ? "READY" : state.configured ? "MIGRATION_REQUIRED" : "LEGACY" },
+    telegram: { reachable: false, webhook_configured: false, pending_update_count: null, bot_name: "", username: "", last_error_date: null, last_error_message: "" },
+    catalog: { total: 0, active: 0, inactive: 0, stock_units: 0 },
+    orders: { total: 0, today: 0, pending_payment: 0, pending_verification: 0 }
+  };
+  if (!state.ready) diagnostics.worker.status = "DEGRADED";
+  const [meResult, webhookResult, catalogResult, orderResult] = await Promise.allSettled([
+    env.TELEGRAM_TOKEN
+      ? fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/getMe")
+      : Promise.reject(new Error("TELEGRAM_TOKEN_MISSING")),
+    env.TELEGRAM_TOKEN
+      ? fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/getWebhookInfo")
+      : Promise.reject(new Error("TELEGRAM_TOKEN_MISSING")),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total, " +
+      "COALESCE(SUM(CASE WHEN active=1 THEN 1 ELSE 0 END),0) AS active, " +
+      "COALESCE(SUM(CASE WHEN active=0 THEN 1 ELSE 0 END),0) AS inactive, " +
+      "COALESCE(SUM(CASE WHEN active=1 AND stock IS NOT NULL THEN stock ELSE 0 END),0) AS stock_units " +
+      "FROM catalog_products"
+    ).first(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total, " +
+      "COALESCE(SUM(CASE WHEN substr(created_at,1,10)=? THEN 1 ELSE 0 END),0) AS today, " +
+      "COALESCE(SUM(CASE WHEN status='MENUNGGU_PEMBAYARAN' THEN 1 ELSE 0 END),0) AS pending_payment, " +
+      "COALESCE(SUM(CASE WHEN payment_confirmation_status='MENUNGGU_VERIFIKASI' THEN 1 ELSE 0 END),0) AS pending_verification " +
+      "FROM orders"
+    ).bind(localDateKey(checkedAt)).first()
+  ]);
+  if (meResult.status === "fulfilled") {
+    const response = meResult.value;
+    const body = await response.json().catch(() => ({}));
+    diagnostics.telegram.reachable = Boolean(response.ok && body.ok && body.result?.is_bot);
+    diagnostics.telegram.bot_name = String(body.result?.first_name || "").slice(0,80);
+    diagnostics.telegram.username = String(body.result?.username || "").slice(0,80);
+  }
+  if (webhookResult.status === "fulfilled") {
+    const response = webhookResult.value;
+    const body = await response.json().catch(() => ({}));
+    if (response.ok && body.ok) {
+      const info = body.result || {};
+      const webhookUrl = String(info.url || "");
+      diagnostics.telegram.webhook_configured = webhookUrl === expectedWebhookUrl;
+      diagnostics.telegram.pending_update_count = Number(info.pending_update_count || 0);
+      diagnostics.telegram.last_error_date = info.last_error_date ? Number(info.last_error_date) : null;
+      diagnostics.telegram.last_error_message = String(info.last_error_message || "").slice(0,240);
+      diagnostics.telegram.webhook_host = (() => { try { return webhookUrl ? new URL(webhookUrl).host : ""; } catch { return ""; } })();
+    }
+  }
+  if (catalogResult.status === "fulfilled" && catalogResult.value) {
+    for (const key of ["total","active","inactive","stock_units"]) diagnostics.catalog[key] = Number(catalogResult.value[key] || 0);
+  } else {
+    diagnostics.worker.status = "DEGRADED";
+  }
+  if (orderResult.status === "fulfilled" && orderResult.value) {
+    for (const key of ["total","today","pending_payment","pending_verification"]) diagnostics.orders[key] = Number(orderResult.value[key] || 0);
+  } else {
+    diagnostics.worker.status = "DEGRADED";
+  }
+  if (!diagnostics.telegram.reachable || !diagnostics.telegram.webhook_configured) diagnostics.worker.status = "DEGRADED";
+  return json(diagnostics);
 }
 
 async function handleAdminDashboardData(request, env) {
