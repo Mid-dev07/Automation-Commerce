@@ -176,6 +176,66 @@ async function dispatchSheetsMirrorOutbox(env, limit = 20) {
   }
   return {claimed:events.length,delivered,retried,failed};
 }
+async function dispatchOperationalAlerts(env) {
+  if (String(env.OPERATIONAL_ALERTS_ENABLED || "false").toLowerCase() !== "true") {
+    return { enabled:false, sent:0 };
+  }
+  if (!env.DB) return { enabled:true, sent:0, reason:"D1_BINDING_MISSING" };
+  const checkedAt = Date.now();
+  const twoHoursAgo = new Date(checkedAt - 2 * 60 * 60 * 1000).toISOString();
+  const [mirrorResult, stalledMirrorResult, paymentResult] = await Promise.all([
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM outbox WHERE status='FAILED' " +
+      "AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR')"
+    ).first(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM outbox WHERE status IN ('PENDING','PROCESSING') " +
+      "AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR') AND attempts>=5 " +
+      "AND julianday('now')-julianday(created_at)>=(1.0/24.0)"
+    ).first(),
+    env.DB.prepare(
+      "SELECT COUNT(*) AS total FROM orders WHERE payment_confirmation_status='MENUNGGU_VERIFIKASI' " +
+      "AND payment_requested_at<>'' AND julianday('now')-julianday(payment_requested_at)>=(2.0/24.0)"
+    ).first()
+  ]);
+  const alerts = [
+    { key:"failed_mirror", count:Number(mirrorResult?.total||0),
+      message:"⚠️ Seiton: ada "+Number(mirrorResult?.total||0)+" pekerjaan mirror Google Sheets berstatus FAILED. D1 tetap sumber data utama; periksa antrean dan rekonsiliasi SKU sebelum retry." },
+    { key:"stalled_mirror", count:Number(stalledMirrorResult?.total||0),
+      message:"⚠️ Seiton: ada "+Number(stalledMirrorResult?.total||0)+" pekerjaan mirror yang masih PENDING/PROCESSING setelah ≥5 percobaan dan ≥1 jam. Periksa antrean serta cocokkan SKU dengan Sheets sebelum retry." },
+    { key:"stale_payment_review", count:Number(paymentResult?.total||0),
+      message:"⏳ Seiton: ada "+Number(paymentResult?.total||0)+" verifikasi pembayaran menunggu lebih dari 2 jam. Cocokkan mutasi merchant/bank sebelum mengambil tindakan." }
+  ].filter(item=>item.count>0);
+  const admins=String(env.ADMIN_CHAT_ID||"").split(",").map(v=>v.trim()).filter(Boolean);
+  if (!admins.length || !alerts.length) return { enabled:true, sent:0, pending:alerts.length };
+  const cooldownMs=6*60*60*1000;
+  let sent=0;
+  for (const alert of alerts) {
+    const previous=await env.DB.prepare(
+      "SELECT last_sent_at_ms FROM operational_alert_state WHERE alert_key=?"
+    ).bind(alert.key).first();
+    if (previous && checkedAt-Number(previous.last_sent_at_ms)<cooldownMs) continue;
+    let failures=0;
+    for (const adminId of admins) {
+      try { await sendTelegram(env,adminId,alert.message); }
+      catch(error) {
+        failures++;
+        console.warn(JSON.stringify({level:"warn",event:"operational_alert_delivery",alert_key:alert.key,
+          message:String(error?.message||"TELEGRAM_DELIVERY_FAILED").slice(0,160)}));
+      }
+    }
+    if (failures===0) {
+      await env.DB.prepare(
+        "INSERT INTO operational_alert_state(alert_key,last_sent_at_ms,last_value,updated_at_ms) VALUES(?,?,?,?) " +
+        "ON CONFLICT(alert_key) DO UPDATE SET last_sent_at_ms=excluded.last_sent_at_ms," +
+        "last_value=excluded.last_value,updated_at_ms=excluded.updated_at_ms"
+      ).bind(alert.key,checkedAt,alert.count,checkedAt).run();
+      sent++;
+    }
+  }
+  return { enabled:true, sent, pending:alerts.length };
+}
+
 async function mirrorTransactionalProduct(env, product) {
   try {
     const range = "Katalog_Produk!A2:G";
@@ -212,6 +272,12 @@ export default {
     }
     const state = await transactionReadiness(env);
     if (!state.ready) return;
+    try {
+      const alerts = await dispatchOperationalAlerts(env);
+      if (alerts.sent) console.log(JSON.stringify({level:"info",event:"operational_alerts_sent",cron:controller.cron,...alerts}));
+    } catch(error) {
+      console.warn(JSON.stringify({level:"warn",event:"operational_alerts_failed",message:String(error?.message||error).slice(0,200)}));
+    }
     const result = await dispatchSheetsMirrorOutbox(env, 20);
     if (result.claimed) {
       console.log(JSON.stringify({level:"info",event:"sheet_mirror_outbox_batch",cron:controller.cron,...result}));
@@ -2703,10 +2769,11 @@ async function handleAdminBotDiagnostics(request, env) {
     worker: { status: "HEALTHY", transaction_store: state.ready ? "READY" : state.configured ? "MIGRATION_REQUIRED" : "LEGACY" },
     telegram: { reachable: false, webhook_configured: false, pending_update_count: null, bot_name: "", username: "", last_error_date: null, last_error_message: "" },
     catalog: { total: 0, active: 0, inactive: 0, stock_units: 0 },
-    orders: { total: 0, today: 0, pending_payment: 0, pending_verification: 0 }
+    orders: { total: 0, today: 0, pending_payment: 0, pending_verification: 0 },
+    operations: { failed_mirror_outbox: 0, stalled_mirror_outbox: 0, stale_payment_verification: 0 }
   };
   if (!state.ready) diagnostics.worker.status = "DEGRADED";
-  const [meResult, webhookResult, catalogResult, orderResult] = await Promise.allSettled([
+  const [meResult, webhookResult, catalogResult, orderResult, operationsResult] = await Promise.allSettled([
     env.TELEGRAM_TOKEN
       ? fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/getMe")
       : Promise.reject(new Error("TELEGRAM_TOKEN_MISSING")),
@@ -2726,7 +2793,16 @@ async function handleAdminBotDiagnostics(request, env) {
       "COALESCE(SUM(CASE WHEN status='MENUNGGU_PEMBAYARAN' THEN 1 ELSE 0 END),0) AS pending_payment, " +
       "COALESCE(SUM(CASE WHEN payment_confirmation_status='MENUNGGU_VERIFIKASI' THEN 1 ELSE 0 END),0) AS pending_verification " +
       "FROM orders"
-    ).bind(localDateKey(checkedAt)).first()
+    ).bind(localDateKey(checkedAt)).first(),
+    env.DB.prepare(
+      "SELECT " +
+      "(SELECT COUNT(*) FROM outbox WHERE status='FAILED' AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR')) AS failed_mirror_outbox, " +
+      "(SELECT COUNT(*) FROM outbox WHERE status IN ('PENDING','PROCESSING') " +
+      "AND event_type IN ('SHEET_MIRROR','CATALOG_MIRROR') AND attempts>=5 " +
+      "AND julianday('now')-julianday(created_at)>=(1.0/24.0)) AS stalled_mirror_outbox, " +
+      "(SELECT COUNT(*) FROM orders WHERE payment_confirmation_status='MENUNGGU_VERIFIKASI' " +
+      "AND payment_requested_at<>'' AND julianday('now')-julianday(payment_requested_at)>=(2.0/24.0)) AS stale_payment_verification"
+    ).first()
   ]);
   if (meResult.status === "fulfilled") {
     const response = meResult.value;
@@ -2755,6 +2831,13 @@ async function handleAdminBotDiagnostics(request, env) {
   }
   if (orderResult.status === "fulfilled" && orderResult.value) {
     for (const key of ["total","today","pending_payment","pending_verification"]) diagnostics.orders[key] = Number(orderResult.value[key] || 0);
+  } else {
+    diagnostics.worker.status = "DEGRADED";
+  }
+  if (operationsResult.status === "fulfilled" && operationsResult.value) {
+    diagnostics.operations.failed_mirror_outbox = Number(operationsResult.value.failed_mirror_outbox || 0);
+    diagnostics.operations.stalled_mirror_outbox = Number(operationsResult.value.stalled_mirror_outbox || 0);
+    diagnostics.operations.stale_payment_verification = Number(operationsResult.value.stale_payment_verification || 0);
   } else {
     diagnostics.worker.status = "DEGRADED";
   }
