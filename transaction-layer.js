@@ -658,7 +658,7 @@ export async function claimSheetMirrorOutbox(env, limit = 20) {
           OR (status='PROCESSING' AND available_at<=?))
       ORDER BY id LIMIT ?
     )
-    RETURNING id,aggregate_id,payload_json,attempts`)
+    RETURNING id,event_type,aggregate_id,payload_json,attempts`)
     .bind(leaseUntil,now,now,Math.min(50,Math.max(1,Number(limit)||20))).all();
   return result.results || [];
 }

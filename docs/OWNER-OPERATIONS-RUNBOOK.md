@@ -132,7 +132,11 @@ A follow-up read-only query of `seiton-transactions-prod` confirmed five failed 
 | 16 | `MUSE-BISNIS` | Present, active |
 | 17 | `OTP-SETUP` | Present, active |
 
-The authoritative D1 rows and outbox records were read successfully. The corresponding Google Sheets rows were not read during this inspection. Therefore, the cause of each failure is not yet proven, and **none of these five rows was reset or retried**.
+The authoritative D1 rows and outbox records were read successfully. The corresponding Google Sheets rows were not read during this inspection. Therefore, the cause of each failure is not yet proven from Sheets evidence, and **none of these five rows was reset or retried**.
+
+A later read-only Worker Observability query on 15 November 2026 found repeated `sheet_mirror_retry` log entries for all five SKUs. The recorded error was `Order untuk event mirror tidak ditemukan.` Source inspection identified the cause: `claimSheetMirrorOutbox()` updated and claimed the rows but its SQL `RETURNING` list omitted `event_type`; `dispatchSheetsMirrorOutbox()` relies on that field to distinguish `CATALOG_MIRROR` from `SHEET_MIRROR`. The missing field made catalog events take the order lookup path, which could never find a checkout order whose ID equaled the product SKU.
+
+A source fix is under review in branch `fix/sheet-mirror-event-type-claim`: include `event_type` in the claimed result and add a regression assertion. This change is not active in production until CI passes, the pull request is merged, and the Order Worker is deployed. Do not retry the five failed records until that release is deployed and the sheet duplicate checks below are complete. The error is a dispatch bug; it does not establish that the corresponding Sheet rows are missing or corrupt.
 
 Safe reconciliation procedure:
 1. Read `Katalog_Produk!A2:G` from the reporting Sheet and count every occurrence of each SKU.

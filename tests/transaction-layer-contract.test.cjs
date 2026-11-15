@@ -139,6 +139,10 @@ test("scheduled dispatcher retries Sheets mirror and recovers orphaned append", 
   assert.match(worker, /dispatchSheetsMirrorOutbox\(env, 20\)/);
   assert.match(worker, /recoverAppend: true/);
   assert.match(worker, /Pesanan!A2:A/);
+  const claimStart=layer.indexOf("export async function claimSheetMirrorOutbox");
+  const claimEnd=layer.indexOf("\nexport async function completeSheetMirrorOutbox",claimStart);
+  assert.ok(claimStart>=0&&claimEnd>claimStart,"outbox claim function must exist");
+  assert.match(layer.slice(claimStart,claimEnd),/RETURNING id,event_type,aggregate_id,payload_json,attempts/);
 });
 
 test("Wrangler config schedules outbox delivery every five minutes", () => {
