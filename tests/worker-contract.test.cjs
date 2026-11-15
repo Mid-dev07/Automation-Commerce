@@ -279,6 +279,35 @@ test("QRIS checkout uses internal static-payload composition and unique-code rec
   assert.match(worker, /UPDATE qris_payments SET status='PAID'/);
 });
 
+test("customer catalog shows unavailable products but only provides purchase buttons for sellable items", () => {
+  assert.match(worker, /function customerCatalogProducts\(rows\)/);
+  assert.match(worker, /function customerProductCanBeOrdered\(row\)/);
+  assert.match(worker, /NONAKTIF/);
+  assert.match(worker, /STOK HABIS/);
+  assert.match(worker, /Produk nonaktif\/stok habis tidak dapat dibeli/);
+  assert.match(worker, /customerCatalogProducts\(rows\)/);
+});
+
+test("Telegram product management uses durable step-by-step form drafts instead of pipe-separated fields", () => {
+  assert.match(worker, /async function promptAdminProduct/);
+  assert.match(worker, /async function handleAdminProductWizardReply/);
+  assert.match(worker, /async function handleAdminProductWizardConfirm/);
+  assert.match(worker, /admin_product_drafts/);
+  assert.match(worker, /FIELD=/);
+  assert.match(worker, /callback_data:"adm:productform:save:"\+formId/);
+  assert.doesNotMatch(worker, /String\(input \|\| ""\)\.split\("\\|"/);
+  assert.doesNotMatch(worker, /Kirim satu pesan dengan 7 kolom dipisahkan tanda/);
+});
+
+test("QRIS checkout presents dynamic mode first and static manual amount fallback", () => {
+  assert.match(worker, /getQrisCheckoutMode\(env\)/);
+  assert.match(worker, /STATIC_FALLBACK/);
+  assert.match(worker, /QRIS STATIS SEITON\.ID/);
+  assert.match(worker, /TRANSFER PERSIS:/);
+  assert.match(worker, /qris_mode/);
+  assert.match(worker, /QRIS \(Nominal Manual\)/);
+});
+
 test("customers can re-display their own active dynamic QRIS from Pesanan Saya", () => {
   assert.match(worker, /async function handleQrisPaymentShow\(env, message, chatId, userId, orderId\)/);
   assert.match(worker, /data\.startsWith\("qris:show:"\)/);
