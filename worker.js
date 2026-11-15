@@ -27,6 +27,7 @@ import {
   storeMuseBusinessSetupD1,
   getMuseBusinessSetupD1
 } from "./digital-products.mjs";
+import { resolveCatalogMirrorAction } from "./catalog-mirror.js";
 import {
   processMessagingEvent,
   claimMessagingOutbox,
@@ -238,16 +239,24 @@ async function dispatchOperationalAlerts(env) {
 
 async function mirrorTransactionalProduct(env, product) {
   try {
-    const range = "Katalog_Produk!A2:G";
-    const rows = await readSheet(env, range);
-    const index = rows.findIndex(r => String(r[0] || "").trim().toUpperCase() === String(product.sku).toUpperCase());
+    const rows = await readSheet(env, "Katalog_Produk!A2:G");
+    const decision = resolveCatalogMirrorAction(rows, product?.sku);
+    if (decision.action === "INVALID") {
+      throw new Error("SKU katalog tidak valid; sinkronisasi dihentikan.");
+    }
+    if (decision.action === "DUPLICATE") {
+      throw new Error("SKU duplikat ditemukan pada baris Sheets: " + decision.rowNumbers.join(", ") + ". Rekonsiliasi manual diperlukan.");
+    }
     const values = [[product.sku,product.name,product.price,product.stock == null ? "" : product.stock,
       Boolean(product.active),product.photo_url || "",product.description || ""]];
-    if (index >= 0) await updateSheetRange(env,"Katalog_Produk!A"+(index+2)+":G"+(index+2),values);
-    else await appendSheetRows(env,"Katalog_Produk!A:G",values);
+    if (decision.action === "UPDATE") {
+      await updateSheetRange(env,"Katalog_Produk!A"+decision.rowNumber+":G"+decision.rowNumber,values);
+    } else {
+      await appendSheetRows(env,"Katalog_Produk!A:G",values);
+    }
     return true;
   } catch(error) {
-    console.warn(JSON.stringify({level:"warn",event:"catalog_sheet_mirror",sku:product.sku,message:error.message}));
+    console.warn(JSON.stringify({level:"warn",event:"catalog_sheet_mirror",sku:product?.sku||"",message:error.message}));
     return false;
   }
 }
