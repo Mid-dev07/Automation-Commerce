@@ -2407,13 +2407,15 @@ function orderConfirmationKeyboard(order) {
   const buttons = [];
   const method = String(order.paymentMethod || "").toUpperCase();
   if (method === "QRIS") {
-    buttons.push([{ text: "🔄 Periksa Pembayaran QRIS", callback_data: "qris:check:" + order.orderId }]);
+    buttons.push([{ text: "📎 Upload Bukti Pembayaran", callback_data: "pc:req:" + order.orderId }]);
+    buttons.push([{ text: "🔄 Periksa Status", callback_data: "qris:check:" + order.orderId }]);
   } else if (method !== "COD") {
     buttons.push([{ text: "💳 Saya Sudah Bayar — Minta Verifikasi", callback_data: "pc:req:" + order.orderId }]);
   }
   buttons.push([{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]);
   return { inline_keyboard: buttons };
 }
+
 function paymentProofPrompt(orderId) {
   return [
     "🧾 BUKTI PEMBAYARAN SEITON",
@@ -2643,7 +2645,9 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
   const method = String(r[11] || "").trim().toUpperCase();
   if (method === "COD") throw new Error("Pesanan COD dibayar saat pengambilan dan tidak memakai verifikasi pembayaran online.");
   if (method === "QRIS" && isInternalQrisConfigured(env)) {
-    throw new Error("Pembayaran QRIS dinamis dipantau otomatis. Gunakan tombol Periksa Pembayaran QRIS; bukti manual tidak diperlukan.");
+    const payment = await getQrisPaymentForOrder(env, orderId);
+    if (!payment) throw new Error("QRIS pesanan belum dibuat. Tampilkan QR pembayaran terlebih dahulu.");
+    if (payment.status === "PAID") throw new Error("Pembayaran pesanan ini sudah disetujui.");
   }
   if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Metode pembayaran tidak didukung untuk verifikasi online.");
   if (PAID_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase()) && String(r[18] || "")) {
@@ -2701,45 +2705,141 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
   if (!found) throw new Error("Pesanan tidak ditemukan.");
   const r = found.row;
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
-  if (String(r[11] || "").toUpperCase() === "QRIS" && isInternalQrisConfigured(env)) {
-    throw new Error("Bukti QRIS dinamis diverifikasi otomatis oleh Midtrans. Gunakan tombol Periksa Pembayaran.");
-  }
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran tidak sedang menunggu verifikasi.");
-  let fileId = "", fileType = "";
+
+  let fileId = "", fileType = "", fileUniqueId = "", mimeType = "";
   if (Array.isArray(message.photo) && message.photo.length) {
     const photo = message.photo[message.photo.length - 1];
     if (Number(photo.file_size || 0) > 10 * 1024 * 1024) throw new Error("Ukuran bukti pembayaran maksimal 10 MB.");
     fileId = String(photo.file_id || "");
+    fileUniqueId = String(photo.file_unique_id || "");
     fileType = "PHOTO";
+    mimeType = "image/jpeg";
   } else if (message.document?.file_id) {
-    const mime = String(message.document.mime_type || "").toLowerCase();
+    mimeType = String(message.document.mime_type || "").toLowerCase();
     const allowedMime = ["application/pdf","image/jpeg","image/png","image/webp"];
-    if (mime && !allowedMime.includes(mime)) throw new Error("Bukti dokumen harus berupa PDF, JPG, PNG, atau WebP.");
+    if (mimeType && !allowedMime.includes(mimeType)) throw new Error("Bukti dokumen harus berupa PDF, JPG, PNG, atau WebP.");
     if (Number(message.document.file_size || 0) > 10 * 1024 * 1024) throw new Error("Ukuran bukti pembayaran maksimal 10 MB.");
     fileId = String(message.document.file_id);
+    fileUniqueId = String(message.document.file_unique_id || "");
     fileType = "DOCUMENT";
   } else {
     await sendTelegram(env, chatId, "Mohon kirim bukti sebagai foto atau dokumen dengan membalas pesan instruksi sebelumnya.");
     return;
   }
+
+  const isQris = String(r[11] || "").toUpperCase() === "QRIS" && isInternalQrisConfigured(env);
+  let qrisPayment = null;
+  if (isQris) {
+    qrisPayment = await getQrisPaymentForOrder(env, orderId);
+    if (!qrisPayment) throw new Error("Data QRIS pesanan tidak ditemukan. Hubungi admin.");
+    if (qrisPayment.receipt_file_unique_id && qrisPayment.receipt_file_unique_id === fileUniqueId) {
+      await sendTelegram(env, chatId, "ℹ️ Bukti yang sama sudah pernah diterima. Admin tetap dapat melihat hasil pemeriksaan sebelumnya.");
+      return;
+    }
+  }
+
   if (state.ready) {
     const updated = await updateProofTransactional(env,orderId,userId,fileId,fileType);
     await mirrorTransactionalOrder(env,updated);
   } else {
     await updateSheetRange(env, "Pesanan!O" + found.rowNumber + ":P" + found.rowNumber, [[fileId, fileType]]);
   }
-  await sendTelegram(env, chatId, "✅ Bukti pembayaran untuk " + orderId + " berhasil diterima. Admin akan memeriksanya.");
+
+  let ocrStatus = "NOT_RUN";
+  let ocrSummary = "OCR tidak diperlukan untuk metode pembayaran ini.";
+  if (isQris && qrisPayment) {
+    let ocr = { status: "UNAVAILABLE", extraction: {}, evaluation: null, reason: "OCR_UNAVAILABLE" };
+    try {
+      ocr = await runQrisReceiptOcr(env, fileId, mimeType);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        level: "warn", event: "qris_receipt_ocr", order_id: orderId,
+        message: String(error?.message || "OCR_FAILED").slice(0,160)
+      }));
+      ocr = { status: "REVIEW", extraction: {}, evaluation: null, reason: "OCR_PROCESSING_ERROR" };
+    }
+
+    let evaluation = ocr.evaluation;
+    if (ocr.status === "EXTRACTED") {
+      evaluation = evaluateQrisReceipt({
+        expectedAmount: Number(qrisPayment.expected_amount),
+        merchantName: String(qrisPayment.merchant_name || ""),
+        createdAt: String(qrisPayment.created_at || "")
+      }, ocr.extraction);
+      if (evaluation.reference) {
+        const duplicateRef = await env.DB.prepare(
+          "SELECT order_id FROM qris_payments WHERE ocr_reference=? AND order_id<>? LIMIT 1"
+        ).bind(evaluation.reference,orderId).first();
+        if (duplicateRef) {
+          evaluation.status = "MISMATCH";
+          evaluation.reasons.push("TRANSACTION_REFERENCE_ALREADY_USED");
+          evaluation.reference = "";
+        }
+      }
+      ocrStatus = evaluation.status;
+    } else {
+      ocrStatus = ocr.status === "UNAVAILABLE" ? "UNAVAILABLE" : "REVIEW";
+    }
+
+    const duplicateFile = fileUniqueId
+      ? await env.DB.prepare("SELECT order_id FROM qris_payments WHERE receipt_file_unique_id=? AND order_id<>? LIMIT 1")
+          .bind(fileUniqueId,orderId).first()
+      : null;
+    if (duplicateFile) {
+      ocrStatus = "MISMATCH";
+      evaluation = evaluation || { amount: null, merchantName: "", transactionAt: "", reference: "", confidence: null, reasons: [] };
+      evaluation.status = "MISMATCH";
+      evaluation.reasons.push("RECEIPT_FILE_ALREADY_USED");
+    }
+
+    const paymentStatus = ocrStatus === "MATCHED" ? "OCR_MATCHED"
+      : ocrStatus === "MISMATCH" ? "OCR_MISMATCH" : "REVIEW";
+    const extractedAmount = evaluation?.amount ?? null;
+    const extractedMerchant = evaluation?.merchantName || ocr.extraction?.merchant_name || "";
+    const extractedAt = evaluation?.transactionAt || "";
+    const extractedRef = duplicateFile ? "" : (evaluation?.reference || "");
+    const checkedAt = new Date().toISOString();
+    const resultJson = JSON.stringify({
+      status: ocrStatus,
+      reason: duplicateFile ? "RECEIPT_FILE_ALREADY_USED" : (ocr.reason || ""),
+      extraction: ocr.extraction || {},
+      evaluation: evaluation || null
+    }).slice(0, 8000);
+    await env.DB.prepare(
+      "UPDATE qris_payments SET status=?,receipt_file_id=?,receipt_file_unique_id=?,receipt_file_type=?," +
+      "receipt_uploaded_at=?,ocr_status=?,ocr_result_json=?,ocr_amount=?,ocr_merchant_name=?," +
+      "ocr_transaction_at=?,ocr_reference=?,ocr_confidence=?,ocr_checked_at=?,updated_at=? WHERE order_id=?"
+    ).bind(paymentStatus,fileId,duplicateFile ? "" : fileUniqueId,mimeType || fileType,checkedAt,
+      ocrStatus,resultJson,extractedAmount,extractedMerchant,extractedAt,extractedRef,
+      evaluation?.confidence ?? null,checkedAt,checkedAt,orderId).run();
+
+    const moneyText = extractedAmount === null ? "nominal tidak terbaca" : rupiah(extractedAmount);
+    ocrSummary = "Pembacaan otomatis: " + ocrStatus + " (" + moneyText + ").";
+    if (ocrStatus === "MATCHED") {
+      await sendTelegram(env, chatId, "✅ Bukti diterima. Pembacaan gambar menemukan nominal, merchant, dan waktu yang cocok. Admin tetap akan memastikan dana masuk sebelum pesanan disahkan.");
+    } else if (ocrStatus === "MISMATCH") {
+      await sendTelegram(env, chatId, "⚠️ Bukti diterima, tetapi pembacaan otomatis menemukan data yang tidak cocok atau bukti pernah digunakan. Admin akan memeriksa bukti dan mutasi transaksi.");
+    } else {
+      await sendTelegram(env, chatId, "✅ Bukti diterima. Sebagian data belum terbaca otomatis; admin akan memeriksanya secara manual.");
+    }
+  } else {
+    await sendTelegram(env, chatId, "✅ Bukti pembayaran untuk " + orderId + " berhasil diterima. Admin akan memeriksanya.");
+  }
+
   const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
   for (const adminId of admins) {
     try {
       await sendTelegram(env, adminId,
-        "📎 Bukti pembayaran diunggah\nPesanan: " + orderId + "\nPelanggan: " + String(r[4] || "-"),
+        "📎 Bukti pembayaran diunggah\nPesanan: " + orderId + "\nPelanggan: " + String(r[4] || "-") +
+        (isQris ? "\n" + ocrSummary + "\n⚠️ OCR bukan konfirmasi dana masuk; cocokkan mutasi merchant." : ""),
         { inline_keyboard: [[{ text: "Lihat Bukti & Verifikasi", callback_data: "payview:" + (found.rowNumber || orderId) }]] });
     } catch (error) {
       console.warn(JSON.stringify({ level: "warn", event: "payment_proof_notify", message: error.message }));
     }
   }
 }
+
 async function showPaymentRequestsPage(env, message, page = 0) {
   const state = await transactionReadiness(env);
   if (!state.ready) await ensurePaymentWorkflowHeaders(env);
@@ -2771,21 +2871,37 @@ async function showPaymentRequestDetail(env, message, reference) {
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan ini sudah diproses atau tidak lagi menunggu verifikasi.");
   const ref = String(reference);
-  const text = [
+  let qrisPayment = null;
+  if (String(r[11] || "").toUpperCase() === "QRIS" && env.DB) {
+    try { qrisPayment = await getQrisPaymentForOrder(env,String(r[0])); } catch {}
+  }
+  const details = [
     "🔎 VERIFIKASI PEMBAYARAN",
     "Pesanan: " + r[0],
     "Pelanggan: " + (r[4] || "-") + " (" + (r[3] || "-") + ")",
     "Produk: " + (r[5] || "-"),
     "Jumlah: " + (r[6] || 0),
-    "Total: " + rupiah(r[10]),
+    "Total pesanan: " + rupiah(r[10]),
     "Metode: " + (r[11] || "-"),
-    "Bukti: " + (r[14] ? (r[15] === "PHOTO" ? "Foto tersedia" : "Dokumen tersedia") : "Tidak diunggah — admin wajib cocokkan mutasi secara manual")
-  ].join("\n");
+    "Bukti: " + (r[14] ? (r[15] === "PHOTO" ? "Foto tersedia" : "Dokumen tersedia") : "Tidak diunggah")
+  ];
+  if (qrisPayment) {
+    details.push("Nominal QRIS: " + rupiah(qrisPayment.expected_amount));
+    details.push("Kode unik: " + String(qrisPayment.unique_code).padStart(3,"0"));
+    details.push("Status OCR: " + String(qrisPayment.ocr_status || "NOT_RUN"));
+    details.push("Nominal terbaca: " + (qrisPayment.ocr_amount == null ? "Tidak terbaca" : rupiah(qrisPayment.ocr_amount)));
+    details.push("Merchant terbaca: " + (qrisPayment.ocr_merchant_name || "Tidak terbaca"));
+    details.push("Waktu transaksi: " + (qrisPayment.ocr_transaction_at || "Tidak terbaca"));
+    details.push("Referensi transaksi: " + (qrisPayment.ocr_reference || "Tidak terbaca"));
+    details.push("");
+    details.push("⚠️ OCR hanya membaca isi screenshot. WAJIB cocokkan mutasi/riwayat transaksi merchant sebelum menyetujui.");
+  }
   const keyboard = { inline_keyboard: [
     [{ text: "✅ Setujui Pembayaran", callback_data: "payapprove:" + ref }],
     [{ text: "❌ Tolak / Minta Ulang", callback_data: "payreject:" + ref }],
     [{ text: "⬅️ Daftar Verifikasi", callback_data: "adm:paymentchecks" }]
   ] };
+  const text = details.join("\n");
   if (r[14] && r[15] === "PHOTO") {
     await updateTelegramMessage(env, message, { text, photo: String(r[14]), replyMarkup: keyboard });
   } else {
@@ -2793,16 +2909,25 @@ async function showPaymentRequestDetail(env, message, reference) {
     if (r[14] && r[15] === "DOCUMENT") await sendTelegramDocumentById(env, message.chat.id, String(r[14]), "Bukti pembayaran " + r[0]);
   }
 }
+
 async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-admin") {
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Jalankan /migrasi_d1.");
   if (state.ready) {
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
-    if (String(found.order.payment_method || "").toUpperCase() === "QRIS" && isInternalQrisConfigured(env)) {
-      throw new Error("QRIS dinamis hanya dapat disetujui otomatis setelah status SETTLEMENT diverifikasi langsung dari Midtrans.");
+    const method = String(found.order.payment_method || "").toUpperCase();
+    const qrisPayment = method === "QRIS" && isInternalQrisConfigured(env)
+      ? await getQrisPaymentForOrder(env,found.order.order_id) : null;
+    if (method === "QRIS" && isInternalQrisConfigured(env) && (!qrisPayment || !qrisPayment.receipt_file_id)) {
+      throw new Error("Bukti QRIS belum tersedia. Minta pelanggan mengunggah bukti sebelum verifikasi.");
     }
     const approved = await approvePaymentTransactional(env,found.order.order_id,actor);
+    if (qrisPayment) {
+      const at = new Date().toISOString();
+      await env.DB.prepare("UPDATE qris_payments SET status='PAID',reviewed_by=?,reviewed_at=?,paid_at=?,updated_at=? WHERE order_id=?")
+        .bind(String(actor).slice(0,100),at,at,at,found.order.order_id).run();
+    }
     await mirrorTransactionalOrder(env,approved);
     const row = orderToSheetRow(approved);
     const ticketUrl = await createPickupTicketUrl(env,String(approved.order_id),String(approved.receipt_code));
@@ -2816,7 +2941,7 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
   if (String(r[11] || "").toUpperCase() === "COD") throw new Error("Pesanan COD tidak menggunakan verifikasi pembayaran online.");
   if (String(r[11] || "").toUpperCase() === "QRIS" && isInternalQrisConfigured(env)) {
-    throw new Error("QRIS dinamis hanya dapat disetujui otomatis setelah status SETTLEMENT diverifikasi langsung dari Midtrans.");
+    throw new Error("Verifikasi QRIS internal memerlukan lapisan transaksi D1 aktif.");
   }
   if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan sudah dibatalkan.");
   const now = new Date().toISOString();
