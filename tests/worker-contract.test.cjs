@@ -267,6 +267,8 @@ test("QRIS checkout uses internal static-payload composition and unique-code rec
   assert.match(worker, /QRIS_CHECKOUT_NOT_CONFIGURED/);
   assert.match(worker, /buildDynamicQrisPayload/);
   assert.match(worker, /generateQrisUniqueCode/);
+  assert.match(worker, /MAX_QRIS_TRANSACTION_AMOUNT/);
+  assert.match(worker, /generateQrisUniqueCode\(\s*Math\.min\(999, MAX_QRIS_TRANSACTION_AMOUNT - baseAmount\)/);
   assert.match(worker, /expected_amount/);
   assert.match(worker, /runQrisReceiptOcr/);
   assert.match(worker, /ocr_status/);
@@ -287,6 +289,8 @@ test("admin QRIS preview composes a real merchant QR without creating an order o
   assert.match(command, /message\.chat\.type !== "private"/);
   assert.match(command, /isAdmin\(customerId, env\)/);
   assert.match(command, /buildDynamicQrisPayload\(env\.QRIS_STATIC_PAYLOAD, amount\)/);
+  assert.match(command, /amount > MAX_QRIS_TRANSACTION_AMOUNT/);
+  assert.match(command, /Rp1 sampai Rp10\.000\.000/);
   assert.match(command, /if \(!merchant\.merchantName\)/);
   assert.match(command, /qris_payments WHERE expected_amount/);
   assert.match(command, /QRIS_TEST_QR_GENERATED/);
