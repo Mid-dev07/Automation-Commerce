@@ -1757,6 +1757,14 @@ async function handleTelegramCallback(env, query) {
     if (!admin) throw new Error("Menu ini khusus admin.");
     const reference = data.slice("payapprove:".length);
     const approved = await approvePaymentAndIssueTicket(env, reference, "telegram:" + (userId || chatId));
+    if (approved.alreadyApproved) {
+      await updateTelegramMessage(env, message, {
+        text: "ℹ️ Pembayaran " + approved.row[0] + " sudah disetujui sebelumnya. Tidak ada persetujuan atau pengiriman resi kedua.",
+        replyMarkup: adminMenuKeyboard(),
+        clearMedia: true
+      });
+      return;
+    }
     let receiptSent = true;
     try { await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode); }
     catch(error) {
@@ -2485,6 +2493,9 @@ async function handleAdminPaymentAction(request, env) {
       const method=String(found.row[11]||"").toUpperCase();
       if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi melalui menu ini.");
       const approved=await approvePaymentAndIssueTicket(env,found.rowNumber ?? body.order_id,"web-admin");
+      if (approved.alreadyApproved) {
+        return json({ok:true,status:"ALREADY_APPROVED",already_approved:true,receipt_code:approved.receiptCode,receipt_sent:false});
+      }
       let receiptSent = true;
       try { await sendPickupReceipt(env,String(approved.row[3]),approved.row,String(approved.row[0]),approved.receiptCode); }
       catch(error) {
@@ -3359,10 +3370,22 @@ async function showPaymentRequestDetail(env, message, reference) {
     details.push("Waktu transaksi: " + (qrisPayment.ocr_transaction_at || "Tidak terbaca"));
     details.push("Referensi transaksi: " + (qrisPayment.ocr_reference || "Tidak terbaca"));
     details.push("");
-    details.push("⚠️ OCR hanya membaca isi screenshot. WAJIB cocokkan mutasi/riwayat transaksi merchant sebelum menyetujui.");
+    const qrisMismatch = String(qrisPayment.ocr_status || "").toUpperCase() === "MISMATCH"
+      || String(qrisPayment.status || "").toUpperCase() === "OCR_MISMATCH"
+      || (qrisPayment.ocr_amount !== null && qrisPayment.ocr_amount !== undefined
+        && Number(qrisPayment.ocr_amount) !== Number(qrisPayment.expected_amount));
+    details.push(qrisMismatch
+      ? "⛔ BUKTI / NOMINAL TERDETEKSI TIDAK COCOK. Persetujuan dikunci; minta pelanggan mengunggah bukti yang benar."
+      : "⚠️ OCR hanya alat bantu. Cocokkan nominal dan dana masuk pada riwayat GoPay Merchant/mutasi bank sebelum menyetujui.");
   }
+  const qrisMismatch = qrisPayment && (
+    String(qrisPayment.ocr_status || "").toUpperCase() === "MISMATCH"
+    || String(qrisPayment.status || "").toUpperCase() === "OCR_MISMATCH"
+    || (qrisPayment.ocr_amount !== null && qrisPayment.ocr_amount !== undefined
+      && Number(qrisPayment.ocr_amount) !== Number(qrisPayment.expected_amount))
+  );
   const keyboard = { inline_keyboard: [
-    [{ text: "✅ Setujui Pembayaran", callback_data: "payapprove:" + ref }],
+    ...(qrisMismatch ? [] : [[{ text: "✅ Setujui Pembayaran", callback_data: "payapprove:" + ref }]]),
     [{ text: "❌ Tolak / Minta Ulang", callback_data: "payreject:" + ref }],
     [{ text: "⬅️ Daftar Verifikasi", callback_data: "adm:paymentchecks" }]
   ] };
