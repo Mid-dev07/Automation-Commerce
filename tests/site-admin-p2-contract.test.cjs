@@ -64,7 +64,7 @@ test("P2 analytics count only paid order statuses as confirmed revenue", () => {
   assert.ok(script.includes("const revenue=paid.reduce"));
   assert.ok(script.includes("outstanding=pending.reduce"));
   assert.ok(script.includes("const rejected=rows.filter"));
-  assert.ok(script.includes("const average=paid.length?Math.round(revenue/paid.length):0"));
+  assert.ok(script.includes("average=paid.length?Math.round(revenue/paid.length):0"));
 });
 
 test("P2 owner export facade requires an owner session, a bounded type/date allowlist, and a successful audit write", () => {
