@@ -52,7 +52,7 @@ test("Machine alias listing is token-hash scoped, bounded, and returns metadata 
   assert.ok(mailWorker.includes("handleMachineAliasesGet(url, env, auth.tokenHash)"));
 });
 
-test("Machine alias idempotency and hourly quota are isolated by token hash", () => {
+test("Machine alias lookup and hourly quota use token hash; global clientRef uniqueness is a known schema limitation", () => {
   assert.ok(mailWorker.includes('"WHERE m.client_ref=? AND m.token_hash=? LIMIT 1"'));
   assert.ok(mailWorker.includes(".bind(clientRef, tokenHash).first()"));
   assert.ok(mailWorker.includes('"SELECT COUNT(*) AS total FROM mail_machine_aliases WHERE token_hash=? AND created_at>?"'));
