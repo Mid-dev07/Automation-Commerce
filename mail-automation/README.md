@@ -32,7 +32,16 @@ This branch is source/code work only. No production Worker, D1 migration, secret
 ## Known schema constraint
 The current production schema defines `mail_machine_aliases.client_ref` as globally UNIQUE, not UNIQUE per `token_hash`. The application lookup and hourly quota are token-hash scoped, but a future second machine token using the same client reference could still hit a database uniqueness conflict. This is not an authorization bypass; it is a multi-token compatibility limitation. Do not claim multi-token isolation until a reviewed D1 table-rebuild migration changes the constraint to `UNIQUE(token_hash, client_ref)` and passes migration tests. No migration has been applied.
 
-## Domain migration dependency (2026-11-15)
-The requested migration target is `seiton.my.id`. Cloudflare currently has the new zone `seiton.my.id` in `pending` status; its DNS still contains parked-domain A/TXT records and Email Routing is `unconfigured`/disabled. The existing `seiton.biz.id` zone is active and its `inbox.seiton.biz.id` Email Routing subdomain is `ready`, with the current Worker rule targeting `receiver@inbox.seiton.biz.id`.
+## Domain migration — root-domain aliases (2026-11-15)
+- Alias addresses use the root domain `seiton.my.id`, with no `inbox` subdomain.
+- The Worker generates `receiver+<24-hex-slug>@seiton.my.id`; inbound validation accepts only that root domain and active alias format.
+- The private web panel remains hosted at `https://mail.seiton.biz.id`; `PANEL_ORIGIN` is intentionally unchanged because this migration changes the alias email domain, not the admin-panel hostname.
+- The new Cloudflare zone `seiton.my.id` is now `active` and uses `aria.ns.cloudflare.com` and `clark.ns.cloudflare.com`.
+- Its Email Routing state is still `unconfigured`/disabled. The current zone has Cloudflare-generated candidate MX/SPF/DKIM settings available through the Email Routing DNS endpoint, but these have not yet been applied.
+- The new zone currently has parked-domain A/TXT records. Preserve unrelated A records until the website-hosting intent for the apex and `www` is separately confirmed; the mail migration only needs the root MX, SPF, DKIM, plus-addressing setting, and Worker rule.
+- The legacy `receiver+<slug>@inbox.seiton.biz.id` path must remain in place during the cutover. Its current exact Worker route is `receiver@inbox.seiton.biz.id`, with subaddressing enabled on the old zone.
+- The new Email Routing rule must target `receiver@seiton.my.id` with subaddressing enabled, and deliver to the existing `seiton-mail-automation` Worker.
+- Do not switch the production routing rule or claim the migration complete until the deployed Worker accepts the new domain and a real inbound test confirms alias persistence and OTP parsing end-to-end.
 
-This repository snapshot still hard-codes `PANEL_ORIGIN=https://mail.seiton.biz.id` and `MAIL_DOMAIN=inbox.seiton.biz.id`. Do not deploy the P3 Mail Worker integration or change the live routing until the domain migration is completed deliberately. The target hostname and alias address must be confirmed from the migration plan, then all recipient validation, generated alias addresses, origin checks, DNS, Email Routing subdomain/rule, and Worker settings must move together. Keep the old zone and route available during cutover until inbound delivery on the new zone is proven end-to-end.
+## Release boundary
+This domain change is repository source work only until the reviewed release is deployed. No production Worker, D1 migration, secret, service binding, DNS record, or Email Routing setting was changed by this commit.
