@@ -227,6 +227,9 @@ export default {
     }
     if (request.method === "POST" && url.pathname === "/api/admin/login") return handleAdminLogin(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/session/revoke") return handleAdminWebSessionRevoke(request, env);
+    if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/admin/payment-methods") {
+      return handleAdminPaymentMethods(request, env);
+    }
     if (request.method === "POST" && url.pathname === "/api/admin/payment") return handleAdminPaymentAction(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/products") return handleAdminProductMutation(request, env);
     if (request.method === "POST" && url.pathname === "/api/admin/order-status") return handleAdminOrderStatus(request, env);
@@ -2537,11 +2540,11 @@ async function handleAdminPaymentMethods(request, env) {
       const accountId = String(body.account_id || crypto.randomUUID()).trim().slice(0,80);
       const bankName = String(body.bank_name || "").trim().slice(0,80);
       const accountHolder = String(body.account_holder || "").trim().slice(0,100);
-      const accountNumber = String(body.account_number || "").replace(/[\\s-]/g,"");
+      const accountNumber = String(body.account_number || "").replace(/[\s-]/g,"");
       const note = String(body.note || "").trim().slice(0,200);
       const enabled = body.enabled !== false;
       if (!/^[A-Za-z0-9_-]{8,80}$/.test(accountId)
-        || !bankName || !accountHolder || !/^\\d{5,32}$/.test(accountNumber)) {
+        || !bankName || !accountHolder || !/^\d{5,32}$/.test(accountNumber)) {
         return json({ok:false,error:"Lengkapi nama bank, nama pemilik, dan nomor rekening yang valid (5–32 digit)."},400);
       }
       await env.DB.prepare(
