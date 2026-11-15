@@ -97,3 +97,35 @@ A post-merge source review found that the P1 event-handler block had been append
 - Worker audit CI still runs all `tests/*.test.cjs` and `tests/*.test.mjs`, plus Worker syntax checks.
 - Browser UAT and end-to-end export/download checks remain required before merge/deploy.
 - No production Worker, Pages configuration, D1, QRIS flag, Telegram webhook, or Google Analytics setting was changed.
+
+
+## Unified Owner Control Center — P3 Mail Automation
+
+P3 integration is isolated on branch `feat/unified-owner-control-center-p3`.
+
+### Mail Automation
+- `MAIL_BACKEND`: service binding to `seiton-mail-automation` production.
+- `MAIL_VM_API_TOKEN`: required secret on `seiton-site-admin`; the value must never enter source control or browser code.
+- Owner facade endpoints:
+  - `GET /api/control/email/health`
+  - `GET|POST /api/control/email/aliases`
+  - `GET /api/control/email/messages?aliasId=...`
+  - `GET /api/control/email/messages/:id?aliasId=...`
+  - `DELETE /api/control/email/aliases/:id`
+- Alias listing and machine operations are scoped to the hash of the machine token. Message content and OTP are retrieved only after explicit message selection.
+- Alias creation idempotency and hourly rate limits are scoped by token hash.
+- Audit metadata records alias lifecycle actions without recording email bodies or verification codes.
+- Email Routing is explicitly shown as unverified until inbound delivery has passed an end-to-end test.
+
+### Production drift observed on 2026-11-15
+Read-only Cloudflare inspection found:
+- `seiton-mail-automation` has `MAIL_VM_API_TOKEN` configured and a D1 binding.
+- `seiton-site-admin` production does **not yet** have the `MAIL_BACKEND` service binding or `MAIL_VM_API_TOKEN` secret.
+- The currently deployed Mail Worker does **not yet** expose `GET /api/v1/machine/aliases` or `GET /api/v1/machine/health`; those endpoints are in the P3 repository source only.
+- Therefore the panel integration is not production-ready and must not be deployed until the Owner Worker binding/secret and Mail Worker API version are coordinated.
+
+### Release gates
+- Add `MAIL_BACKEND` and `MAIL_VM_API_TOKEN` only through an explicitly approved production configuration change.
+- Deploy the Mail Worker API update before enabling the Owner panel routes, or stage both behind a controlled rollout.
+- Run CI, staging UAT, token-scope isolation tests, and inbound-email delivery verification.
+- No production binding, secret, Worker, D1, DNS, or Email Routing configuration was changed by P3 source work.
