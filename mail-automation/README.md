@@ -26,6 +26,15 @@ Alias creation idempotency and hourly quota are scoped by `token_hash`; one mach
 - Audit events store alias identifiers and action metadata only; no message body or OTP value.
 - Email Routing remains `unverified` until the configured inbound route is tested end-to-end.
 
+## Production verification — 2026-11-15
+- The live `seiton-mail-automation` Worker already had server-side `MAIL_DOMAIN=seiton.my.id` and accepted the legacy `inbox.seiton.biz.id` recipient domain before this narrow UI patch.
+- A small production upload at 2026-11-15 14:42:00 UTC changed only the embedded `emailFor(alias)` formatter from `@inbox.seiton.biz.id` to `@seiton.my.id`. It reused the existing deployed Worker modules and preserved the existing `MAIL_DB` D1 binding, four `secret_text` bindings, compatibility date, observability settings, and `*/10 * * * *` cleanup schedule.
+- The post-deployment source check confirms newly displayed aliases use `@seiton.my.id` and the inbound parser still accepts the legacy inbox domain.
+- `GET https://mail.seiton.biz.id/health` returned `{ "ok": true, "service": "seiton-mail-automation" }` after the upload.
+- The production Worker still does not expose the full P3 machine health and machine alias-list endpoints; this narrow production upload did not deploy the complete P3 Worker implementation.
+- The production Owner Worker `seiton-site-admin` still has no `MAIL_BACKEND` service binding or `MAIL_VM_API_TOKEN` secret, so Owner Control Center Mail Automation integration remains unreleased.
+- The root-domain Email Routing rule was already enabled when inspected; this change did not modify DNS or Email Routing settings. The legacy `receiver@inbox.seiton.biz.id` rule remains enabled.
+
 ## Release boundary
 This branch is source/code work only. No production Worker, D1 migration, secret, service binding, DNS, or Email Routing configuration has been changed. Before release, reconcile bindings and secret names, run CI, deploy to a preview/staging environment, and perform authenticated desktop/mobile UAT plus a controlled inbound-email test.
 
@@ -37,11 +46,11 @@ The current production schema defines `mail_machine_aliases.client_ref` as globa
 - New aliases are generated as `receiver+<24-hex-slug>@seiton.my.id`; inbound validation accepts both `seiton.my.id` and the legacy `inbox.seiton.biz.id` while checking the same active alias format. This dual-domain compatibility is required so existing aliases continue receiving messages during cutover.
 - The private web panel remains hosted at `https://mail.seiton.biz.id`; `PANEL_ORIGIN` is intentionally unchanged because this migration changes the alias email domain, not the admin-panel hostname.
 - The new Cloudflare zone `seiton.my.id` is now `active` and uses `aria.ns.cloudflare.com` and `clark.ns.cloudflare.com`.
-- Its Email Routing state is still `unconfigured`/disabled. The current zone has Cloudflare-generated candidate MX/SPF/DKIM settings available through the Email Routing DNS endpoint, but these have not yet been applied.
-- The new zone currently has parked-domain A/TXT records. Preserve unrelated A records until the website-hosting intent for the apex and `www` is separately confirmed; the mail migration only needs the root MX, SPF, DKIM, plus-addressing setting, and Worker rule.
+- Email Routing is now `enabled` with status `ready`; plus-addressing (`support_subaddress`) is enabled. The root MX and SPF settings are present, along with the Cloudflare DKIM TXT record.
+- The zone still has parked-domain A records and parked TXT records at wildcard/root/`www`. Do not change the A records as part of this mail migration. The Email Routing MX, root SPF, and DKIM records coexist with them.
 - The legacy `receiver+<slug>@inbox.seiton.biz.id` path must remain in place during the cutover. Its current exact Worker route is `receiver@inbox.seiton.biz.id`, with subaddressing enabled on the old zone.
-- The new Email Routing rule must target `receiver@seiton.my.id` with subaddressing enabled, and deliver to the existing `seiton-mail-automation` Worker.
-- Do not switch the production routing rule or claim the migration complete until the deployed Worker accepts the new domain and a real inbound test confirms alias persistence and OTP parsing end-to-end.
+- The rule `receiver@seiton.my.id` → Worker `seiton-mail-automation` is present and enabled; Cloudflare reports the zone Email Routing status as `ready`.
+- Do not claim the migration complete until a real inbound message to a generated `receiver+<slug>@seiton.my.id` address is received, stored against the correct alias, and its OTP is extracted end-to-end. That real inbound test has not yet been performed.
 
 ## Release boundary
 This domain change is repository source work only until the reviewed release is deployed. No production Worker, D1 migration, secret, service binding, DNS record, or Email Routing setting was changed by this commit.
