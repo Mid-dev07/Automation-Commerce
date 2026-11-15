@@ -14,6 +14,7 @@ import {
   buildDynamicQrisPayload,
   extractQrisMerchantProfile,
   generateQrisUniqueCode,
+  parseQrisPayload,
   MAX_QRIS_TRANSACTION_AMOUNT,
   evaluateQrisReceipt
 } from "./qris.mjs";
@@ -2791,6 +2792,81 @@ function paymentProofPrompt(orderId) {
 }
 
 
+const PAYMENT_METHOD_KEYS = ["QRIS","TRANSFER","COD"];
+const PAYMENT_METHOD_DEFAULTS = {
+  QRIS: { display_name: "QRIS Dinamis", enabled: 1, instructions: "Pindai QRIS dan pastikan nominal tepat." },
+  TRANSFER: { display_name: "Transfer Bank", enabled: 1, instructions: "Transfer tepat sesuai total tagihan ke rekening resmi Seiton.id." },
+  COD: { display_name: "Bayar di Tempat (COD)", enabled: 1, instructions: "Pembayaran dilakukan saat pesanan diterima." }
+};
+
+async function loadPaymentMethodConfiguration(env) {
+  if (!env.DB) throw new Error("D1_BINDING_MISSING");
+  const [methodResult, accountResult] = await Promise.all([
+    env.DB.prepare("SELECT method_key,display_name,enabled,instructions,updated_at FROM payment_method_settings ORDER BY method_key").all(),
+    env.DB.prepare("SELECT account_id,bank_name,account_holder,account_number,note,enabled,sort_order,created_at,updated_at FROM payment_bank_accounts ORDER BY sort_order,bank_name,account_holder").all()
+  ]);
+  const configured = new Map((methodResult.results || []).map(row => [String(row.method_key), row]));
+  const accounts = (accountResult.results || []).map(row => ({
+    account_id: String(row.account_id),
+    bank_name: String(row.bank_name),
+    account_holder: String(row.account_holder),
+    account_number: String(row.account_number),
+    note: String(row.note || ""),
+    enabled: Number(row.enabled) === 1,
+    sort_order: Number(row.sort_order || 0),
+    created_at: String(row.created_at || ""),
+    updated_at: String(row.updated_at || "")
+  }));
+  const methods = PAYMENT_METHOD_KEYS.map(key => {
+    const row = configured.get(key);
+    if (!row) throw new Error("PAYMENT_METHOD_SETTINGS_NOT_MIGRATED");
+    const fallback = PAYMENT_METHOD_DEFAULTS[key];
+    const enabled = Number(row.enabled) === 1;
+    const activeAccounts = key === "TRANSFER" ? accounts.filter(account => account.enabled) : [];
+    const runtimeReady = key !== "QRIS" || isQrisCheckoutAvailable(env);
+    const hasDestination = key !== "TRANSFER" || activeAccounts.length > 0;
+    return {
+      method_key: key,
+      display_name: String(row.display_name || fallback.display_name),
+      enabled,
+      available: enabled && runtimeReady && hasDestination,
+      runtime_ready: runtimeReady,
+      instructions: String(row.instructions || fallback.instructions),
+      active_account_count: activeAccounts.length,
+      updated_at: String(row.updated_at || "")
+    };
+  });
+  return { methods, bank_accounts: accounts };
+}
+
+async function getAvailablePaymentMethods(env) {
+  const config = await loadPaymentMethodConfiguration(env);
+  return config.methods.filter(method => method.available).map(method => method.method_key);
+}
+
+async function orderConfirmationWithPaymentInstructions(env, order) {
+  const base = orderConfirmation(order, env);
+  if (String(order.paymentMethod || "").toUpperCase() !== "TRANSFER") return base;
+  const config = await loadPaymentMethodConfiguration(env);
+  const accounts = config.bank_accounts.filter(account => account.enabled);
+  if (!accounts.length) throw new Error("Rekening transfer belum tersedia. Pilih QRIS/COD atau hubungi admin.");
+  const details = [
+    "🏦 REKENING RESMI SEITON.ID",
+    "Silakan transfer tepat sesuai total tagihan. Jangan membulatkan nominal.",
+    "",
+    ...accounts.flatMap((account, index) => [
+      (index + 1) + ". " + account.bank_name,
+      "No. rekening: " + account.account_number,
+      "Atas nama: " + account.account_holder,
+      ...(account.note ? ["Catatan: " + account.note] : []),
+      ""
+    ]),
+    "Setelah transfer, tekan tombol Saya Sudah Bayar dan unggah bukti transaksi.",
+    "Admin akan mencocokkan dana masuk dan nominal sebelum menerbitkan resi."
+  ];
+  return base + "\\n\\n" + details.join("\\n");
+}
+
 async function getQrisPaymentForOrder(env, orderId) {
   if (!env.DB) throw new Error("D1_BINDING_MISSING");
   return env.DB.prepare("SELECT * FROM qris_payments WHERE order_id=?")
@@ -3294,21 +3370,52 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
     const method = String(found.order.payment_method || "").toUpperCase();
-    const qrisPayment = method === "QRIS" && isQrisCheckoutAvailable(env)
-      ? await getQrisPaymentForOrder(env,found.order.order_id) : null;
-    if (method === "QRIS" && isQrisCheckoutAvailable(env) && (!qrisPayment || !qrisPayment.receipt_file_id)) {
-      throw new Error("Bukti QRIS belum tersedia. Minta pelanggan mengunggah bukti sebelum verifikasi.");
+    if (String(found.order.payment_confirmation_status || "").toUpperCase() === "DISETUJUI" && found.order.receipt_code) {
+      const row = orderToSheetRow(found.order);
+      return { row, receiptCode: String(found.order.receipt_code), ticketUrl: "", rowNumber: found.order.legacy_sheet_row, alreadyApproved: true };
     }
+
+    if (method === "QRIS") {
+      const qrisPayment = await getQrisPaymentForOrder(env,found.order.order_id);
+      if (!qrisPayment || !qrisPayment.receipt_file_id) {
+        throw new Error("Bukti QRIS belum tersedia. Minta pelanggan mengunggah bukti sebelum verifikasi.");
+      }
+      const baseAmount = Number(qrisPayment.base_amount);
+      const uniqueCode = Number(qrisPayment.unique_code);
+      const expectedAmount = Number(qrisPayment.expected_amount);
+      if (!Number.isSafeInteger(baseAmount) || baseAmount !== Number(found.order.total)
+        || !Number.isInteger(uniqueCode) || uniqueCode < 1 || uniqueCode > 999
+        || !Number.isSafeInteger(expectedAmount) || expectedAmount !== baseAmount + uniqueCode) {
+        throw new Error("Nominal QRIS tidak konsisten dengan total pesanan. Tahan persetujuan dan periksa transaksi.");
+      }
+      const ocrStatus = String(qrisPayment.ocr_status || "").toUpperCase();
+      const ledgerStatus = String(qrisPayment.status || "").toUpperCase();
+      if (ocrStatus === "MISMATCH" || ledgerStatus === "OCR_MISMATCH"
+        || (qrisPayment.ocr_amount !== null && qrisPayment.ocr_amount !== undefined
+          && Number(qrisPayment.ocr_amount) !== expectedAmount)) {
+        throw new Error("Bukti QRIS terdeteksi tidak cocok dengan nominal tagihan. Minta bukti yang benar sebelum menyetujui.");
+      }
+      let parsedPayload;
+      try { parsedPayload = parseQrisPayload(String(qrisPayment.qris_payload || "")); }
+      catch { throw new Error("Payload QRIS tersimpan tidak valid. Jangan setujui pembayaran sebelum pemeriksaan manual."); }
+      if (String(qrisPayment.qris_mode || "DYNAMIC") === "DYNAMIC") {
+        if (parsedPayload.pointOfInitiation !== "12" || parsedPayload.amount !== expectedAmount) {
+          throw new Error("Nominal di payload QRIS tidak cocok dengan tagihan. Pembayaran ditahan.");
+        }
+      } else if (parsedPayload.pointOfInitiation !== "11") {
+        throw new Error("Mode QRIS statis tidak konsisten. Pembayaran ditahan untuk pemeriksaan.");
+      }
+    }
+
     const approved = await approvePaymentTransactional(env,found.order.order_id,actor);
-    if (qrisPayment) {
-      const at = new Date().toISOString();
-      await env.DB.prepare("UPDATE qris_payments SET status='PAID',reviewed_by=?,reviewed_at=?,paid_at=?,updated_at=? WHERE order_id=?")
-        .bind(String(actor).slice(0,100),at,at,at,found.order.order_id).run();
+    if (approved.alreadyApproved) {
+      const row = orderToSheetRow(approved);
+      return { row, receiptCode: String(approved.receipt_code || ""), ticketUrl: "", rowNumber: approved.legacy_sheet_row, alreadyApproved: true };
     }
     await mirrorTransactionalOrder(env,approved);
     const row = orderToSheetRow(approved);
     const ticketUrl = await createPickupTicketUrl(env,String(approved.order_id),String(approved.receipt_code));
-    return {row,receiptCode:approved.receipt_code,ticketUrl,rowNumber:approved.legacy_sheet_row};
+    return {row,receiptCode:approved.receipt_code,ticketUrl,rowNumber:approved.legacy_sheet_row,alreadyApproved:false};
   }
   await ensurePaymentWorkflowHeaders(env);
   const rowNumber = Number(reference);
@@ -3634,14 +3741,22 @@ function parseOrderText(text) {
 }
 
 async function createOrder(env, input) {
-  if (String(input?.paymentMethod || "").toUpperCase() === "QRIS" && !isQrisCheckoutAvailable(env)) {
-    throw new Error("QRIS dinamis belum aktif. Pilih Transfer Bank atau COD.");
+  const requestedMethod = String(input?.paymentMethod || "").toUpperCase();
+  if (!PAYMENT_METHOD_KEYS.includes(requestedMethod)) throw new Error("Metode pembayaran tidak valid.");
+  if (requestedMethod === "QRIS" && !isQrisCheckoutAvailable(env)) {
+    throw new Error("QRIS belum dikonfigurasi. Pilih metode pembayaran lain.");
   }
   const transactionState = await transactionReadiness(env);
   if (transactionState.configured && !transactionState.ready) {
     throw new Error("Lapisan transaksi D1 belum siap. Admin perlu menjalankan /migrasi_d1 sebelum pesanan baru diterima.");
   }
   if (transactionState.ready) {
+    const availableMethods = await getAvailablePaymentMethods(env);
+    if (!availableMethods.includes(requestedMethod)) {
+      throw new Error(requestedMethod === "TRANSFER"
+        ? "Transfer Bank sedang tidak tersedia. Admin perlu mengaktifkan metode dan menambahkan rekening tujuan."
+        : "Metode pembayaran ini sedang dinonaktifkan oleh admin. Silakan pilih metode lain.");
+    }
     const shipping = env.DEFAULT_SHIPPING == null || env.DEFAULT_SHIPPING === "" ? 0 : Number(env.DEFAULT_SHIPPING);
     if (!Number.isSafeInteger(shipping) || shipping < 0) throw new Error("DEFAULT_SHIPPING harus berupa bilangan Rupiah nol atau lebih.");
     const order = await createOrderTransactional(env,{...input,shipping});
