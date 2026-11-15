@@ -4454,7 +4454,7 @@ function createMessagingServices(env) {
             ""
           ]),
           "Setelah transfer, unggah bukti untuk diverifikasi admin."
-        ].join("\\n");
+        ].join("\n");
       }
       return "Pembayaran COD dipilih.";
     },
