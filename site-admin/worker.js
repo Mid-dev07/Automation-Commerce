@@ -594,6 +594,11 @@ if(u.pathname==="/api/admin/bot/products"&&req.method==="POST"){
     return secure(j({ok:false,error:"Perubahan katalog bot gagal diteruskan."},503));
   }
 }
+if(["/api/admin/payment-methods","/api/admin/payment","/api/admin/order-status","/api/admin/proof","/api/admin/export"].includes(u.pathname))return handleOwnerOrderProxy(req,env);
+if(u.pathname==="/api/admin/crm"&&(req.method==="GET"||req.method==="POST")){
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi owner tidak valid atau kedaluwarsa."},401));
+  return handleCrmApi(req,env,session);
+}
 if(u.pathname==="/api/admin/pricing"&&req.method==="GET"){if(!(await activeSession(req,env)))return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));return secure(j(await getPricing(env)));}
 if(u.pathname==="/api/admin/pricing"&&req.method==="PUT"){if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));let b;try{b=await req.json();}catch{return secure(j({ok:false,error:"Data tidak valid."},400));}try{return secure(j(await savePricing(env,b,session.client_hash)));}catch(e){return secure(j({ok:false,error:e.message},400));}}
 if(u.pathname==="/"||u.pathname==="/index.html")return secure(new Response(page(),{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}}));
