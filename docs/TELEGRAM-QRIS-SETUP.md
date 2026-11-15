@@ -1,6 +1,6 @@
 # Internal QRIS + unique-code receipt verification — Seiton Core
 
-Seiton checkout composes a transaction-specific QRIS MPM payload from the merchant's own acquirer-issued static QRIS template. It does not request a charge from Midtrans or another payment gateway.
+Seiton checkout composes a transaction-specific QRIS MPM payload from the merchant's own acquirer-issued GoPay Merchant static QRIS template. The payload conversion is implemented inside Seiton's own library; it does not request a charge from Midtrans or another payment gateway. The library validates QR data structure, not GoPay settlement or acceptance.
 
 ## Worker configuration
 
@@ -20,6 +20,17 @@ The Worker validates the static payload CRC, merchant-account information, count
 4. If dynamic issuance is approved, the customer scans a QR containing the amount. Otherwise, the fallback displays the original static merchant QR and instructs the customer to enter the exact amount (order total plus unique suffix) manually. The customer then uploads a screenshot as a Telegram photo or image document. PDF remains accepted but routes to manual review.
 5. Workers AI extracts visible amount, merchant, transaction timestamp, and reference. Deterministic server code compares them to the D1 order and rejects re-use of evidence or transaction references.
 6. Admin sees both the original evidence and OCR assessment, then checks the merchant account's actual transaction history before approving and issuing a pickup receipt.
+
+## GoPay Merchant compatibility gate
+
+The internal converter is a local EMVCo/QRIS payload composer. It does not call GoPay, create a GoPay bill through a merchant API, or register a transaction in GoPay's backend. GoPay's published merchant instructions currently describe creating a dynamic QRIS bill by entering the amount in the GoPay Merchant app. Therefore, a locally composed payload is not considered production-compatible merely because its TLV and CRC are valid.
+
+Before enabling `QRIS_INTERNAL_ENABLED`, verify with the GoPay-issued merchant QR template:
+- GoPay, DANA, and at least one banking app recognize the generated QR and show the exact amount and the correct Seiton merchant.
+- A small payment from a separate payer account reaches the correct GoPay Merchant store and appears as a successful transaction in its transaction history.
+- The merchant/acquirer confirms this issuance method is permitted for the QRIS merchant.
+
+A local timeout or D1 status does not revoke a QR that has already been shown. Do not tell customers a generated QR is expired or single-use unless GoPay/acquirer behavior confirms it. GoPay's app-generated bill behavior and its expiry rules must not be assumed to apply to a QR composed locally.
 
 ## Important security boundaries
 
