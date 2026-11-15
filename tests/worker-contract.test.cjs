@@ -262,17 +262,22 @@ test("Telegram storefront uses branded menus and grouped admin navigation", () =
   assert.match(worker, /data === "nav:guide"/);
 });
 
-test("QRIS checkout is disabled without a configured merchant and dynamic payment uses provider webhook", () => {
-  assert.match(worker, /QRIS dinamis belum aktif/);
-  assert.match(worker, /if \(method === "QRIS" && !isDynamicQrisConfigured\(env\)\)/);
-  assert.match(worker, /async function sendQrisPaymentScreen\(env, chatId, order\)/);
-  assert.match(worker, /async function handleMidtransWebhook\(request, env\)/);
-  assert.match(worker, /url\.pathname === "\/webhooks\/midtrans"/);
-  assert.match(worker, /settleQrisPaymentTransactional/);
+test("QRIS checkout uses internal static-payload composition and unique-code receipt review", () => {
+  assert.match(worker, /isInternalQrisConfigured/);
+  assert.match(worker, /QRIS_INTERNAL_NOT_CONFIGURED/);
+  assert.match(worker, /buildDynamicQrisPayload/);
+  assert.match(worker, /generateQrisUniqueCode/);
+  assert.match(worker, /expected_amount/);
+  assert.match(worker, /runQrisReceiptOcr/);
+  assert.match(worker, /ocr_status/);
+  assert.match(worker, /OCR hanya mencocokkan isi gambar/);
+  assert.match(worker, /WAJIB cocokkan mutasi\/riwayat transaksi merchant/);
+  assert.doesNotMatch(worker, /handleMidtransWebhook/);
+  assert.doesNotMatch(worker, /\/webhooks\/midtrans/);
   assert.match(worker, /callback_data: "qris:check:"/);
-  assert.doesNotMatch(worker, /LINK_QRIS_IMAGE/);
+  assert.match(worker, /callback_data: "pc:req:" \+ order\.orderId/);
+  assert.match(worker, /UPDATE qris_payments SET status='PAID'/);
 });
-
 
 test("customers can re-display their own active dynamic QRIS from Pesanan Saya", () => {
   assert.match(worker, /async function handleQrisPaymentShow\(env, message, chatId, userId, orderId\)/);
@@ -280,5 +285,5 @@ test("customers can re-display their own active dynamic QRIS from Pesanan Saya",
   assert.match(worker, /callback_data: "qris:show:" \+ orderId/);
   assert.match(worker, /text: "📲 Tampilkan QR Lagi"/);
   assert.match(worker, /String\(order\.customer_id\) !== String\(userId\)/);
-  assert.match(worker, /payment\.status === "EXPIRED" \|\| payment\.status === "FAILED"/);
+  assert.match(worker, /payment\.status === "PAID"/);
 });
