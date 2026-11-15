@@ -10,7 +10,7 @@ const orderWorker = fs.readFileSync(path.join(root, "worker.js"), "utf8");
 
 function ownerHtml() {
   const start = ownerWorker.indexOf("function page(){");
-  const end = ownerWorker.indexOf("export default", start);
+  const end = ownerWorker.indexOf("async function parseControlJson", start);
   assert.ok(start >= 0 && end > start, "owner page() function must exist");
   return vm.runInNewContext(ownerWorker.slice(start, end) + "\npage();");
 }
