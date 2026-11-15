@@ -2483,7 +2483,7 @@ async function fetchMidtransQrisImage(env, imageUrl) {
   const parsed = new URL(String(imageUrl || ""));
   const allowedHosts = new Set(["api.midtrans.com", "api.sandbox.midtrans.com"]);
   if (parsed.protocol !== "https:" || !allowedHosts.has(parsed.hostname)
-    || !/^\/v2\/qris\/[A-Za-z0-9_-]+\/qr-code(?:-v2)?$/.test(parsed.pathname)) {
+    || !/^\/v(?:2|4)\/qris\/[A-Za-z0-9_-]+\/qr-code$/.test(parsed.pathname)) {
     throw new Error("MIDTRANS_QRIS_IMAGE_URL_INVALID");
   }
   const authorization = "Basic " + btoa(String(env.MIDTRANS_SERVER_KEY) + ":");
