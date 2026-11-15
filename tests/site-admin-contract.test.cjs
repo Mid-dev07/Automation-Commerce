@@ -160,7 +160,7 @@ test("owner panel exposes a guided add/edit product form and archives instead of
 
 test("bot inline dashboard JavaScript parses with product-management handlers", () => {
   const start=worker.indexOf("function page(){");
-  const end=worker.indexOf("export default",start);
+  const end=worker.indexOf("async function parseControlJson",start);
   const html=vm.runInNewContext(worker.slice(start,end)+"\npage();");
   const scriptStart=html.indexOf("<script>");
   const scriptEnd=html.indexOf("</script>",scriptStart);
