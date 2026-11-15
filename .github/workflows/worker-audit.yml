@@ -32,6 +32,12 @@ jobs:
         run: node --check otp-portal/email-parser.js
       - name: Check site-admin Worker syntax
         run: node --check site-admin/worker.js
+      - name: Check Mail Automation Worker syntax
+        run: node --check mail-automation/worker.js
+      - name: Check Mail Automation email parser syntax
+        run: node --check mail-automation/email-parser.js
+      - name: Check Mail Automation OTP extractor syntax
+        run: node --check mail-automation/otp-extractor.js
       - name: Check owner operations module syntax
         run: node --check site-admin/owner-operations.js
       - name: Run regression tests
