@@ -129,3 +129,5 @@ Read-only Cloudflare inspection found:
 - Deploy the Mail Worker API update before enabling the Owner panel routes, or stage both behind a controlled rollout.
 - Run CI, staging UAT, token-scope isolation tests, and inbound-email delivery verification.
 - No production binding, secret, Worker, D1, DNS, or Email Routing configuration was changed by P3 source work.
+
+P3 note: the production Mail D1 schema currently has a globally unique `client_ref` constraint. Runtime lookups and quotas are token-hash scoped, but true multi-token idempotency needs a reviewed schema migration to `UNIQUE(token_hash, client_ref)`. P3 does not apply that migration and does not claim multi-token readiness.
