@@ -15,7 +15,7 @@ Canonical migration directory for `seiton-transactions-prod` is now `migrations/
 | `0009_admin_activity_audit.sql` | Admin activity audit | Existing |
 | `0010_digital_products.sql` | Digital product inventory and fulfillment | Existing |
 | `0011_qris_payments.sql` | QRIS order ledger, unique amount, and receipt OCR | Applied to production D1 |
-| `0012_qris_static_fallback_product_form.sql` | Static QRIS fallback mode and Telegram product form drafts | Pending release |
+| `0012_qris_static_fallback_product_form.sql` | Static QRIS fallback mode and Telegram product form drafts | Applied to production D1 |
 
 ## Important
 
