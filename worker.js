@@ -288,8 +288,10 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
-      try { await handleAdminProductForm(env, chatId, customerId, text, message.reply_to_message.text); }
-      catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
+      try { await handleAdminProductWizardReply(env, chatId, customerId, text, message.reply_to_message.text); }
+      catch (error) {
+        await sendTelegram(env, chatId, "⚠️ " + error.message + "\nSilakan balas pesan formulir terbaru. Ketik /batal untuk membatalkan.");
+      }
       return;
     }
     const handoffCommand = parseMessagingAdminCommand(text);
@@ -739,38 +741,214 @@ async function ensureCatalogHeaders(env) {
     if (!response.ok) throw new Error("Tidak dapat menyiapkan kolom foto dan deskripsi katalog.");
   }
 }
+const ADMIN_PRODUCT_FIELD_PROMPTS = {
+  sku: ["SKU Produk", "Contoh: SEI-002. Huruf, angka, titik, _ atau -."],
+  name: ["Nama Produk", "Contoh: Paket Website UMKM. Maksimal 100 karakter."],
+  price: ["Harga Produk (Rupiah)", "Contoh: 25000 atau 25.000. Masukkan angka bulat rupiah."],
+  stock: ["Stok Produk", "Masukkan angka. Ketik 0 jika habis, atau 'tak terbatas' untuk stok tanpa batas."],
+  active: ["Status Produk", "Balas Aktif atau Nonaktif."],
+  photo_url: ["URL Foto Produk (opsional)", "Kirim URL HTTPS. Ketik /skip untuk mempertahankan foto atau /hapus untuk mengosongkannya."],
+  description: ["Deskripsi Produk (opsional)", "Maksimal 500 karakter. Ketik /skip untuk mempertahankan atau /hapus untuk mengosongkan."]
+};
+
+function parseProductWizardInteger(value, label) {
+  const raw = String(value ?? "").trim().replace(/^rp\s*/i,"").replace(/\s/g,"");
+  let normalized = raw;
+  if (/^\d{1,3}(?:\.\d{3})+$/.test(raw)) normalized = raw.replace(/\./g,"");
+  if (/^\d{1,3}(?:,\d{3})+$/.test(raw)) normalized = raw.replace(/,/g,"");
+  if (!/^\d+$/.test(normalized)) throw new Error(label + " harus berupa bilangan bulat rupiah/angka tanpa pecahan.");
+  const number = Number(normalized);
+  if (!Number.isSafeInteger(number) || number < 0) throw new Error(label + " tidak valid.");
+  return number;
+}
+
+function parseProductWizardValue(field, input, currentValue, mode) {
+  const value = String(input ?? "").trim();
+  const command = value.toLowerCase();
+  if (command === "/batal" || command === "batal") return { cancel: true };
+  if (command === "/skip" || command === "skip") {
+    if (field === "sku" || field === "name" || field === "price") {
+      if (currentValue == null || currentValue === "") throw new Error("Bagian ini wajib diisi.");
+    }
+    return { value: currentValue };
+  }
+  if (field === "sku") {
+    const sku = value.toUpperCase();
+    if (!/^[A-Z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU hanya boleh memakai huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
+    return { value: sku };
+  }
+  if (field === "name") {
+    if (!value || value.length > 100) throw new Error("Nama produk wajib diisi dan maksimal 100 karakter.");
+    return { value };
+  }
+  if (field === "price") return { value: parseProductWizardInteger(value,"Harga") };
+  if (field === "stock") {
+    if (["tak terbatas","tidak terbatas","unlimited","∞","tanpa batas"].includes(command)) return { value: null };
+    return { value: parseProductWizardInteger(value,"Stok") };
+  }
+  if (field === "active") {
+    if (["aktif","ya","yes","y","true","1"].includes(command)) return { value: true };
+    if (["nonaktif","tidak","no","n","false","0"].includes(command)) return { value: false };
+    throw new Error("Pilih salah satu: Aktif atau Nonaktif.");
+  }
+  if (field === "photo_url") {
+    if (command === "/hapus" || command === "hapus") return { value: "" };
+    if (value && (!/^https:\/\//i.test(value) || value.length > 1000)) throw new Error("Foto harus berupa URL HTTPS yang valid (maksimal 1.000 karakter).");
+    return { value };
+  }
+  if (field === "description") {
+    if (command === "/hapus" || command === "hapus") return { value: "" };
+    if (value.length > 500) throw new Error("Deskripsi maksimal 500 karakter.");
+    return { value };
+  }
+  throw new Error("Kolom formulir tidak dikenal.");
+}
+
+async function getAdminProductDraft(env, adminId, formId) {
+  return env.DB.prepare(
+    "SELECT * FROM admin_product_drafts WHERE admin_id=? AND form_id=? AND expires_at>? LIMIT 1"
+  ).bind(String(adminId),String(formId),new Date().toISOString()).first();
+}
+
+async function askAdminProductField(env, chatId, formId, field, currentValue, mode) {
+  const [label, help] = ADMIN_PRODUCT_FIELD_PROMPTS[field] || ["Data Produk","Masukkan nilai."];
+  const existing = mode === "EDIT" && currentValue !== "" && currentValue != null
+    ? "\nNilai saat ini: " + (field === "price" ? rupiah(currentValue) : field === "active" ? (currentValue ? "Aktif" : "Nonaktif") : field === "stock" && currentValue === null ? "Tak terbatas" : String(currentValue))
+    : "";
+  const optional = field === "photo_url" || field === "description";
+  const prompt = [
+    "📝 FORM PRODUK SEITON",
+    "FORM_ID=" + formId,
+    "FIELD=" + field,
+    "",
+    "Tahap: " + label,
+    help + existing,
+    optional ? "Balas /skip untuk mempertahankan nilai saat ini atau /hapus untuk mengosongkan." : "Balas pesan ini dengan nilainya.",
+    "Ketik /batal untuk membatalkan seluruh formulir."
+  ].join("\n");
+  await sendTelegram(env,chatId,prompt,{
+    force_reply:true,
+    input_field_placeholder:field === "price" ? "Contoh: 25000" : field === "stock" ? "Contoh: 10 atau tak terbatas" : label
+  });
+}
+
 async function promptAdminProduct(env, chatId, mode, sku = "") {
-  const intro = mode === "ADD" ? "📝 FORM PRODUK SEITON — ADD" : "📝 FORM PRODUK SEITON — EDIT — " + sku;
-  let current = "";
+  if (!env.DB) throw new Error("D1 belum tersedia untuk menyimpan formulir produk.");
+  let product = {
+    sku:"",name:"",price:"",stock:0,active:true,photo_url:"",description:""
+  };
+  let originalSku = "";
   if (mode === "EDIT") {
     const rows = await readCatalogRows(env);
-    const product = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
-    if (!product) throw new Error("Produk tidak ditemukan.");
-    current = "DATA SAAT INI:\n" + [product[0] || "", product[1] || "", product[2] ?? 0, product[3] ?? 0, product[4] ?? "TRUE", product[5] || "", product[6] || ""].join(" | ") + "\n\n";
+    const row = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
+    if (!row) throw new Error("Produk tidak ditemukan.");
+    const parsed = parseCatalogProduct(row);
+    product = {
+      sku:parsed.sku,name:parsed.name,price:parsed.price,stock:parsed.stock,
+      active:parsed.active,photo_url:parsed.photoUrl,description:parsed.description
+    };
+    originalSku = parsed.sku;
   }
-  const guide = [
-    intro,
-    current + "Kirim satu pesan dengan 7 kolom dipisahkan tanda |",
-    "SKU | Nama Produk | Harga | Stok | Aktif(TRUE/FALSE) | URL_FOTO(https://...) | Deskripsi",
-    mode === "ADD" ? "Contoh: SEI-002 | Kaos Seiton | 99000 | 20 | TRUE | https://contoh.com/foto.jpg | Kaos cotton combed" :
-      "Salin data saat ini lalu ubah bagian yang diperlukan. SKU harus tetap sama. URL foto boleh dikosongkan untuk menghapus foto.",
-    "Gunakan angka 0 untuk stok habis. Deskripsi maksimal 500 karakter dan tanpa tanda |."
-  ].join("\n");
-  await sendTelegram(env, chatId, guide, { force_reply: true, input_field_placeholder: "SKU | Nama | Harga | Stok | TRUE/FALSE | URL foto | Deskripsi" });
+  const steps = mode === "ADD"
+    ? ["sku","name","price","stock","active","photo_url","description"]
+    : ["name","price","stock","active","photo_url","description"];
+  const now = new Date().toISOString();
+  const formId = crypto.randomUUID();
+  const expires = new Date(Date.now()+30*60*1000).toISOString();
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO admin_product_drafts " +
+    "(admin_id,form_id,mode,original_sku,step_index,steps_json,draft_json,status,created_at,updated_at,expires_at) " +
+    "VALUES(?,?,?,?,0,?,?, 'IN_PROGRESS',?,?,?)"
+  ).bind(String(chatId),formId,mode,originalSku,JSON.stringify(steps),JSON.stringify(product),now,now,expires).run();
+  await sendTelegram(env,chatId,
+    mode === "ADD"
+      ? "📝 Kita mulai formulir produk baru. Isi setiap bagian satu per satu; tidak perlu memakai tanda |."
+      : "📝 Kita mulai formulir edit " + originalSku + ". SKU dikunci; gunakan /skip untuk mempertahankan nilai yang ada.",
+    null
+  );
+  await askAdminProductField(env,chatId,formId,steps[0],product[steps[0]],mode);
 }
-async function handleAdminProductForm(env, chatId, actorId, input, prompt) {
-  const parts = String(input || "").split("|").map(v => v.trim());
-  if (parts.length !== 7) throw new Error("Format produk harus berisi tepat 7 kolom dipisahkan tanda |");
-  const [sku, name, price, stock, activeText, photoUrl, description] = parts;
-  if (!["TRUE","FALSE","YA","TIDAK","1","0","AKTIF","NONAKTIF"].includes(activeText.toUpperCase())) throw new Error("Status aktif harus TRUE atau FALSE.");
-  if (photoUrl && (!/^https:\/\//i.test(photoUrl) || photoUrl.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS.");
-  const result = await saveCatalogProduct(env, {
-    sku, name, price, stock,
-    active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()),
-    photo_url: photoUrl, description
-  }, prompt.includes(" — EDIT — ") ? prompt.split(" — EDIT — ").pop().trim() : "");
-  await recordAdminActivity(env, { actorId, action: result === "updated" ? "PRODUCT_UPDATED" : "PRODUCT_CREATED", resourceType: "product", resourceId: sku, summary: { sku, name: String(name).slice(0, 100), price: Number(price), stock: stock === "" ? null : Number(stock), active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()) } });
-  await sendTelegram(env, chatId, "✅ Produk " + sku + (result === "updated" ? " berhasil diperbarui." : " berhasil ditambahkan."), adminMenuKeyboard());
+
+async function handleAdminProductWizardReply(env, chatId, actorId, input, prompt) {
+  const formId = String(prompt || "").match(/FORM_ID=([a-f0-9-]{20,40})/i)?.[1] || "";
+  const fieldFromPrompt = String(prompt || "").match(/FIELD=([a-z_]+)/i)?.[1] || "";
+  if (!formId || !fieldFromPrompt) throw new Error("Pesan formulir tidak dikenali. Buka kembali menu Tambah Produk.");
+  const row = await getAdminProductDraft(env,chatId,formId);
+  if (!row || row.status !== "IN_PROGRESS") throw new Error("Formulir sudah kedaluwarsa atau tidak lagi aktif. Buka kembali Tambah Produk.");
+  const steps = JSON.parse(row.steps_json || "[]");
+  const draft = JSON.parse(row.draft_json || "{}");
+  const index = Number(row.step_index);
+  const field = steps[index];
+  if (!field || field !== fieldFromPrompt) throw new Error("Tahap formulir ini sudah terlewati. Balas pesan formulir terbaru.");
+  const parsed = parseProductWizardValue(field,input,draft[field],row.mode);
+  if (parsed.cancel) {
+    await env.DB.prepare("DELETE FROM admin_product_drafts WHERE admin_id=? AND form_id=?")
+      .bind(String(chatId),formId).run();
+    await sendTelegram(env,chatId,"✖️ Formulir produk dibatalkan.",adminMenuKeyboard());
+    return;
+  }
+  draft[field] = parsed.value;
+  const nextIndex = index+1;
+  const now = new Date().toISOString();
+  if (nextIndex < steps.length) {
+    await env.DB.prepare("UPDATE admin_product_drafts SET step_index=?,draft_json=?,updated_at=? WHERE admin_id=? AND form_id=?")
+      .bind(nextIndex,JSON.stringify(draft),now,String(chatId),formId).run();
+    await askAdminProductField(env,chatId,formId,steps[nextIndex],draft[steps[nextIndex]],row.mode);
+    return;
+  }
+  await env.DB.prepare("UPDATE admin_product_drafts SET step_index=?,draft_json=?,status='REVIEW',updated_at=? WHERE admin_id=? AND form_id=?")
+    .bind(nextIndex,JSON.stringify(draft),now,String(chatId),formId).run();
+  const summary = [
+    "📋 PERIKSA DATA PRODUK",
+    "SKU: " + draft.sku,
+    "Nama: " + draft.name,
+    "Harga: " + rupiah(draft.price),
+    "Stok: " + (draft.stock == null ? "Tidak dibatasi" : draft.stock),
+    "Status: " + (draft.active ? "Aktif" : "Nonaktif"),
+    "Foto: " + (draft.photo_url ? "URL terpasang" : "Tidak ada"),
+    "Deskripsi: " + (draft.description || "—"),
+    "",
+    "Simpan produk ini?"
+  ].join("\n");
+  await sendTelegram(env,chatId,summary,{
+    inline_keyboard:[
+      [{text:"✅ Simpan Produk",callback_data:"adm:productform:save:"+formId}],
+      [{text:"✖️ Batal",callback_data:"adm:productform:cancel:"+formId}]
+    ]
+  });
+}
+
+async function handleAdminProductWizardConfirm(env, message, chatId, actorId, action, formId) {
+  const row = await env.DB.prepare(
+    "SELECT * FROM admin_product_drafts WHERE admin_id=? AND form_id=? AND status='REVIEW' AND expires_at>? LIMIT 1"
+  ).bind(String(chatId),String(formId),new Date().toISOString()).first();
+  if (!row) throw new Error("Formulir tidak ditemukan atau sudah kedaluwarsa.");
+  if (action === "cancel") {
+    await env.DB.prepare("DELETE FROM admin_product_drafts WHERE admin_id=? AND form_id=?")
+      .bind(String(chatId),String(formId)).run();
+    await updateTelegramMessage(env,message,{
+      text:"✖️ Formulir produk dibatalkan. Tidak ada perubahan pada katalog.",
+      replyMarkup:adminMenuKeyboard(),clearMedia:true
+    });
+    return;
+  }
+  if (action !== "save") throw new Error("Aksi formulir tidak dikenal.");
+  const product = JSON.parse(row.draft_json || "{}");
+  const result = await saveCatalogProduct(env,product,String(row.original_sku || ""));
+  await recordAdminActivity(env,{
+    actorId,
+    action:result === "updated" ? "PRODUCT_UPDATED" : "PRODUCT_CREATED",
+    resourceType:"product",
+    resourceId:product.sku,
+    summary:{sku:product.sku,name:String(product.name||"").slice(0,100),price:Number(product.price),stock:product.stock,active:Boolean(product.active)}
+  });
+  await env.DB.prepare("DELETE FROM admin_product_drafts WHERE admin_id=? AND form_id=?")
+    .bind(String(chatId),String(formId)).run();
+  await updateTelegramMessage(env,message,{
+    text:"✅ Produk " + product.sku + (result === "updated" ? " berhasil diperbarui." : " berhasil ditambahkan.") +
+      "\n\nKatalog pelanggan sudah membaca sumber data D1 yang sama. Gunakan Refresh Katalog untuk melihat perubahan.",
+    replyMarkup:adminMenuKeyboard(),clearMedia:true
+  });
 }
 
 async function saveCatalogProduct(env, product, originalSku = "") {
@@ -1272,6 +1450,18 @@ async function handleTelegramCallback(env, query) {
       ] },
       clearMedia: true
     });
+    return;
+  }
+
+  if (data.startsWith("adm:productform:")) {
+    if (!admin) {
+      await updateTelegramMessage(env,message,{text:"⛔ Formulir ini khusus admin.",replyMarkup:null});
+      return;
+    }
+    const parts = data.split(":");
+    const action = parts[2];
+    const formId = parts.slice(3).join(":");
+    await handleAdminProductWizardConfirm(env,message,chatId,userId,action,formId);
     return;
   }
 
