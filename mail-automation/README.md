@@ -31,3 +31,8 @@ This branch is source/code work only. No production Worker, D1 migration, secret
 
 ## Known schema constraint
 The current production schema defines `mail_machine_aliases.client_ref` as globally UNIQUE, not UNIQUE per `token_hash`. The application lookup and hourly quota are token-hash scoped, but a future second machine token using the same client reference could still hit a database uniqueness conflict. This is not an authorization bypass; it is a multi-token compatibility limitation. Do not claim multi-token isolation until a reviewed D1 table-rebuild migration changes the constraint to `UNIQUE(token_hash, client_ref)` and passes migration tests. No migration has been applied.
+
+## Domain migration dependency (2026-11-15)
+The requested migration target is `seiton.my.id`. Cloudflare currently has the new zone `seiton.my.id` in `pending` status; its DNS still contains parked-domain A/TXT records and Email Routing is `unconfigured`/disabled. The existing `seiton.biz.id` zone is active and its `inbox.seiton.biz.id` Email Routing subdomain is `ready`, with the current Worker rule targeting `receiver@inbox.seiton.biz.id`.
+
+This repository snapshot still hard-codes `PANEL_ORIGIN=https://mail.seiton.biz.id` and `MAIL_DOMAIN=inbox.seiton.biz.id`. Do not deploy the P3 Mail Worker integration or change the live routing until the domain migration is completed deliberately. The target hostname and alias address must be confirmed from the migration plan, then all recipient validation, generated alias addresses, origin checks, DNS, Email Routing subdomain/rule, and Worker settings must move together. Keep the old zone and route available during cutover until inbound delivery on the new zone is proven end-to-end.
