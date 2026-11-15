@@ -636,7 +636,8 @@ async function handleTelegram(request, env, ctx) {
         ...legacyOrderInput, channel: "telegram", customerId, customerName,
         idempotencyKey: String(update.update_id ?? (chatId + ":" + message.message_id))
       });
-      await sendTelegram(env, chatId, orderConfirmation(legacyResult, env), orderConfirmationKeyboard(legacyResult));
+      await sendTelegram(env, chatId, await orderConfirmationWithPaymentInstructions(env, legacyResult), orderConfirmationKeyboard(legacyResult));
+      if (String(legacyResult.paymentMethod || "").toUpperCase() === "QRIS") await sendQrisPaymentScreen(env, chatId, legacyResult);
       return;
     }
     const orderInput = parseOrderText(text);
@@ -652,7 +653,8 @@ async function handleTelegram(request, env, ctx) {
       ...orderInput, channel: "telegram", customerId, customerName,
       idempotencyKey: String(update.update_id ?? (chatId + ":" + message.message_id))
     });
-    await sendTelegram(env, chatId, orderConfirmation(result, env), orderConfirmationKeyboard(result));
+    await sendTelegram(env, chatId, await orderConfirmationWithPaymentInstructions(env, result), orderConfirmationKeyboard(result));
+    if (String(result.paymentMethod || "").toUpperCase() === "QRIS") await sendQrisPaymentScreen(env, chatId, result);
   })();
   ctx.waitUntil(work.catch(async error => {
     console.error(JSON.stringify({ level: "error", event: "telegram_processing", message: error.message }));
