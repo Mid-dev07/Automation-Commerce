@@ -31,6 +31,18 @@ Each order currently receives a random 3-digit suffix (`001`–`999`); the expec
 
 The QR image is rendered by QuickChart using only the QR payload as input. QuickChart is an image-rendering dependency, not a payment gateway. The payload includes merchant payment data; a strict all-internal rendering path would replace this renderer with a bundled QR encoder.
 
+## Controlled Telegram preview
+
+After the branch is deployed to an isolated test Worker with the Seiton GoPay Merchant payload configured as `QRIS_STATIC_PAYLOAD`, an admin can request a preview in the bot's private chat:
+
+```text
+/qris_test 10000
+```
+
+The command is admin-only and private-chat-only. It composes a dynamic payload from the actual Worker Secret and sends the QR image to the admin. It does not create an order or insert a payment ledger row. The requested amount is checked against existing QRIS expected amounts to avoid an obvious collision.
+
+First scan only: verify the displayed merchant and exact amount in GoPay and at least one other issuer app. Do not pay until the merchant and amount are correct. If a controlled real payment is then performed, confirm that it appears in the correct GoPay Merchant transaction history. This preview QR is not tracked, cancelled, or invalidated by Seiton; treat it as reusable until the acquirer proves otherwise and do not share it with customers.
+
 ## GoPay Merchant acceptance is a separate release gate
 
 GoPay's published instructions describe a dynamic QRIS bill as one created in GoPay Merchant after the merchant enters the amount. Bank Indonesia describes MPM dynamic QRIS as a QR issued through an electronic device after the merchant enters the amount.
