@@ -42,9 +42,22 @@ const PROJECT_SELECT = "SELECT p.project_id,p.client_id,p.title,p.service_name,p
  "LEFT JOIN owner_project_payments pay ON pay.project_id=p.project_id ";
 
 async function parseBody(request){
-  const length=Number(request.headers.get("Content-Length")||0);
-  if(length>16000)throw new Error("Ukuran data terlalu besar.");
-  try{const b=await request.json();if(!b||typeof b!=="object"||Array.isArray(b))throw new Error("Format data tidak valid.");return b;}
+  const declared=Number(request.headers.get("Content-Length")||0);
+  if(Number.isFinite(declared)&&declared>16000)throw new Error("Ukuran data terlalu besar.");
+  const reader=request.body?.getReader();
+  if(!reader)throw new Error("Body permintaan kosong.");
+  const chunks=[];let total=0;
+  try{
+    while(true){
+      const part=await reader.read();if(part.done)break;
+      total+=part.value.byteLength;
+      if(total>16000){try{await reader.cancel();}catch{}throw new Error("Ukuran data terlalu besar.");}
+      chunks.push(part.value);
+    }
+  }catch(e){if(e?.message==="Ukuran data terlalu besar.")throw e;throw new Error("Body permintaan tidak dapat dibaca.");}
+  const bytes=new Uint8Array(total);let offset=0;
+  for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+  try{const b=JSON.parse(new TextDecoder().decode(bytes));if(!b||typeof b!=="object"||Array.isArray(b))throw new Error("Format data tidak valid.");return b;}
   catch(e){if(e instanceof SyntaxError)throw new Error("Format JSON tidak valid.");throw e;}
 }
 function normalizeNewProject(b){
@@ -83,13 +96,14 @@ async function listProjects(env,url){
   return json({ok:true,projects:(r.results||[]).map(projectRow),limit,offset});
 }
 async function operationsSummary(env){
+  const today=new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Jakarta"}).format(new Date());
   const r=await env.SITE_DB.prepare(
     "SELECT COUNT(*) AS active_projects,"+
-    "COALESCE(SUM(CASE WHEN due_at<>'' AND due_at<date('now') THEN 1 ELSE 0 END),0) AS overdue_projects,"+
+    "COALESCE(SUM(CASE WHEN due_at<>'' AND due_at<? THEN 1 ELSE 0 END),0) AS overdue_projects,"+
     "COALESCE(SUM(CASE WHEN status='MENUNGGU_DP' THEN 1 ELSE 0 END),0) AS awaiting_deposit,"+
     "COALESCE(SUM(CASE WHEN status='MENUNGGU_PELUNASAN' THEN 1 ELSE 0 END),0) AS awaiting_final_payment "+
     "FROM owner_projects WHERE archived_at IS NULL AND status NOT IN ('SELESAI','DIBATALKAN')"
-  ).first();
+  ).bind(today).first();
   return json({ok:true,summary:{activeProjects:Number(r?.active_projects||0),overdueProjects:Number(r?.overdue_projects||0),
     awaitingDeposit:Number(r?.awaiting_deposit||0),awaitingFinalPayment:Number(r?.awaiting_final_payment||0)}});
 }
