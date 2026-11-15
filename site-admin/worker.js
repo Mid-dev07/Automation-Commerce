@@ -305,6 +305,49 @@ if(["/api/admin/otp/mailboxes","/api/admin/otp/mailboxes/revoke","/api/admin/otp
   try{const r=await callOtpBackend(env,target,"POST",body);return secure(j(r.data,r.status));}
   catch(e){return secure(j({ok:false,error:"Backend Portal OTP belum dapat diproses."},503));}
 }
+if(u.pathname==="/api/admin/bot/diagnostics"&&req.method==="GET"){
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  try{
+    if(!env.ORDER_BACKEND)return secure(j({ok:false,error:"Service binding bot tidak tersedia."},503));
+    const upstream=await env.ORDER_BACKEND.fetch(new Request("https://internal/api/admin/bot/diagnostics",{headers:{Authorization:"Bearer "+session.token}}));
+    const payload=await upstream.json().catch(()=>({ok:false,error:"Respons diagnostik bot tidak valid."}));
+    return secure(j(payload,upstream.status));
+  }catch(e){
+    console.error(JSON.stringify({event:"owner_admin_bot_diagnostics_failed",error:String(e&&e.message||e)}));
+    return secure(j({ok:false,error:"Worker bot belum dapat dihubungi melalui koneksi internal."},503));
+  }
+}
+if(u.pathname==="/api/admin/bot/data"&&req.method==="GET"){
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  try{
+    if(!env.ORDER_BACKEND)return secure(j({ok:false,error:"Service binding bot tidak tersedia."},503));
+    const upstream=await env.ORDER_BACKEND.fetch(new Request("https://internal/api/admin/data",{headers:{Authorization:"Bearer "+session.token}}));
+    const payload=await upstream.json().catch(()=>({ok:false,error:"Data katalog bot tidak valid."}));
+    return secure(j(payload,upstream.status));
+  }catch(e){
+    console.error(JSON.stringify({event:"owner_admin_bot_data_failed",error:String(e&&e.message||e)}));
+    return secure(j({ok:false,error:"Data katalog dan order bot belum dapat dibaca."},503));
+  }
+}
+if(u.pathname==="/api/admin/bot/products"&&req.method==="POST"){
+  if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  let body;try{body=await req.json();}catch{return secure(j({ok:false,error:"Data produk tidak valid."},400));}
+  if(!body||!["save","delete"].includes(body.action))return secure(j({ok:false,error:"Aksi produk tidak dikenal."},400));
+  try{
+    if(!env.ORDER_BACKEND)return secure(j({ok:false,error:"Service binding bot tidak tersedia."},503));
+    const upstream=await env.ORDER_BACKEND.fetch(new Request("https://internal/api/admin/products",{
+      method:"POST",
+      headers:{Authorization:"Bearer "+session.token,"Content-Type":"application/json"},
+      body:JSON.stringify(body)
+    }));
+    const payload=await upstream.json().catch(()=>({ok:false,error:"Respons penyimpanan produk tidak valid."}));
+    return secure(j(payload,upstream.status));
+  }catch(e){
+    console.error(JSON.stringify({event:"owner_admin_bot_product_mutation_failed",error:String(e&&e.message||e)}));
+    return secure(j({ok:false,error:"Perubahan katalog bot gagal diteruskan."},503));
+  }
+}
 if(u.pathname==="/api/admin/pricing"&&req.method==="GET"){if(!(await activeSession(req,env)))return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));return secure(j(await getPricing(env)));}
 if(u.pathname==="/api/admin/pricing"&&req.method==="PUT"){if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));let b;try{b=await req.json();}catch{return secure(j({ok:false,error:"Data tidak valid."},400));}try{return secure(j(await savePricing(env,b,session.client_hash)));}catch(e){return secure(j({ok:false,error:e.message},400));}}
 if(u.pathname==="/"||u.pathname==="/index.html")return secure(new Response(page(),{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}}));
