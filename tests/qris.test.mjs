@@ -143,6 +143,7 @@ test("Midtrans charge adapter prefers ASPI QR image, authenticates, and checks e
       payment_type: "qris",
       transaction_status: "pending",
       fraud_status: "accept",
+      transaction_time: "2026-11-15 08:00:00",
       actions: [
         { name: "generate-qr-code", method: "GET", url: "https://api.sandbox.midtrans.com/v2/qris/midtrans-transaction-1/qr-code" },
         { name: "generate-qr-code-v2", method: "GET", url: "https://api.sandbox.midtrans.com/v4/qris/QR-REF-1/qr-code" }
@@ -192,6 +193,43 @@ test("Midtrans Status API returns fraud status for settlement validation", async
     assert.equal(status.status, "PAID");
     assert.equal(status.fraudStatus, "accept");
     assert.equal(status.amount, 125000);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("Midtrans QRIS expiry is estimated from provider transaction time by acquirer defaults", async () => {
+  const { createMidtransQrisCharge } = await import("../qris.mjs");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status_code: "201",
+    transaction_id: "midtrans-transaction-expiry",
+    order_id: "SEI-20261115-ABCD1234",
+    merchant_id: "M000001",
+    gross_amount: "125000.00",
+    currency: "IDR",
+    payment_type: "qris",
+    transaction_status: "pending",
+    fraud_status: "accept",
+    transaction_time: "2026-11-15 08:00:00",
+    actions: [{
+      name: "generate-qr-code-v2",
+      method: "GET",
+      url: "https://api.sandbox.midtrans.com/v4/qris/QR-REF-1/qr-code"
+    }]
+  }), { status: 201, headers: { "Content-Type": "application/json" } });
+  try {
+    const gopay = await createMidtransQrisCharge({
+      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
+      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "gopay"
+    }, { orderId: "SEI-20261115-ABCD1234", amount: 125000 });
+    const airpay = await createMidtransQrisCharge({
+      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
+      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "airpay_shopee"
+    }, { orderId: "SEI-20261115-ABCD1234", amount: 125000 });
+    assert.equal(new Date(gopay.expiresAt).toISOString(), "2026-11-15T01:15:00.000Z");
+    assert.equal(new Date(airpay.expiresAt).toISOString(), "2026-11-15T01:05:00.000Z");
   } finally {
     globalThis.fetch = originalFetch;
   }
