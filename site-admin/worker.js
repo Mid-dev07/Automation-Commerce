@@ -349,6 +349,50 @@ if(u.pathname==="/api/control/proof"&&req.method==="GET"){
   }catch(e){console.error(JSON.stringify({event:"owner_control_payment_proof_failed",error:String(e&&e.message||e)}));return secure(j({ok:false,error:"Bukti pembayaran belum dapat diambil."},503));}
 }
 
+
+if(u.pathname==="/api/control/export"&&req.method==="GET"){
+  const origin=req.headers.get("Origin");
+  if(origin&&!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  const type=controlText(u.searchParams.get("type"),20);
+  const from=controlText(u.searchParams.get("from"),10),to=controlText(u.searchParams.get("to"),10);
+  const validDate=value=>!value||/^\\d{4}-\\d{2}-\\d{2}$/.test(value)&&(()=>{const d=new Date(value+"T00:00:00.000Z");return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===value;})();
+  if(!["orders","finance","daily","inventory"].includes(type))return secure(j({ok:false,error:"Jenis ekspor tidak dikenal."},400));
+  if(!validDate(from)||!validDate(to)||(from&&to&&from>to))return secure(j({ok:false,error:"Rentang tanggal tidak valid."},400));
+  try{
+    const query=new URLSearchParams({type});if(from)query.set("from",from);if(to)query.set("to",to);
+    const upstream=await fetchOrderAdmin(env,session.token,"/api/admin/export?"+query.toString());
+    if(!upstream.ok){
+      const payload=await upstream.json().catch(()=>({}));
+      return secure(j({ok:false,error:controlText(payload.error,240)||"Laporan belum dapat dibuat."},upstream.status));
+    }
+    const contentType=String(upstream.headers.get("Content-Type")||"").toLowerCase();
+    if(!contentType.startsWith("text/csv")){
+      try{await upstream.body?.cancel();}catch{}
+      console.error(JSON.stringify({event:"owner_control_export_invalid_content_type",type,contentType}));
+      return secure(j({ok:false,error:"Backend mengembalikan format laporan yang tidak dikenali."},502));
+    }
+    try{
+      await newAuditStatement(env,{action:"REPORT_EXPORT_SENT",resource:"report_export",summary:{type,from:from||null,to:to||null},clientHash:session.client_hash});
+    }catch(auditError){
+      try{await upstream.body?.cancel();}catch{}
+      console.error(JSON.stringify({event:"owner_control_export_audit_failed",type,error:String(auditError&&auditError.message||auditError)}));
+      return secure(j({ok:false,error:"Laporan tidak dikirim karena pencatatan audit gagal."},503));
+    }
+    const range=from||to?"_"+(from||"awal")+"_"+(to||"akhir"):"_semua";
+    const filename="Seiton_"+type+range+".csv";
+    return secure(new Response(upstream.body,{status:200,headers:{
+      "Content-Type":"text/csv; charset=utf-8",
+      "Content-Disposition":'attachment; filename="'+filename+'"',
+      "Cache-Control":"private, no-store",
+      "X-Content-Type-Options":"nosniff"
+    }}));
+  }catch(error){
+    console.error(JSON.stringify({event:"owner_control_export_failed",type,error:String(error&&error.message||error)}));
+    return secure(j({ok:false,error:"Laporan belum dapat dihubungi. Coba kembali."},503));
+  }
+}
+
 if(u.pathname==="/api/admin/audit"&&req.method==="GET"){
   const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
   const raw=Number(u.searchParams.get("limit")||30),limit=Number.isFinite(raw)?Math.max(1,Math.min(100,Math.floor(raw))):30;
