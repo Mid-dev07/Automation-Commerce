@@ -232,9 +232,10 @@ export async function createMidtransQrisCharge(env, order) {
     throw new Error("MIDTRANS_QRIS_CREATE_FAILED_" + response.status + "_" + clean(result.status_message || result.message, 80));
   }
 
-  const qrAction = (result.actions || []).find(action =>
-    ["generate-qr-code", "generate-qr-code-v2"].includes(String(action.name || ""))
-  );
+  const qrActions = Array.isArray(result.actions) ? result.actions : [];
+  // Prefer the newer ASPI-format image action where Midtrans supplies it.
+  const qrAction = qrActions.find(action => String(action.name || "") === "generate-qr-code-v2")
+    || qrActions.find(action => String(action.name || "") === "generate-qr-code");
   const qrImageUrl = String(qrAction?.url || "");
   const allowedHosts = new Set(["api.midtrans.com", "api.sandbox.midtrans.com"]);
   let parsedUrl;
