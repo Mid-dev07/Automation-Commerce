@@ -7,7 +7,9 @@ const assert = require("node:assert/strict");
 
 const root = path.resolve(__dirname, "..");
 const workerPath = path.join(root, "worker.js");
+const transactionLayerPath = path.join(root, "transaction-layer.js");
 const worker = fs.readFileSync(workerPath, "utf8");
+const transactionLayer = fs.readFileSync(transactionLayerPath, "utf8");
 
 function extractBetween(source, start, end) {
   const a = source.indexOf(start);
@@ -334,6 +336,9 @@ test("customers can re-display their own active dynamic QRIS from Pesanan Saya",
   assert.match(worker, /text: "📲 Tampilkan QR " \+ orderId\.slice\(-8\)/);
   assert.match(worker, /String\(order\.customer_id\) !== String\(userId\)/);
   assert.match(worker, /payment\.status === "PAID"/);
+  const handler = worker.slice(worker.indexOf("async function handleQrisPaymentShow"), worker.indexOf("async function handleQrisStatusCheck"));
+  assert.ok(handler.includes('CANCELLED_ORDER_STATUSES.includes(String(order.status || "").toUpperCase())'));
+  assert.ok(handler.includes("QRIS tidak dapat ditampilkan kembali"));
 });
 
 
@@ -363,6 +368,9 @@ test("admin can manage payment methods and bank destinations through authenticat
   assert.match(worker, /data-method-toggle/);
   assert.match(worker, /data-bank-toggle/);
   assert.match(worker, /bankAccountForm/);
+  const methodHandler = worker.slice(worker.indexOf("async function handleAdminPaymentMethods"), worker.indexOf("async function handleAdminPaymentAction"));
+  assert.ok(methodHandler.includes("const enabled = body.enabled === undefined ? true : body.enabled"));
+  assert.ok(methodHandler.includes('typeof enabled !== "boolean"'));
 });
 
 test("checkout only offers admin-enabled methods and transfer requires an active destination", () => {
@@ -371,6 +379,9 @@ test("checkout only offers admin-enabled methods and transfer requires an active
   assert.match(worker, /accounts\.filter\(account => account\.enabled\)/);
   assert.match(worker, /availableMethods\.includes\(method\)/);
   assert.match(worker, /Metode pembayaran tersebut baru saja dinonaktifkan/);
+  assert.ok(transactionLayer.includes("payment_method_settings pms"));
+  assert.ok(transactionLayer.includes("payment_bank_accounts pba WHERE pba.enabled = 1"));
+  assert.ok(transactionLayer.includes("createdAt, sku, qty, method, method"));
 });
 
 test("QRIS approval blocks amount and receipt mismatches and verifies payload amount", () => {
