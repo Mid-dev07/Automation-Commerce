@@ -8,6 +8,8 @@ const assert = require("node:assert/strict");
 const root = path.resolve(__dirname, "..");
 const workerPath = path.join(root, "site-admin", "worker.js");
 const worker = fs.readFileSync(workerPath, "utf8");
+const crmMigrationPath = path.join(root, "site-admin", "migrations", "0002_owner_crm_projects.sql");
+const crmMigration = fs.readFileSync(crmMigrationPath, "utf8");
 
 test("owner admin Worker parses", () => {
   execFileSync(process.execPath, ["--check", workerPath], { stdio: "pipe" });
@@ -166,4 +168,63 @@ test("bot inline dashboard JavaScript parses with product-management handlers", 
   const scriptEnd=html.indexOf("</script>",scriptStart);
   assert.ok(scriptStart>=0&&scriptEnd>scriptStart);
   new vm.Script(html.slice(scriptStart+8,scriptEnd),{filename:"site-admin-bot-console.js"});
+});
+
+test("owner payment operations are proxied only through authenticated service-binding routes", () => {
+  assert.ok(worker.includes('"/api/admin/payment-methods":["GET","POST"]'));
+  assert.ok(worker.includes('"/api/admin/payment":["POST"]'));
+  assert.ok(worker.includes('"/api/admin/order-status":["POST"]'));
+  assert.ok(worker.includes('"/api/admin/proof":["GET"]'));
+  assert.ok(worker.includes('"/api/admin/export":["GET"]'));
+  assert.ok(worker.includes("async function handleOwnerOrderProxy"));
+  assert.ok(worker.includes("const session=await activeSession(req,env)"));
+  assert.ok(worker.includes("if(method===" + '"POST"' + "&&!sameOriginAdmin(req))"));
+  assert.ok(worker.includes("https://internal"+'"+upstreamPath'));
+  assert.ok(!worker.includes("ORDER_BACKEND.fetch(new Request(req.url"));
+});
+
+test("owner payment UI supports bank-account setup, method toggles and safe approval retries", () => {
+  assert.ok(worker.includes("id='payment-console'"));
+  assert.ok(worker.includes("id='bankAccountForm'"));
+  assert.ok(worker.includes("/api/admin/payment-methods"));
+  assert.ok(worker.includes("action:'save_bank'"));
+  assert.ok(worker.includes("data-method-toggle"));
+  assert.ok(worker.includes("data-bank-toggle"));
+  assert.ok(worker.includes("ALREADY_APPROVED"));
+  assert.ok(worker.includes("receipt_sent===false"));
+  assert.ok(worker.includes("data-payment-approve"));
+  assert.ok(worker.includes("/api/admin/proof?order_id="));
+});
+
+test("CRM API stores leads, project milestones, payment gates and owner tasks in the site database", () => {
+  assert.ok(worker.includes("async function handleCrmApi"));
+  assert.ok(worker.includes("site_crm_leads"));
+  assert.ok(worker.includes("site_crm_projects"));
+  assert.ok(worker.includes("site_crm_tasks"));
+  assert.ok(worker.includes("contact_permission"));
+  assert.ok(worker.includes("CRM_PROJECT_TRANSITIONS"));
+  assert.ok(worker.includes("dpPaidAt"));
+  assert.ok(worker.includes("finalPaidAt"));
+  assert.ok(worker.includes("Catat DP telah diterima sebelum proyek berpindah"));
+  assert.ok(worker.includes("Catat pelunasan telah diterima sebelum serah terima"));
+  assert.ok(worker.includes("newAuditStatement(env,{action:\"CRM_PROJECT_UPDATED\""));
+});
+
+test("CRM migration isolates lead, project and task records in the owner site database", () => {
+  assert.match(crmMigration, /CREATE TABLE IF NOT EXISTS site_crm_leads/);
+  assert.match(crmMigration, /CREATE TABLE IF NOT EXISTS site_crm_projects/);
+  assert.match(crmMigration, /CREATE TABLE IF NOT EXISTS site_crm_tasks/);
+  assert.match(crmMigration, /CHECK\(dp_amount \+ final_amount = agreed_total\)/);
+  assert.match(crmMigration, /FOREIGN KEY \(lead_id\) REFERENCES site_crm_leads/);
+  assert.match(crmMigration, /CHECK\(lead_id IS NOT NULL OR project_id IS NOT NULL\)/);
+});
+
+test("owner panel includes payment queue and CRM workflow in the same authenticated page", () => {
+  assert.ok(worker.includes("id='payment-console'"));
+  assert.ok(worker.includes("id='crm-console'"));
+  assert.ok(worker.includes("href='#payment-console'"));
+  assert.ok(worker.includes("href='#crm-console'"));
+  assert.ok(worker.includes("async function loadCrm()"));
+  assert.ok(worker.includes("async function loadPaymentSettings()"));
+  assert.ok(worker.includes("renderPaymentQueue()"));
 });
