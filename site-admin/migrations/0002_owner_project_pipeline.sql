@@ -40,6 +40,7 @@ CREATE INDEX IF NOT EXISTS owner_projects_due_idx ON owner_projects(due_at,statu
 
 CREATE TABLE IF NOT EXISTS owner_project_payments (
   payment_id TEXT PRIMARY KEY,
+  idempotency_key TEXT NOT NULL UNIQUE,
   project_id TEXT NOT NULL REFERENCES owner_projects(project_id),
   payment_type TEXT NOT NULL CHECK (payment_type IN ('DP','PELUNASAN','LAINNYA','PENGEMBALIAN')),
   amount INTEGER NOT NULL CHECK (amount BETWEEN 1 AND 1000000000),
@@ -63,3 +64,19 @@ CREATE TABLE IF NOT EXISTS owner_project_events (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS owner_project_events_project_idx ON owner_project_events(project_id,created_at DESC);
+
+
+-- Database-level protection against concurrent or repeated over-refunds.
+CREATE TRIGGER IF NOT EXISTS owner_project_refund_guard
+BEFORE INSERT ON owner_project_payments
+WHEN NEW.payment_type='PENGEMBALIAN'
+BEGIN
+  SELECT CASE
+    WHEN NEW.amount > COALESCE((
+      SELECT SUM(CASE WHEN payment_type='PENGEMBALIAN' THEN -amount ELSE amount END)
+      FROM owner_project_payments
+      WHERE project_id=NEW.project_id
+    ),0)
+    THEN RAISE(ABORT,'PROJECT_REFUND_EXCEEDS_NET_PAYMENTS')
+  END;
+END;
