@@ -133,6 +133,252 @@ async function callOtpBackend(env,path,method="GET",body){
  const data=await response.json().catch(()=>({}));
  return {ok:response.ok,status:response.status,data};
 }
+
+async function proxyOrderAdmin(req,env,session,upstreamPath,method,body){
+  if(!env.ORDER_BACKEND)return secure(j({ok:false,error:"Service transaksi belum tersedia."},503));
+  try{
+    const headers={Authorization:"Bearer "+session.token};
+    if(body!==undefined)headers["Content-Type"]="application/json";
+    const upstream=await env.ORDER_BACKEND.fetch(new Request("https://internal"+upstreamPath,{
+      method,headers,body:body===undefined?undefined:JSON.stringify(body)
+    }));
+    const contentType=String(upstream.headers.get("Content-Type")||"").toLowerCase();
+    if(contentType.includes("application/json")){
+      const payload=await upstream.json().catch(()=>({ok:false,error:"Respons backend transaksi tidak valid."}));
+      const safePayload=payload&&typeof payload==="object"?payload:{ok:false,error:"Respons backend transaksi tidak valid."};
+      const headersOut={};
+      const retryAfter=upstream.headers.get("Retry-After");
+      if(retryAfter)headersOut["Retry-After"]=retryAfter;
+      return secure(j(safePayload,upstream.status,headersOut));
+    }
+    if(!upstream.ok){
+      console.error(JSON.stringify({event:"owner_order_proxy_failed",path:upstreamPath,status:upstream.status}));
+      return secure(j({ok:false,error:"Backend transaksi gagal memproses permintaan."},upstream.status>=500?502:upstream.status));
+    }
+    const type=contentType.startsWith("image/")||contentType==="application/pdf"||contentType==="text/csv; charset=utf-8"||contentType==="text/csv"
+      ? contentType : "application/octet-stream";
+    const headersOut=new Headers({
+      "Content-Type":type,
+      "Cache-Control":"private, no-store",
+      "X-Content-Type-Options":"nosniff",
+      "Content-Security-Policy":"default-src 'none'; sandbox"
+    });
+    const disposition=upstream.headers.get("Content-Disposition");
+    if(disposition&&/^(inline|attachment);/i.test(disposition))headersOut.set("Content-Disposition",disposition.replace(/[\r\n"]/g,"").slice(0,200));
+    return secure(new Response(upstream.body,{status:upstream.status,headers:headersOut}));
+  }catch(error){
+    console.error(JSON.stringify({event:"owner_order_proxy_unavailable",path:upstreamPath,code:"SERVICE_BINDING_FAILED"}));
+    return secure(j({ok:false,error:"Layanan transaksi belum dapat dihubungi. Coba perbarui kembali."},503));
+  }
+}
+async function handleOwnerOrderProxy(req,env){
+  const url=new URL(req.url),method=req.method.toUpperCase();
+  const allowed={
+    "/api/admin/payment-methods":["GET","POST"],
+    "/api/admin/payment":["POST"],
+    "/api/admin/order-status":["POST"],
+    "/api/admin/proof":["GET"],
+    "/api/admin/export":["GET"]
+  };
+  if(!allowed[url.pathname]||!allowed[url.pathname].includes(method))return secure(j({ok:false,error:"Rute atau metode tidak diizinkan."},405));
+  if(method==="POST"&&!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
+  const session=await activeSession(req,env);
+  if(!session)return secure(j({ok:false,error:"Sesi owner tidak valid atau kedaluwarsa."},401));
+  let upstreamPath=url.pathname,body;
+  if(method==="GET"&&url.pathname==="/api/admin/proof"){
+    const orderId=String(url.searchParams.get("order_id")||"").trim();
+    if(!orderId||orderId.length>100)return secure(j({ok:false,error:"ID pesanan tidak valid."},400));
+    upstreamPath+="?order_id="+encodeURIComponent(orderId);
+  }else if(method==="GET"&&url.pathname==="/api/admin/export"){
+    const type=String(url.searchParams.get("type")||"");
+    if(!["orders","finance","daily","inventory"].includes(type))return secure(j({ok:false,error:"Jenis laporan tidak diizinkan."},400));
+    upstreamPath+="?type="+encodeURIComponent(type);
+  }else if(method==="POST"){
+    const length=Number(req.headers.get("Content-Length")||0);
+    if(length>16384)return secure(j({ok:false,error:"Permintaan terlalu besar."},413));
+    try{body=await req.json();}catch{return secure(j({ok:false,error:"Format JSON tidak valid."},400));}
+    if(!body||typeof body!=="object"||Array.isArray(body))return secure(j({ok:false,error:"Format aksi tidak valid."},400));
+    if(url.pathname==="/api/admin/payment-methods"&&!["set_method","save_bank","toggle_bank"].includes(String(body.action||"")))return secure(j({ok:false,error:"Aksi metode pembayaran tidak diizinkan."},400));
+    if(url.pathname==="/api/admin/payment"&&(!["approve","reject"].includes(String(body.action||""))||!String(body.order_id||"").trim()))return secure(j({ok:false,error:"Aksi verifikasi tidak valid."},400));
+    if(url.pathname==="/api/admin/order-status"&&(!String(body.order_id||"").trim()||!["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"].includes(String(body.status||"").toUpperCase())))return secure(j({ok:false,error:"Perubahan status tidak valid."},400));
+  }
+  return proxyOrderAdmin(req,env,session,upstreamPath,method,body);
+}
+const CRM_LEAD_STATUSES=["NEW","QUALIFIED","PROPOSAL_SENT","WON","LOST"];
+const CRM_PROJECT_STATUSES=["WAITING_DP","WAITING_MATERIALS","IN_PROGRESS","REVIEW","WAITING_FINAL_PAYMENT","HANDOVER","MAINTENANCE","CLOSED","CANCELLED"];
+const CRM_TASK_PRIORITIES=["LOW","NORMAL","HIGH"];
+const CRM_PROJECT_TRANSITIONS={
+  WAITING_DP:["WAITING_MATERIALS","IN_PROGRESS","CANCELLED"],
+  WAITING_MATERIALS:["IN_PROGRESS","CANCELLED"],
+  IN_PROGRESS:["REVIEW","CANCELLED"],
+  REVIEW:["IN_PROGRESS","WAITING_FINAL_PAYMENT","CANCELLED"],
+  WAITING_FINAL_PAYMENT:["IN_PROGRESS","HANDOVER","CANCELLED"],
+  HANDOVER:["MAINTENANCE","CLOSED"],
+  MAINTENANCE:["CLOSED"],
+  CLOSED:[],
+  CANCELLED:[]
+};
+function crmMoney(value,label){
+  const n=Number(value);
+  if(!Number.isSafeInteger(n)||n<0||n>1000000000000)throw new Error(label+" harus berupa Rupiah bulat yang tidak negatif.");
+  return n;
+}
+function crmDate(value,label){
+  if(value===undefined||value===null||value==="")return null;
+  const n=Number(value);
+  if(!Number.isSafeInteger(n)||n<0)throw new Error(label+" tidak valid.");
+  return n;
+}
+function crmText(value,max,label,required=false){
+  const text=txt(value,max);
+  if(required&&!text)throw new Error(label+" wajib diisi.");
+  return text;
+}
+async function loadCrmData(env){
+  const [leads,projects,tasks]=await Promise.all([
+    env.SITE_DB.prepare("SELECT lead_id,business_name,contact_name,contact_channel,contact_value,service_interest,status,next_follow_up_ms,contact_permission,notes,created_at_ms,updated_at_ms FROM site_crm_leads ORDER BY updated_at_ms DESC LIMIT 150").all(),
+    env.SITE_DB.prepare("SELECT project_id,lead_id,client_name,business_name,service_name,status,scope,deliverables,agreed_total,dp_amount,final_amount,dp_paid_at_ms,final_paid_at_ms,start_at_ms,due_at_ms,handover_at_ms,maintenance_until_ms,revision_limit,revisions_used,notes,created_at_ms,updated_at_ms FROM site_crm_projects ORDER BY updated_at_ms DESC LIMIT 150").all(),
+    env.SITE_DB.prepare("SELECT task_id,lead_id,project_id,title,priority,due_at_ms,status,completed_at_ms,created_at_ms,updated_at_ms FROM site_crm_tasks ORDER BY CASE status WHEN 'OPEN' THEN 0 ELSE 1 END,due_at_ms ASC LIMIT 200").all()
+  ]);
+  return {leads:leads.results||[],projects:projects.results||[],tasks:tasks.results||[],generated_at_ms:Date.now()};
+}
+async function handleCrmApi(req,env,session){
+  if(req.method==="GET")return secure(j({ok:true,...await loadCrmData(env)}));
+  if(req.method!=="POST")return secure(j({ok:false,error:"Metode CRM tidak diizinkan."},405));
+  if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
+  let body;try{body=await req.json();}catch{return secure(j({ok:false,error:"Format data CRM tidak valid."},400));}
+  if(!body||typeof body!=="object"||Array.isArray(body))return secure(j({ok:false,error:"Data CRM tidak valid."},400));
+  const action=String(body.action||""),now=Date.now(),actorHash=session.client_hash||null;
+  try{
+    if(action==="create_lead"){
+      const leadId=crypto.randomUUID();
+      const business=crmText(body.business_name,120,"Nama usaha",true);
+      const status=CRM_LEAD_STATUSES.includes(String(body.status||"NEW"))?String(body.status||"NEW"):"NEW";
+      const follow=crmDate(body.next_follow_up_ms,"Jadwal tindak lanjut");
+      const values={
+        lead_id:leadId,business_name:business,contact_name:crmText(body.contact_name,100,"Nama kontak"),
+        contact_channel:crmText(body.contact_channel,30,"Kanal kontak")||"whatsapp",
+        contact_value:crmText(body.contact_value,160,"Kontak pelanggan"),
+        service_interest:crmText(body.service_interest,160,"Layanan yang diminati"),
+        status,next_follow_up_ms:follow,contact_permission:body.contact_permission===true?1:0,
+        notes:crmText(body.notes,2000,"Catatan")
+      };
+      await env.SITE_DB.batch([
+        env.SITE_DB.prepare("INSERT INTO site_crm_leads(lead_id,business_name,contact_name,contact_channel,contact_value,service_interest,status,next_follow_up_ms,contact_permission,notes,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+          .bind(values.lead_id,values.business_name,values.contact_name,values.contact_channel,values.contact_value,values.service_interest,values.status,values.next_follow_up_ms,values.contact_permission,values.notes,now,now),
+        newAuditStatement(env,{action:"CRM_LEAD_CREATED",resource:"crm_lead",summary:{lead_id:leadId,status},clientHash:actorHash,now})
+      ]);
+    }else if(action==="update_lead"){
+      const leadId=crmText(body.lead_id,80,"ID prospek",true);
+      const old=await env.SITE_DB.prepare("SELECT * FROM site_crm_leads WHERE lead_id=?").bind(leadId).first();
+      if(!old)return secure(j({ok:false,error:"Prospek tidak ditemukan."},404));
+      const status=body.status===undefined?String(old.status):String(body.status);
+      if(!CRM_LEAD_STATUSES.includes(status))return secure(j({ok:false,error:"Status prospek tidak valid."},400));
+      const business=body.business_name===undefined?old.business_name:crmText(body.business_name,120,"Nama usaha",true);
+      const contactName=body.contact_name===undefined?old.contact_name:crmText(body.contact_name,100,"Nama kontak");
+      const channel=body.contact_channel===undefined?old.contact_channel:crmText(body.contact_channel,30,"Kanal kontak");
+      const contact=body.contact_value===undefined?old.contact_value:crmText(body.contact_value,160,"Kontak pelanggan");
+      const interest=body.service_interest===undefined?old.service_interest:crmText(body.service_interest,160,"Layanan yang diminati");
+      const follow=body.next_follow_up_ms===undefined?old.next_follow_up_ms:crmDate(body.next_follow_up_ms,"Jadwal tindak lanjut");
+      const permission=body.contact_permission===undefined?Number(old.contact_permission):body.contact_permission===true?1:0;
+      const notes=body.notes===undefined?old.notes:crmText(body.notes,2000,"Catatan");
+      await env.SITE_DB.batch([
+        env.SITE_DB.prepare("UPDATE site_crm_leads SET business_name=?,contact_name=?,contact_channel=?,contact_value=?,service_interest=?,status=?,next_follow_up_ms=?,contact_permission=?,notes=?,updated_at_ms=? WHERE lead_id=?")
+          .bind(business,contactName,channel,contact,interest,status,follow,permission,notes,now,leadId),
+        newAuditStatement(env,{action:"CRM_LEAD_UPDATED",resource:"crm_lead",summary:{lead_id:leadId,status},clientHash:actorHash,now})
+      ]);
+    }else if(action==="create_project"){
+      const projectId=crypto.randomUUID(),leadId=crmText(body.lead_id,80,"ID prospek");
+      if(leadId&&!await env.SITE_DB.prepare("SELECT lead_id FROM site_crm_leads WHERE lead_id=?").bind(leadId).first())return secure(j({ok:false,error:"Prospek terkait tidak ditemukan."},404));
+      const total=crmMoney(body.agreed_total,"Nilai kontrak");
+      const dp=body.dp_amount===undefined?Math.round(total*0.5):crmMoney(body.dp_amount,"DP");
+      const finalAmount=body.final_amount===undefined?total-dp:crmMoney(body.final_amount,"Pelunasan");
+      if(dp+finalAmount!==total)return secure(j({ok:false,error:"DP dan pelunasan harus sama dengan nilai kontrak."},400));
+      const revisions=Number(body.revision_limit??2);
+      if(!Number.isInteger(revisions)||revisions<0||revisions>50)return secure(j({ok:false,error:"Batas revisi tidak valid."},400));
+      const status=String(body.status||"WAITING_DP");
+      if(!CRM_PROJECT_STATUSES.includes(status))return secure(j({ok:false,error:"Status proyek tidak valid."},400));
+      const client=crmText(body.client_name,120,"Nama pelanggan",true);
+      const business=crmText(body.business_name,120,"Nama usaha")||client;
+      const fields={
+        projectId,leadId:leadId||null,client,business,service:crmText(body.service_name,160,"Layanan",true),status,
+        scope:crmText(body.scope,3000,"Ruang lingkup"),deliverables:crmText(body.deliverables,3000,"Hasil akhir"),
+        total,dp,finalAmount,revisions,notes:crmText(body.notes,2000,"Catatan"),
+        start:crmDate(body.start_at_ms,"Tanggal mulai"),due:crmDate(body.due_at_ms,"Tenggat"),
+        maintenance:crmDate(body.maintenance_until_ms,"Akhir maintenance")
+      };
+      await env.SITE_DB.batch([
+        env.SITE_DB.prepare("INSERT INTO site_crm_projects(project_id,lead_id,client_name,business_name,service_name,status,scope,deliverables,agreed_total,dp_amount,final_amount,dp_paid_at_ms,final_paid_at_ms,start_at_ms,due_at_ms,handover_at_ms,maintenance_until_ms,revision_limit,revisions_used,notes,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,NULL,?, ?,0,?,?,?)")
+          .bind(fields.projectId,fields.leadId,fields.client,fields.business,fields.service,fields.status,fields.scope,fields.deliverables,fields.total,fields.dp,fields.finalAmount,fields.start,fields.due,fields.maintenance,fields.revisions,fields.notes,now,now),
+        newAuditStatement(env,{action:"CRM_PROJECT_CREATED",resource:"crm_project",summary:{project_id:projectId,status},clientHash:actorHash,now})
+      ]);
+    }else if(action==="update_project"){
+      const projectId=crmText(body.project_id,80,"ID proyek",true);
+      const old=await env.SITE_DB.prepare("SELECT * FROM site_crm_projects WHERE project_id=?").bind(projectId).first();
+      if(!old)return secure(j({ok:false,error:"Proyek tidak ditemukan."},404));
+      const status=body.status===undefined?String(old.status):String(body.status);
+      if(!CRM_PROJECT_STATUSES.includes(status))return secure(j({ok:false,error:"Status proyek tidak valid."},400));
+      if(status!==old.status&&!CRM_PROJECT_TRANSITIONS[String(old.status)]?.includes(status))return secure(j({ok:false,error:"Perpindahan status proyek tidak diizinkan. Periksa urutan pengerjaan."},409));
+      const total=body.agreed_total===undefined?Number(old.agreed_total):crmMoney(body.agreed_total,"Nilai kontrak");
+      const dp=body.dp_amount===undefined?Number(old.dp_amount):crmMoney(body.dp_amount,"DP");
+      const finalAmount=body.final_amount===undefined?Number(old.final_amount):crmMoney(body.final_amount,"Pelunasan");
+      if(dp+finalAmount!==total)return secure(j({ok:false,error:"DP dan pelunasan harus sama dengan nilai kontrak."},400));
+      const revisions=body.revision_limit===undefined?Number(old.revision_limit):Number(body.revision_limit);
+      const revisionsUsed=body.revisions_used===undefined?Number(old.revisions_used):Number(body.revisions_used);
+      if(!Number.isInteger(revisions)||revisions<0||revisions>50||!Number.isInteger(revisionsUsed)||revisionsUsed<0||revisionsUsed>revisions)return secure(j({ok:false,error:"Jumlah revisi tidak valid."},400));
+      const next={
+        client:body.client_name===undefined?old.client_name:crmText(body.client_name,120,"Nama pelanggan",true),
+        business:body.business_name===undefined?old.business_name:crmText(body.business_name,120,"Nama usaha",true),
+        service:body.service_name===undefined?old.service_name:crmText(body.service_name,160,"Layanan",true),
+        scope:body.scope===undefined?old.scope:crmText(body.scope,3000,"Ruang lingkup"),
+        deliverables:body.deliverables===undefined?old.deliverables:crmText(body.deliverables,3000,"Hasil akhir"),
+        start:body.start_at_ms===undefined?old.start_at_ms:crmDate(body.start_at_ms,"Tanggal mulai"),
+        due:body.due_at_ms===undefined?old.due_at_ms:crmDate(body.due_at_ms,"Tenggat"),
+        handover:body.handover_at_ms===undefined?old.handover_at_ms:crmDate(body.handover_at_ms,"Tanggal serah terima"),
+        maintenance:body.maintenance_until_ms===undefined?old.maintenance_until_ms:crmDate(body.maintenance_until_ms,"Akhir maintenance"),
+        notes:body.notes===undefined?old.notes:crmText(body.notes,2000,"Catatan")
+      };
+      await env.SITE_DB.batch([
+        env.SITE_DB.prepare("UPDATE site_crm_projects SET client_name=?,business_name=?,service_name=?,status=?,scope=?,deliverables=?,agreed_total=?,dp_amount=?,final_amount=?,dp_paid_at_ms=?,final_paid_at_ms=?,start_at_ms=?,due_at_ms=?,handover_at_ms=?,maintenance_until_ms=?,revision_limit=?,revisions_used=?,notes=?,updated_at_ms=? WHERE project_id=?")
+          .bind(next.client,next.business,next.service,status,next.scope,next.deliverables,total,dp,finalAmount,
+            body.dp_paid===true?(old.dp_paid_at_ms||now):body.dp_paid===false?null:old.dp_paid_at_ms,
+            body.final_paid===true?(old.final_paid_at_ms||now):body.final_paid===false?null:old.final_paid_at_ms,
+            next.start,next.due,next.handover,next.maintenance,revisions,revisionsUsed,next.notes,now,projectId),
+        newAuditStatement(env,{action:"CRM_PROJECT_UPDATED",resource:"crm_project",summary:{project_id:projectId,status},clientHash:actorHash,now})
+      ]);
+    }else if(action==="create_task"){
+      const taskId=crypto.randomUUID(),leadId=crmText(body.lead_id,80,"ID prospek"),projectId=crmText(body.project_id,80,"ID proyek");
+      if(!leadId&&!projectId)return secure(j({ok:false,error:"Tugas harus terkait dengan prospek atau proyek."},400));
+      if(leadId&&!await env.SITE_DB.prepare("SELECT lead_id FROM site_crm_leads WHERE lead_id=?").bind(leadId).first())return secure(j({ok:false,error:"Prospek tugas tidak ditemukan."},404));
+      if(projectId&&!await env.SITE_DB.prepare("SELECT project_id FROM site_crm_projects WHERE project_id=?").bind(projectId).first())return secure(j({ok:false,error:"Proyek tugas tidak ditemukan."},404));
+      const title=crmText(body.title,160,"Judul tugas",true),priority=String(body.priority||"NORMAL");
+      if(!CRM_TASK_PRIORITIES.includes(priority))return secure(j({ok:false,error:"Prioritas tugas tidak valid."},400));
+      const due=crmDate(body.due_at_ms,"Tenggat tugas");
+      await env.SITE_DB.batch([
+        env.SITE_DB.prepare("INSERT INTO site_crm_tasks(task_id,lead_id,project_id,title,priority,due_at_ms,status,completed_at_ms,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,'OPEN',NULL,?,?)")
+          .bind(taskId,leadId||null,projectId||null,title,priority,due,now,now),
+        newAuditStatement(env,{action:"CRM_TASK_CREATED",resource:"crm_task",summary:{task_id:taskId,priority},clientHash:actorHash,now})
+      ]);
+    }else if(action==="complete_task"){
+      const taskId=crmText(body.task_id,80,"ID tugas",true);
+      const existing=await env.SITE_DB.prepare("SELECT task_id,status FROM site_crm_tasks WHERE task_id=?").bind(taskId).first();
+      if(!existing)return secure(j({ok:false,error:"Tugas tidak ditemukan."},404));
+      if(existing.status!=="COMPLETED"){
+        await env.SITE_DB.batch([
+          env.SITE_DB.prepare("UPDATE site_crm_tasks SET status='COMPLETED',completed_at_ms=?,updated_at_ms=? WHERE task_id=? AND status='OPEN'").bind(now,now,taskId),
+          newAuditStatement(env,{action:"CRM_TASK_COMPLETED",resource:"crm_task",summary:{task_id:taskId},clientHash:actorHash,now})
+        ]);
+      }
+    }else{
+      return secure(j({ok:false,error:"Aksi CRM tidak dikenal."},400));
+    }
+    return secure(j({ok:true,...await loadCrmData(env)}));
+  }catch(error){
+    console.error(JSON.stringify({event:"owner_crm_mutation_failed",action,code:error&&error.message==="D1_BINDING_MISSING"?"D1_BINDING_MISSING":"VALIDATION_OR_STORAGE_ERROR"}));
+    return secure(j({ok:false,error:error instanceof Error?error.message:"Perubahan CRM gagal disimpan."},400));
+  }
+}
+
 function otpPage(){return "<!doctype html>\n<html lang=\"id\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta name=\"robots\" content=\"noindex,nofollow\"><meta name=\"referrer\" content=\"no-referrer\"><title>Portal OTP · Admin Seiton.id</title><style>\n:root{font-family:system-ui,sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}body{margin:0}main{max-width:980px;margin:28px auto;padding:0 16px}.top,.row{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}.card{background:#fff;border:1px solid #e4e9f0;border-radius:14px;padding:18px;margin:14px 0}.muted{color:#68758a;font-size:13px}.field{display:grid;gap:5px;margin:10px 0}.field label{font-size:12px;font-weight:700}.field input{padding:11px;border:1px solid #d8e0eb;border-radius:8px;width:100%}button,.btn{border:0;border-radius:8px;padding:9px 13px;font-weight:700;cursor:pointer;background:#e9edf3;color:#26334a;text-decoration:none;display:inline-block}.primary{background:#0f766e;color:white}.danger{background:#fff0f1;color:#a22a37}.notice{padding:12px;border-radius:9px;background:#eaf7f0;color:#166344;overflow-wrap:anywhere}.error{background:#fff0f1;color:#a22a37}.list{display:grid;gap:9px}.mailbox{padding:13px;border:1px solid #e5eaf1;border-radius:10px;display:flex;justify-content:space-between;gap:10px;align-items:center;flex-wrap:wrap}.actions{display:flex;gap:8px;flex-wrap:wrap}.hidden{display:none!important}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 ui-monospace,monospace;margin:8px 0}h1{margin:.3em 0}\n</style></head><body><main>\n<header class=\"top\"><div><strong>SEITON.ID · ADMIN PEMILIK</strong><h1>Mailbox OTP</h1><p class=\"muted\">Provision hanya mailbox pada domain yang dimiliki atau diotorisasi.</p></div><div class=\"actions\"><a class=\"btn\" href=\"/\">Kembali ke panel harga</a><button id=\"logout\">Keluar</button></div></header>\n<section class=\"card\"><h2>Provision mailbox</h2><p class=\"muted\">Tautan privat hanya ditampilkan satu kali setelah dibuat. Bagikan hanya kepada pemilik mailbox. Email tidak dapat dibaca hanya dengan mengetahui alamatnya.</p>\n<form id=\"create\"><div class=\"field\"><label for=\"email\">Alamat email domain</label><input id=\"email\" type=\"email\" placeholder=\"nama@seiton.biz.id\" autocomplete=\"off\" required maxlength=\"254\"></div><div class=\"field\"><label for=\"label\">Label pemilik (opsional)</label><input id=\"label\" maxlength=\"80\" placeholder=\"Nama pemilik / tim\"></div><button class=\"primary\" id=\"createButton\" type=\"submit\">Provision mailbox</button></form>\n<div id=\"result\" class=\"notice hidden\" role=\"status\"></div><div id=\"error\" class=\"notice error hidden\" role=\"alert\"></div></section>\n<section class=\"card\"><div class=\"row\"><div><h2>Mailbox terdaftar</h2><p class=\"muted\">Panel tidak menampilkan isi email atau kode OTP.</p></div><button id=\"refresh\">Muat ulang</button></div><div id=\"list\" class=\"list\" aria-live=\"polite\"></div></section>\n<p class=\"muted\">Retensi portal: lima email terbaru per mailbox, maksimal satu jam. Rotasi membatalkan sesi lama; pencabutan menghapus pesan dan sesi terkait.</p>\n</main><script>\n(async()=>{\nconst $=id=>document.getElementById(id);\nconst api=async(path,options={})=>{const r=await fetch(path,{credentials:\"same-origin\",cache:\"no-store\",...options});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||\"Permintaan gagal (\"+r.status+\").\");return d;};\nfunction notice(text,bad=false){const box=$(bad?\"error\":\"result\"),other=$(bad?\"result\":\"error\");other.classList.add(\"hidden\");box.textContent=text;box.classList.remove(\"hidden\");}\nfunction showLink(url){const box=$(\"result\");box.replaceChildren();const title=document.createElement(\"strong\");title.textContent=\"Tautan akses privat — salin sekarang:\";const code=document.createElement(\"pre\");code.textContent=url;const copy=document.createElement(\"button\");copy.type=\"button\";copy.className=\"primary\";copy.textContent=\"Salin tautan\";copy.addEventListener(\"click\",async()=>{try{await navigator.clipboard.writeText(url);copy.textContent=\"Tersalin\";}catch{copy.textContent=\"Salin tidak tersedia\";}});box.append(title,code,copy);box.classList.remove(\"hidden\");$(\"error\").classList.add(\"hidden\");}\nfunction makeButton(parent,label,onClick,cls){const b=document.createElement(\"button\");b.type=\"button\";b.textContent=label;if(cls)b.className=cls;b.addEventListener(\"click\",onClick);parent.append(b);return b;}\nasync function refresh(){const data=await api(\"/api/admin/otp/mailboxes\");const list=$(\"list\");list.replaceChildren();if(!data.mailboxes||!data.mailboxes.length){const empty=document.createElement(\"p\");empty.className=\"muted\";empty.textContent=\"Belum ada mailbox yang diprovisikan.\";list.append(empty);return;}for(const item of data.mailboxes){const row=document.createElement(\"div\");row.className=\"mailbox\";const info=document.createElement(\"div\");const address=document.createElement(\"strong\");address.textContent=item.email;const label=document.createElement(\"div\");label.className=\"muted\";label.textContent=item.ownerLabel||\"Tanpa label\";const status=document.createElement(\"div\");status.className=\"muted\";status.textContent=item.active?\"Aktif\":\"Dicabut\";info.append(address,label,status);row.append(info);const actions=document.createElement(\"div\");actions.className=\"actions\";if(item.active){makeButton(actions,\"Rotasi tautan\",async()=>{if(!confirm(\"Tautan lama dan semua sesi saat ini akan dinonaktifkan. Lanjutkan?\"))return;try{const result=await api(\"/api/admin/otp/mailboxes/rotate\",{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({email:item.email})});showLink(result.accessUrl);await refresh();}catch(e){notice(e.message,true);}},\"primary\");makeButton(actions,\"Cabut akses\",async()=>{if(!confirm(\"Cabut mailbox dan hapus semua pesan yang tersimpan?\"))return;try{await api(\"/api/admin/otp/mailboxes/revoke\",{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({email:item.email})});await refresh();notice(\"Mailbox dicabut; pesan dan sesi terkait telah dihapus.\");}catch(e){notice(e.message,true);}},\"danger\");}row.append(actions);list.append(row);}}\n$(\"create\").addEventListener(\"submit\",async e=>{e.preventDefault();const b=$(\"createButton\");b.disabled=true;try{const data=await api(\"/api/admin/otp/mailboxes\",{method:\"POST\",headers:{\"Content-Type\":\"application/json\"},body:JSON.stringify({email:$(\"email\").value.trim(),ownerLabel:$(\"label\").value.trim()})});$(\"email\").value=\"\";$(\"label\").value=\"\";showLink(data.accessUrl);await refresh();}catch(err){notice(err.message,true);}finally{b.disabled=false;}});\n$(\"refresh\").addEventListener(\"click\",()=>refresh().catch(e=>notice(e.message,true)));\n$(\"logout\").addEventListener(\"click\",async()=>{try{await api(\"/api/logout\",{method:\"POST\"});}finally{location.href=\"/\";}});\ntry{await refresh();}catch(e){notice(e.message,true);}\n})();\n</script></body></html>";}
 function page(){const html=[
 "<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='robots' content='noindex,nofollow'><title>Admin Seiton.id · Pemilik</title>",
