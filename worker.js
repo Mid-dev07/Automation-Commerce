@@ -2686,6 +2686,9 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
   const method = String(r[11] || "").trim().toUpperCase();
   if (method === "COD") throw new Error("Pesanan COD dibayar saat pengambilan dan tidak memakai verifikasi pembayaran online.");
+  if (method === "QRIS" && isDynamicQrisConfigured(env)) {
+    throw new Error("Pembayaran QRIS dinamis dipantau otomatis. Gunakan tombol Periksa Pembayaran QRIS; bukti manual tidak diperlukan.");
+  }
   if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Metode pembayaran tidak didukung untuk verifikasi online.");
   if (PAID_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase()) && String(r[18] || "")) {
     await sendPickupReceipt(env, String(r[3]), r, orderId, String(r[18]));
@@ -2742,6 +2745,9 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
   if (!found) throw new Error("Pesanan tidak ditemukan.");
   const r = found.row;
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
+  if (String(r[11] || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+    throw new Error("Bukti QRIS dinamis diverifikasi otomatis oleh Midtrans. Gunakan tombol Periksa Pembayaran.");
+  }
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran tidak sedang menunggu verifikasi.");
   let fileId = "", fileType = "";
   if (Array.isArray(message.photo) && message.photo.length) {
@@ -2837,6 +2843,9 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   if (state.ready) {
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
+    if (String(found.order.payment_method || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+      throw new Error("QRIS dinamis hanya dapat disetujui otomatis setelah status SETTLEMENT diverifikasi langsung dari Midtrans.");
+    }
     const approved = await approvePaymentTransactional(env,found.order.order_id,actor);
     await mirrorTransactionalOrder(env,approved);
     const row = orderToSheetRow(approved);
@@ -2850,6 +2859,9 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
   if (String(r[11] || "").toUpperCase() === "COD") throw new Error("Pesanan COD tidak menggunakan verifikasi pembayaran online.");
+  if (String(r[11] || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+    throw new Error("QRIS dinamis hanya dapat disetujui otomatis setelah status SETTLEMENT diverifikasi langsung dari Midtrans.");
+  }
   if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan sudah dibatalkan.");
   const now = new Date().toISOString();
   const receiptCode = "SEI-" + localDateKey(now).replace(/-/g,"") + "-" + crypto.randomUUID().slice(0,6).toUpperCase();
