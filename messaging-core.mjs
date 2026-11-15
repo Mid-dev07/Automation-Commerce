@@ -189,10 +189,11 @@ export async function routeMessagingCommand(event, command, mode, services) {
       "KATALOG — melihat produk dan harga",
       "PESANAN — melihat pesanan terakhir",
       "STATUS ID_PESANAN — memeriksa satu pesanan",
-      "BELI SKU JUMLAH METODE — membuat pesanan",
+      "BELI SKU JUMLAH TRANSFER/COD — membuat pesanan",
+      "Untuk QRIS, pilih produk dari tombol katalog agar bot mengirim QR dan nominal pembayaran.",
       "ADMIN — meminta bantuan admin",
       "",
-      "Contoh: BELI SEI-001 2 QRIS"
+      "Contoh: BELI SEI-001 2 COD"
     ].join("\n")));
   } else if (command.kind === "CATALOG") {
     const catalog = (await services.listProducts() || []).filter(product =>
