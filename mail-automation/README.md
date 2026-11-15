@@ -34,7 +34,7 @@ The current production schema defines `mail_machine_aliases.client_ref` as globa
 
 ## Domain migration — root-domain aliases (2026-11-15)
 - Alias addresses use the root domain `seiton.my.id`, with no `inbox` subdomain.
-- The Worker generates `receiver+<24-hex-slug>@seiton.my.id`; inbound validation accepts only that root domain and active alias format.
+- New aliases are generated as `receiver+<24-hex-slug>@seiton.my.id`; inbound validation accepts both `seiton.my.id` and the legacy `inbox.seiton.biz.id` while checking the same active alias format. This dual-domain compatibility is required so existing aliases continue receiving messages during cutover.
 - The private web panel remains hosted at `https://mail.seiton.biz.id`; `PANEL_ORIGIN` is intentionally unchanged because this migration changes the alias email domain, not the admin-panel hostname.
 - The new Cloudflare zone `seiton.my.id` is now `active` and uses `aria.ns.cloudflare.com` and `clark.ns.cloudflare.com`.
 - Its Email Routing state is still `unconfigured`/disabled. The current zone has Cloudflare-generated candidate MX/SPF/DKIM settings available through the Email Routing DNS endpoint, but these have not yet been applied.
