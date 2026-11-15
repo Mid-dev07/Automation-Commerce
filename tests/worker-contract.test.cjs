@@ -278,7 +278,8 @@ test("QRIS checkout uses internal static-payload composition and unique-code rec
   assert.doesNotMatch(worker, /\/webhooks\/midtrans/);
   assert.match(worker, /callback_data: "qris:check:"/);
   assert.match(worker, /callback_data: "pc:req:" \+ order\.orderId/);
-  assert.match(worker, /UPDATE qris_payments SET status='PAID'/);
+  assert.match(worker, /approvePaymentTransactional\(env,found\.order\.order_id,actor\)/);
+  assert.doesNotMatch(worker, /UPDATE qris_payments SET status='PAID'/);
 });
 
 test("admin QRIS preview composes a real merchant QR without creating an order or payment row", () => {
