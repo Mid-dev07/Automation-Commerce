@@ -2,7 +2,7 @@ name: Worker audit checks
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/unified-owner-control-center-p3]
   pull_request:
     branches: [main]
 
@@ -32,5 +32,9 @@ jobs:
         run: node --check otp-portal/email-parser.js
       - name: Check site-admin Worker syntax
         run: node --check site-admin/worker.js
+      - name: Check Mail Automation Worker syntax
+        run: node --check mail-automation/worker.js
+      - name: Check Mail Automation email parser syntax
+        run: node --check mail-automation/email-parser.js
       - name: Run regression tests
         run: node --test tests/*.test.cjs tests/*.test.mjs otp-portal/*.test.mjs
