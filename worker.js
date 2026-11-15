@@ -9,7 +9,8 @@ import {
   completeSheetMirrorOutbox, failSheetMirrorOutbox
 } from "./transaction-layer.js";
 import {
-  isInternalQrisConfigured,
+  isQrisCheckoutAvailable,
+  getQrisCheckoutMode,
   buildDynamicQrisPayload,
   extractQrisMerchantProfile,
   generateQrisUniqueCode,
@@ -286,8 +287,10 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
-      try { await handleAdminProductForm(env, chatId, customerId, text, message.reply_to_message.text); }
-      catch (error) { await sendTelegram(env, chatId, "⚠️ " + error.message + "\\nSilakan kirim ulang dengan format yang benar."); }
+      try { await handleAdminProductWizardReply(env, chatId, customerId, text, message.reply_to_message.text); }
+      catch (error) {
+        await sendTelegram(env, chatId, "⚠️ " + error.message + "\nSilakan balas pesan formulir terbaru. Ketik /batal untuk membatalkan.");
+      }
       return;
     }
     const handoffCommand = parseMessagingAdminCommand(text);
@@ -712,13 +715,19 @@ function customerCategoryForProduct(row) {
 function customerCategoryTitle(key) {
   return CUSTOMER_CATEGORY_META[key]?.title || "Semua Produk";
 }
-function activeCustomerCatalogProducts(rows) {
+function customerCatalogProducts(rows) {
   return (rows || []).filter(row => {
     if (!row?.[0]) return false;
     const product = parseCatalogProduct(row);
-    return product.active && product.priceValid && product.stockValid;
+    return product.priceValid && product.stockValid;
   });
 }
+function customerProductCanBeOrdered(row) {
+  const product = parseCatalogProduct(row);
+  return product.active && product.priceValid && product.stockValid &&
+    (product.stock === null || product.stock > 0);
+}
+
 async function ensureCatalogHeaders(env) {
   const headers = await readSheet(env, "Katalog_Produk!A1:G1");
   if (!headers[0]?.[5] || !headers[0]?.[6]) {
@@ -731,38 +740,234 @@ async function ensureCatalogHeaders(env) {
     if (!response.ok) throw new Error("Tidak dapat menyiapkan kolom foto dan deskripsi katalog.");
   }
 }
+const ADMIN_PRODUCT_FIELD_PROMPTS = {
+  sku: ["SKU Produk", "Contoh: SEI-002. Huruf, angka, titik, _ atau -."],
+  name: ["Nama Produk", "Contoh: Paket Website UMKM. Maksimal 100 karakter."],
+  price: ["Harga Produk (Rupiah)", "Contoh: 25000 atau 25.000. Masukkan angka bulat rupiah."],
+  stock: ["Stok Produk", "Masukkan angka. Ketik 0 jika habis, atau 'tak terbatas' untuk stok tanpa batas."],
+  active: ["Status Produk", "Balas Aktif atau Nonaktif."],
+  photo_url: ["URL Foto Produk (opsional)", "Kirim URL HTTPS. Ketik /skip untuk mempertahankan foto atau /hapus untuk mengosongkannya."],
+  description: ["Deskripsi Produk (opsional)", "Maksimal 500 karakter. Ketik /skip untuk mempertahankan atau /hapus untuk mengosongkan."]
+};
+
+function parseProductWizardInteger(value, label) {
+  const raw = String(value ?? "").trim().replace(/^rp\s*/i,"").replace(/\s/g,"");
+  let normalized = raw;
+  if (/^\d{1,3}(?:\.\d{3})+$/.test(raw)) normalized = raw.replace(/\./g,"");
+  if (/^\d{1,3}(?:,\d{3})+$/.test(raw)) normalized = raw.replace(/,/g,"");
+  if (!/^\d+$/.test(normalized)) throw new Error(label + " harus berupa bilangan bulat rupiah/angka tanpa pecahan.");
+  const number = Number(normalized);
+  if (!Number.isSafeInteger(number) || number < 0) throw new Error(label + " tidak valid.");
+  return number;
+}
+
+function parseProductWizardValue(field, input, currentValue, mode) {
+  const value = String(input ?? "").trim();
+  const command = value.toLowerCase();
+  if (command === "/batal" || command === "batal") return { cancel: true };
+  if (command === "/skip" || command === "skip") {
+    if (field === "sku" || field === "name" || field === "price") {
+      if (currentValue == null || currentValue === "") throw new Error("Bagian ini wajib diisi.");
+    }
+    return { value: currentValue };
+  }
+  if (field === "sku") {
+    const sku = value.toUpperCase();
+    if (!/^[A-Z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU hanya boleh memakai huruf, angka, titik, garis bawah, atau tanda hubung (maksimal 40 karakter).");
+    return { value: sku };
+  }
+  if (field === "name") {
+    if (!value || value.length > 100) throw new Error("Nama produk wajib diisi dan maksimal 100 karakter.");
+    return { value };
+  }
+  if (field === "price") return { value: parseProductWizardInteger(value,"Harga") };
+  if (field === "stock") {
+    if (["tak terbatas","tidak terbatas","unlimited","∞","tanpa batas"].includes(command)) return { value: null };
+    return { value: parseProductWizardInteger(value,"Stok") };
+  }
+  if (field === "active") {
+    if (["aktif","ya","yes","y","true","1"].includes(command)) return { value: true };
+    if (["nonaktif","tidak","no","n","false","0"].includes(command)) return { value: false };
+    throw new Error("Pilih salah satu: Aktif atau Nonaktif.");
+  }
+  if (field === "photo_url") {
+    if (command === "/hapus" || command === "hapus") return { value: "" };
+    if (value && (!/^https:\/\//i.test(value) || value.length > 1000)) throw new Error("Foto harus berupa URL HTTPS yang valid (maksimal 1.000 karakter).");
+    return { value };
+  }
+  if (field === "description") {
+    if (command === "/hapus" || command === "hapus") return { value: "" };
+    if (value.length > 500) throw new Error("Deskripsi maksimal 500 karakter.");
+    return { value };
+  }
+  throw new Error("Kolom formulir tidak dikenal.");
+}
+
+async function getAdminProductDraft(env, adminId, formId) {
+  return env.DB.prepare(
+    "SELECT * FROM admin_product_drafts WHERE admin_id=? AND form_id=? AND expires_at>? LIMIT 1"
+  ).bind(String(adminId),String(formId),new Date().toISOString()).first();
+}
+
+async function askAdminProductField(env, chatId, formId, field, currentValue, mode) {
+  const [label, help] = ADMIN_PRODUCT_FIELD_PROMPTS[field] || ["Data Produk","Masukkan nilai."];
+  const existing = mode === "EDIT" && currentValue !== "" && currentValue != null
+    ? "\nNilai saat ini: " + (field === "price" ? rupiah(currentValue) : field === "active" ? (currentValue ? "Aktif" : "Nonaktif") : field === "stock" && currentValue === null ? "Tak terbatas" : String(currentValue))
+    : "";
+  const optional = field === "photo_url" || field === "description";
+  const prompt = [
+    "📝 FORM PRODUK SEITON",
+    "FORM_ID=" + formId,
+    "FIELD=" + field,
+    "",
+    "Tahap: " + label,
+    help + existing,
+    optional ? "Balas /skip untuk mempertahankan nilai saat ini atau /hapus untuk mengosongkan." : "Balas pesan ini dengan nilainya.",
+    "Ketik /batal untuk membatalkan seluruh formulir."
+  ].join("\n");
+  await sendTelegram(env,chatId,prompt,{
+    force_reply:true,
+    input_field_placeholder:field === "price" ? "Contoh: 25000" : field === "stock" ? "Contoh: 10 atau tak terbatas" : label
+  });
+}
+
 async function promptAdminProduct(env, chatId, mode, sku = "") {
-  const intro = mode === "ADD" ? "📝 FORM PRODUK SEITON — ADD" : "📝 FORM PRODUK SEITON — EDIT — " + sku;
-  let current = "";
+  if (!env.DB) throw new Error("D1 belum tersedia untuk menyimpan formulir produk.");
+  let product = {
+    sku:"",name:"",price:"",stock:0,active:true,photo_url:"",description:""
+  };
+  let originalSku = "";
   if (mode === "EDIT") {
     const rows = await readCatalogRows(env);
-    const product = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
-    if (!product) throw new Error("Produk tidak ditemukan.");
-    current = "DATA SAAT INI:\n" + [product[0] || "", product[1] || "", product[2] ?? 0, product[3] ?? 0, product[4] ?? "TRUE", product[5] || "", product[6] || ""].join(" | ") + "\n\n";
+    const row = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
+    if (!row) throw new Error("Produk tidak ditemukan.");
+    const parsed = parseCatalogProduct(row);
+    product = {
+      sku:parsed.sku,name:parsed.name,price:parsed.price,stock:parsed.stock,
+      active:parsed.active,photo_url:parsed.photoUrl,description:parsed.description
+    };
+    originalSku = parsed.sku;
   }
-  const guide = [
-    intro,
-    current + "Kirim satu pesan dengan 7 kolom dipisahkan tanda |",
-    "SKU | Nama Produk | Harga | Stok | Aktif(TRUE/FALSE) | URL_FOTO(https://...) | Deskripsi",
-    mode === "ADD" ? "Contoh: SEI-002 | Kaos Seiton | 99000 | 20 | TRUE | https://contoh.com/foto.jpg | Kaos cotton combed" :
-      "Salin data saat ini lalu ubah bagian yang diperlukan. SKU harus tetap sama. URL foto boleh dikosongkan untuk menghapus foto.",
-    "Gunakan angka 0 untuk stok habis. Deskripsi maksimal 500 karakter dan tanpa tanda |."
-  ].join("\n");
-  await sendTelegram(env, chatId, guide, { force_reply: true, input_field_placeholder: "SKU | Nama | Harga | Stok | TRUE/FALSE | URL foto | Deskripsi" });
+  const steps = mode === "ADD"
+    ? ["sku","name","price","stock","active","photo_url","description"]
+    : ["name","price","stock","active","photo_url","description"];
+  const now = new Date().toISOString();
+  const formId = crypto.randomUUID();
+  const expires = new Date(Date.now()+30*60*1000).toISOString();
+  await env.DB.prepare(
+    "INSERT OR REPLACE INTO admin_product_drafts " +
+    "(admin_id,form_id,mode,original_sku,step_index,steps_json,draft_json,status,created_at,updated_at,expires_at) " +
+    "VALUES(?,?,?,?,0,?,?, 'IN_PROGRESS',?,?,?)"
+  ).bind(String(chatId),formId,mode,originalSku,JSON.stringify(steps),JSON.stringify(product),now,now,expires).run();
+  await sendTelegram(env,chatId,
+    mode === "ADD"
+      ? "📝 Kita mulai formulir produk baru. Isi setiap bagian satu per satu; tidak perlu memakai tanda |."
+      : "📝 Kita mulai formulir edit " + originalSku + ". SKU dikunci; gunakan /skip untuk mempertahankan nilai yang ada.",
+    null
+  );
+  await askAdminProductField(env,chatId,formId,steps[0],product[steps[0]],mode);
 }
-async function handleAdminProductForm(env, chatId, actorId, input, prompt) {
-  const parts = String(input || "").split("|").map(v => v.trim());
-  if (parts.length !== 7) throw new Error("Format produk harus berisi tepat 7 kolom dipisahkan tanda |");
-  const [sku, name, price, stock, activeText, photoUrl, description] = parts;
-  if (!["TRUE","FALSE","YA","TIDAK","1","0","AKTIF","NONAKTIF"].includes(activeText.toUpperCase())) throw new Error("Status aktif harus TRUE atau FALSE.");
-  if (photoUrl && (!/^https:\/\//i.test(photoUrl) || photoUrl.length > 1000)) throw new Error("URL foto harus berupa tautan HTTPS.");
-  const result = await saveCatalogProduct(env, {
-    sku, name, price, stock,
-    active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()),
-    photo_url: photoUrl, description
-  }, prompt.includes(" — EDIT — ") ? prompt.split(" — EDIT — ").pop().trim() : "");
-  await recordAdminActivity(env, { actorId, action: result === "updated" ? "PRODUCT_UPDATED" : "PRODUCT_CREATED", resourceType: "product", resourceId: sku, summary: { sku, name: String(name).slice(0, 100), price: Number(price), stock: stock === "" ? null : Number(stock), active: !["FALSE","TIDAK","0","NONAKTIF"].includes(activeText.toUpperCase()) } });
-  await sendTelegram(env, chatId, "✅ Produk " + sku + (result === "updated" ? " berhasil diperbarui." : " berhasil ditambahkan."), adminMenuKeyboard());
+
+async function handleAdminProductWizardReply(env, chatId, actorId, input, prompt) {
+  const formId = String(prompt || "").match(/FORM_ID=([a-f0-9-]{20,40})/i)?.[1] || "";
+  const fieldFromPrompt = String(prompt || "").match(/FIELD=([a-z_]+)/i)?.[1] || "";
+  if (!formId || !fieldFromPrompt) throw new Error("Pesan formulir tidak dikenali. Buka kembali menu Tambah Produk.");
+  const row = await getAdminProductDraft(env,chatId,formId);
+  if (!row || row.status !== "IN_PROGRESS") throw new Error("Formulir sudah kedaluwarsa atau tidak lagi aktif. Buka kembali Tambah Produk.");
+  const steps = JSON.parse(row.steps_json || "[]");
+  const draft = JSON.parse(row.draft_json || "{}");
+  const index = Number(row.step_index);
+  const field = steps[index];
+  if (!field || field !== fieldFromPrompt) throw new Error("Tahap formulir ini sudah terlewati. Balas pesan formulir terbaru.");
+  let parsed;
+  try {
+    parsed = parseProductWizardValue(field,input,draft[field],row.mode);
+  } catch (error) {
+    await sendTelegram(env,chatId,"⚠️ " + error.message + "\\nCoba isi bagian ini kembali.");
+    await askAdminProductField(env,chatId,formId,field,draft[field],row.mode);
+    return;
+  }
+  if (parsed.cancel) {
+    await env.DB.prepare("DELETE FROM admin_product_drafts WHERE admin_id=? AND form_id=?")
+      .bind(String(chatId),formId).run();
+    await sendTelegram(env,chatId,"✖️ Formulir produk dibatalkan.",adminMenuKeyboard());
+    return;
+  }
+  draft[field] = parsed.value;
+  const nextIndex = index+1;
+  const now = new Date().toISOString();
+  if (nextIndex < steps.length) {
+    await env.DB.prepare("UPDATE admin_product_drafts SET step_index=?,draft_json=?,updated_at=? WHERE admin_id=? AND form_id=?")
+      .bind(nextIndex,JSON.stringify(draft),now,String(chatId),formId).run();
+    await askAdminProductField(env,chatId,formId,steps[nextIndex],draft[steps[nextIndex]],row.mode);
+    return;
+  }
+  await env.DB.prepare("UPDATE admin_product_drafts SET step_index=?,draft_json=?,status='REVIEW',updated_at=? WHERE admin_id=? AND form_id=?")
+    .bind(nextIndex,JSON.stringify(draft),now,String(chatId),formId).run();
+  const summary = [
+    "📋 PERIKSA DATA PRODUK",
+    "SKU: " + draft.sku,
+    "Nama: " + draft.name,
+    "Harga: " + rupiah(draft.price),
+    "Stok: " + (draft.stock == null ? "Tidak dibatasi" : draft.stock),
+    "Status: " + (draft.active ? "Aktif" : "Nonaktif"),
+    "Foto: " + (draft.photo_url ? "URL terpasang" : "Tidak ada"),
+    "Deskripsi: " + (draft.description || "—"),
+    "",
+    "Simpan produk ini?"
+  ].join("\n");
+  await sendTelegram(env,chatId,summary,{
+    inline_keyboard:[
+      [{text:"✅ Simpan Produk",callback_data:"adm:productform:save:"+formId}],
+      [{text:"✖️ Batal",callback_data:"adm:productform:cancel:"+formId}]
+    ]
+  });
+}
+
+async function handleAdminProductWizardConfirm(env, message, chatId, actorId, action, formId) {
+  const row = await env.DB.prepare(
+    "SELECT * FROM admin_product_drafts WHERE admin_id=? AND form_id=? AND status='REVIEW' AND expires_at>? LIMIT 1"
+  ).bind(String(chatId),String(formId),new Date().toISOString()).first();
+  if (!row) throw new Error("Formulir tidak ditemukan atau sudah kedaluwarsa.");
+  if (action === "cancel") {
+    await env.DB.prepare("DELETE FROM admin_product_drafts WHERE admin_id=? AND form_id=?")
+      .bind(String(chatId),String(formId)).run();
+    await updateTelegramMessage(env,message,{
+      text:"✖️ Formulir produk dibatalkan. Tidak ada perubahan pada katalog.",
+      replyMarkup:adminMenuKeyboard(),clearMedia:true
+    });
+    return;
+  }
+  if (action !== "save") throw new Error("Aksi formulir tidak dikenal.");
+  const product = JSON.parse(row.draft_json || "{}");
+  let result;
+  try {
+    result = await saveCatalogProduct(env,product,String(row.original_sku || ""));
+  } catch (error) {
+    await updateTelegramMessage(env,message,{
+      text:"⚠️ Produk belum tersimpan: " + String(error.message || "Kesalahan validasi") +
+        "\\nData formulir masih disimpan. Batalkan lalu mulai ulang bila perlu.",
+      replyMarkup:{inline_keyboard:[
+        [{text:"✖️ Batal",callback_data:"adm:productform:cancel:"+formId}]
+      ]},
+      clearMedia:true
+    });
+    return;
+  }
+  await recordAdminActivity(env,{
+    actorId,
+    action:result === "updated" ? "PRODUCT_UPDATED" : "PRODUCT_CREATED",
+    resourceType:"product",
+    resourceId:product.sku,
+    summary:{sku:product.sku,name:String(product.name||"").slice(0,100),price:Number(product.price),stock:product.stock,active:Boolean(product.active)}
+  });
+  await env.DB.prepare("DELETE FROM admin_product_drafts WHERE admin_id=? AND form_id=?")
+    .bind(String(chatId),String(formId)).run();
+  await updateTelegramMessage(env,message,{
+    text:"✅ Produk " + product.sku + (result === "updated" ? " berhasil diperbarui." : " berhasil ditambahkan.") +
+      "\n\nKatalog pelanggan sudah membaca sumber data D1 yang sama. Gunakan Refresh Katalog untuk melihat perubahan.",
+    replyMarkup:adminMenuKeyboard(),clearMedia:true
+  });
 }
 
 async function saveCatalogProduct(env, product, originalSku = "") {
@@ -1098,7 +1303,7 @@ async function handleTelegramCallback(env, query) {
     const product = parseCatalogProduct(p);
     if (!product.active || !product.priceValid || !product.stockValid) throw new Error("Produk tidak tersedia. Refresh katalog.");
     const category = customerCategoryForProduct(p);
-    const visibleProducts = activeCustomerCatalogProducts(rows).filter(row => customerCategoryForProduct(row) === category);
+    const visibleProducts = customerCatalogProducts(rows).filter(row => customerCategoryForProduct(row) === category);
     const index = visibleProducts.findIndex(row => String(row[0] || "").toUpperCase() === product.sku.toUpperCase());
     const page = index < 0 ? 0 : Math.floor(index / CUSTOMER_CATALOG_PAGE_SIZE);
     const canBuy = product.stock === null || product.stock > 0;
@@ -1131,7 +1336,9 @@ async function handleTelegramCallback(env, query) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]);
     if (!Number.isInteger(qty) || qty < 1 || qty > 1000) throw new Error("Jumlah tidak valid");
     const paymentMethods = [];
-    if (isInternalQrisConfigured(env)) paymentMethods.push([{ text: "⚡ QRIS Dinamis", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }]);
+    const qrisMode = getQrisCheckoutMode(env);
+    if (qrisMode === "DYNAMIC") paymentMethods.push([{ text: "⚡ QRIS Dinamis", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }]);
+    else if (qrisMode === "STATIC_FALLBACK") paymentMethods.push([{ text: "📷 QRIS (Nominal Manual)", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }]);
     paymentMethods.push([{ text: "🏦 Transfer Bank", callback_data: "pay:" + sku + ":" + qty + ":TRANSFER" }]);
     paymentMethods.push([{ text: "💵 COD", callback_data: "pay:" + sku + ":" + qty + ":COD" }]);
     paymentMethods.push([{ text: "⬅️ Kembali", callback_data: "buy:" + sku }]);
@@ -1145,7 +1352,7 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("pay:")) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
     if (!["QRIS","TRANSFER","COD"].includes(method)) throw new Error("Metode pembayaran tidak valid");
-    if (method === "QRIS" && !isInternalQrisConfigured(env)) throw new Error("QRIS dinamis belum aktif. Pilih Transfer Bank atau COD.");
+    if (method === "QRIS" && !isQrisCheckoutAvailable(env)) throw new Error("QRIS belum tersedia. Pilih Transfer Bank atau COD.");
     const rows = await readTelegramCatalogRows(env, "Katalog_Produk!A2:G");
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!p) throw new Error("Produk tidak ditemukan");
@@ -1203,7 +1410,7 @@ async function handleTelegramCallback(env, query) {
         buttons.push([{ text: "🎟️ Lihat Resi " + orderId.slice(-8), callback_data: "ticket:" + orderId }]);
       } else if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
         buttons.push([{ text: "📎 Kirim / Perbarui Bukti " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
-      } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() === "QRIS" && isInternalQrisConfigured(env)) {
+      } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() === "QRIS" && isQrisCheckoutAvailable(env)) {
         buttons.push([{ text: "📲 Tampilkan QR " + orderId.slice(-8), callback_data: "qris:show:" + orderId }]);
         buttons.push([{ text: "⚡ Periksa QRIS " + orderId.slice(-8), callback_data: "qris:check:" + orderId }]);
       } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() !== "COD") {
@@ -1262,6 +1469,18 @@ async function handleTelegramCallback(env, query) {
       ] },
       clearMedia: true
     });
+    return;
+  }
+
+  if (data.startsWith("adm:productform:")) {
+    if (!admin) {
+      await updateTelegramMessage(env,message,{text:"⛔ Formulir ini khusus admin.",replyMarkup:null});
+      return;
+    }
+    const parts = data.split(":");
+    const action = parts[2];
+    const formId = parts.slice(3).join(":");
+    await handleAdminProductWizardConfirm(env,message,chatId,userId,action,formId);
     return;
   }
 
@@ -1616,10 +1835,10 @@ async function readTelegramCatalogRows(env, range = "Katalog_Produk!A2:G") {
 }
 
 async function showCustomerCategoryMenu(env, message) {
-  const products = activeCustomerCatalogProducts(await readTelegramCatalogRows(env));
+  const products = customerCatalogProducts(await readTelegramCatalogRows(env));
   if (!products.length) {
     await updateTelegramMessage(env, message, {
-      text: "🛍️ KATALOG SEITON.ID\n\nBelum ada produk aktif yang tersedia.",
+      text: "🛍️ KATALOG SEITON.ID\n\nBelum ada produk yang dapat ditampilkan.",
       replyMarkup: { inline_keyboard: [
         [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
         [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
@@ -1629,9 +1848,11 @@ async function showCustomerCategoryMenu(env, message) {
     return;
   }
   const counts = new Map();
+  let availableCount = 0;
   for (const row of products) {
     const category = customerCategoryForProduct(row);
     counts.set(category, (counts.get(category) || 0) + 1);
+    if (customerProductCanBeOrdered(row)) availableCount++;
   }
   const categoryButtons = CUSTOMER_CATEGORY_ORDER.filter(key => counts.has(key)).map(key => ({
     text: CUSTOMER_CATEGORY_META[key].button + " (" + counts.get(key) + ")",
@@ -1640,7 +1861,8 @@ async function showCustomerCategoryMenu(env, message) {
   const categoryRows = [];
   for (let i=0;i<categoryButtons.length;i+=2) categoryRows.push(categoryButtons.slice(i,i+2));
   await updateTelegramMessage(env, message, {
-    text: "🛍️ KATALOG SEITON.ID\n\nTersedia " + products.length + " produk aktif. Pilih kategori atau lihat semuanya.",
+    text: "🛍️ KATALOG SEITON.ID\n\nTerdaftar " + products.length + " produk di " + counts.size +
+      " kategori. Saat ini " + availableCount + " produk dapat dipesan. Produk nonaktif/stok habis tetap terlihat dengan statusnya.",
     replyMarkup: { inline_keyboard: [
       [{ text: "🛒 Semua Produk (" + products.length + ")", callback_data: "cat:items:all:0" }],
       ...categoryRows,
@@ -1655,12 +1877,12 @@ async function showCustomerCategoryMenu(env, message) {
 }
 
 async function showCustomerCatalogPage(env, message, page = 0, categoryKey = "all") {
-  const allProducts = activeCustomerCatalogProducts(await readTelegramCatalogRows(env));
+  const allProducts = customerCatalogProducts(await readTelegramCatalogRows(env));
   const safeCategory = categoryKey === "all" || CUSTOMER_CATEGORY_META[categoryKey] ? categoryKey : "all";
   const products = safeCategory === "all" ? allProducts : allProducts.filter(row => customerCategoryForProduct(row) === safeCategory);
   if (!products.length) {
     await updateTelegramMessage(env, message, {
-      text: "Tidak ada produk pada kategori " + customerCategoryTitle(safeCategory) + ".",
+      text: "Belum ada produk terdaftar pada kategori " + customerCategoryTitle(safeCategory) + ".",
       replyMarkup: { inline_keyboard: [
         [{ text: "⬅️ Semua Kategori", callback_data: "nav:catalog" }],
         [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
@@ -1673,18 +1895,31 @@ async function showCustomerCatalogPage(env, message, page = 0, categoryKey = "al
   const current = Math.max(0,Math.min(pages-1,Number.isInteger(page)?page:0));
   const visible = products.slice(current*CUSTOMER_CATALOG_PAGE_SIZE,(current+1)*CUSTOMER_CATALOG_PAGE_SIZE);
   const title = safeCategory === "all" ? "Semua Produk" : customerCategoryTitle(safeCategory);
-  const buttons = visible.map(row => {
+  const lines = [];
+  const buttons = [];
+  visible.forEach((row,index) => {
     const p = parseCatalogProduct(row);
-    const stock = p.stock === 0 ? "Habis" : p.stock === null ? "Ready" : "Stok " + p.stock;
-    let label = p.name + " · " + rupiah(p.price) + " · " + stock;
-    if (label.length > 64) label = label.slice(0,61) + "…";
-    return [{ text: label, callback_data: "view:" + p.sku }];
+    const canOrder = customerProductCanBeOrdered(row);
+    const status = !p.active ? "NONAKTIF"
+      : !p.stockValid || !p.priceValid ? "PERLU DIPERBARUI"
+        : p.stock === 0 ? "STOK HABIS" : "TERSEDIA";
+    lines.push(
+      (current*CUSTOMER_CATALOG_PAGE_SIZE+index+1) + ". " + p.name + " (" + p.sku + ")" +
+      "\n   Harga: " + rupiah(p.price) +
+      "\n   Status: " + status
+    );
+    if (canOrder) {
+      let label = p.name + " · " + rupiah(p.price);
+      if (label.length > 64) label = label.slice(0,61) + "…";
+      buttons.push([{ text: "🛍️ " + label, callback_data: "view:" + p.sku }]);
+    }
   });
   const nav = [];
   if (current>0) nav.push({text:"◀️ Sebelumnya",callback_data:"cat:items:"+safeCategory+":"+(current-1)});
   if (current<pages-1) nav.push({text:"Berikutnya ▶️",callback_data:"cat:items:"+safeCategory+":"+(current+1)});
   await updateTelegramMessage(env, message, {
-    text: "🛍️ " + title + " (" + (current+1) + "/" + pages + ")\nPilih produk untuk melihat foto, harga, stok, dan detail.",
+    text: "🛍️ " + title + " (" + (current+1) + "/" + pages + ")\n\n" +
+      lines.join("\n\n") + "\n\nPilih tombol produk yang tersedia untuk melihat foto dan membuat pesanan. Produk nonaktif/stok habis tidak dapat dibeli.",
     replyMarkup: { inline_keyboard: [
       ...buttons,
       ...(nav.length ? [nav] : []),
@@ -2434,7 +2669,8 @@ async function getQrisPaymentForOrder(env, orderId) {
 }
 
 async function createOrReuseQrisPayment(env, order) {
-  if (!isInternalQrisConfigured(env)) throw new Error("QRIS_INTERNAL_NOT_CONFIGURED");
+  const mode = getQrisCheckoutMode(env);
+  if (mode === "DISABLED") throw new Error("QRIS_CHECKOUT_NOT_CONFIGURED");
   const existing = await getQrisPaymentForOrder(env, order.orderId);
   if (existing) return existing;
   const baseAmount = Number(order.total);
@@ -2455,14 +2691,16 @@ async function createOrReuseQrisPayment(env, order) {
       "SELECT order_id FROM qris_payments WHERE expected_amount=? LIMIT 1"
     ).bind(expectedAmount).first();
     if (collision) continue;
-    const payload = buildDynamicQrisPayload(staticPayload, expectedAmount);
+    const payload = mode === "DYNAMIC"
+      ? buildDynamicQrisPayload(staticPayload, expectedAmount)
+      : staticPayload;
     try {
       await env.DB.prepare("INSERT INTO qris_payments " +
         "(order_id,provider,provider_order_id,amount,currency,status,base_amount,unique_code," +
-        "expected_amount,qris_payload,merchant_name,merchant_city,created_at,updated_at) " +
-        "VALUES(?,'internal_qris',?,?,'IDR','PENDING',?,?,?,?,?,?,?,?)")
+        "expected_amount,qris_payload,merchant_name,merchant_city,qris_mode,created_at,updated_at) " +
+        "VALUES(?,'internal_qris',?,?,'IDR','PENDING',?,?,?,?,?,?,?,?,?)")
         .bind(String(order.orderId),String(order.orderId),expectedAmount,baseAmount,uniqueCode,
-          expectedAmount,payload,merchant.merchantName,merchant.merchantCity,createdAt,createdAt).run();
+          expectedAmount,payload,merchant.merchantName,merchant.merchantCity,mode,createdAt,createdAt).run();
       return await getQrisPaymentForOrder(env, order.orderId);
     } catch (error) {
       const raced = await getQrisPaymentForOrder(env, order.orderId);
@@ -2501,16 +2739,20 @@ async function sendQrisPaymentScreen(env, chatId, order) {
   }
   const image = await fetchInternalQrisImage(payment.qris_payload);
   const uniqueCode = String(payment.unique_code).padStart(3, "0");
+  const staticFallback = String(payment.qris_mode || "DYNAMIC") === "STATIC_FALLBACK";
   const caption = [
-    "💳 QRIS PEMBAYARAN SEITON.ID",
+    staticFallback ? "📷 QRIS STATIS SEITON.ID — NOMINAL DIISI MANUAL" : "⚡ QRIS DINAMIS SEITON.ID",
     "Pesanan: " + order.orderId,
     "Merchant: " + (payment.merchant_name || "Seiton.id"),
     "Total pesanan: " + rupiah(payment.base_amount),
     "Kode unik: " + uniqueCode,
     "TRANSFER PERSIS: " + rupiah(payment.expected_amount),
     "",
-    "Pindai QR ini dari aplikasi pembayaran Anda. Setelah berhasil, tekan Upload Bukti Pembayaran dan kirim screenshot transaksi.",
-    "Sistem akan membaca nominal dan data bukti. Admin tetap mencocokkan transaksi masuk sebelum pembayaran disahkan."
+    staticFallback
+      ? "QR ini adalah QRIS statis asli merchant, jadi nominal tidak terisi otomatis. Setelah memindai, masukkan " + rupiah(payment.expected_amount) + " secara manual. Jangan bulatkan nominal."
+      : "Nominal sudah tertanam di QR. Pindai menggunakan aplikasi pembayaran dan pastikan nominalnya " + rupiah(payment.expected_amount) + ".",
+    "Setelah pembayaran berhasil, tekan Upload Bukti Pembayaran dan kirim screenshot transaksi.",
+    "Sistem membaca nominal dan data bukti. Admin tetap mencocokkan transaksi masuk sebelum pembayaran disahkan."
   ].join("\n");
   await sendTelegramPhotoBlob(env, chatId, image, caption, {
     inline_keyboard: [
@@ -2523,7 +2765,7 @@ async function sendQrisPaymentScreen(env, chatId, order) {
 }
 
 async function handleQrisPaymentShow(env, message, chatId, userId, orderId) {
-  if (!isInternalQrisConfigured(env)) throw new Error("QRIS internal belum diaktifkan.");
+  if (!isQrisCheckoutAvailable(env)) throw new Error("QRIS internal belum diaktifkan.");
   const order = await findOrderTransactional(env, orderId);
   if (!order || String(order.customer_id) !== String(userId)) throw new Error("Pesanan tidak ditemukan untuk akun Telegram ini.");
   if (String(order.payment_confirmation_status).toUpperCase() === "DISETUJUI") {
@@ -2552,7 +2794,7 @@ async function handleQrisPaymentShow(env, message, chatId, userId, orderId) {
 }
 
 async function handleQrisStatusCheck(env, message, chatId, userId, orderId) {
-  if (!isInternalQrisConfigured(env)) throw new Error("QRIS internal belum diaktifkan.");
+  if (!isQrisCheckoutAvailable(env)) throw new Error("QRIS internal belum diaktifkan.");
   const order = await findOrderTransactional(env, orderId);
   if (!order || String(order.customer_id) !== String(userId)) throw new Error("Pesanan tidak ditemukan untuk akun Telegram ini.");
   const payment = await getQrisPaymentForOrder(env, orderId);
@@ -2644,7 +2886,7 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
   const method = String(r[11] || "").trim().toUpperCase();
   if (method === "COD") throw new Error("Pesanan COD dibayar saat pengambilan dan tidak memakai verifikasi pembayaran online.");
-  if (method === "QRIS" && isInternalQrisConfigured(env)) {
+  if (method === "QRIS" && isQrisCheckoutAvailable(env)) {
     const payment = await getQrisPaymentForOrder(env, orderId);
     if (!payment) throw new Error("QRIS pesanan belum dibuat. Tampilkan QR pembayaran terlebih dahulu.");
     if (payment.status === "PAID") throw new Error("Pembayaran pesanan ini sudah disetujui.");
@@ -2728,7 +2970,7 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
     return;
   }
 
-  const isQris = String(r[11] || "").toUpperCase() === "QRIS" && isInternalQrisConfigured(env);
+  const isQris = String(r[11] || "").toUpperCase() === "QRIS" && isQrisCheckoutAvailable(env);
   let qrisPayment = null;
   if (isQris) {
     qrisPayment = await getQrisPaymentForOrder(env, orderId);
@@ -2917,9 +3159,9 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
     const method = String(found.order.payment_method || "").toUpperCase();
-    const qrisPayment = method === "QRIS" && isInternalQrisConfigured(env)
+    const qrisPayment = method === "QRIS" && isQrisCheckoutAvailable(env)
       ? await getQrisPaymentForOrder(env,found.order.order_id) : null;
-    if (method === "QRIS" && isInternalQrisConfigured(env) && (!qrisPayment || !qrisPayment.receipt_file_id)) {
+    if (method === "QRIS" && isQrisCheckoutAvailable(env) && (!qrisPayment || !qrisPayment.receipt_file_id)) {
       throw new Error("Bukti QRIS belum tersedia. Minta pelanggan mengunggah bukti sebelum verifikasi.");
     }
     const approved = await approvePaymentTransactional(env,found.order.order_id,actor);
@@ -2940,7 +3182,7 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
   if (String(r[11] || "").toUpperCase() === "COD") throw new Error("Pesanan COD tidak menggunakan verifikasi pembayaran online.");
-  if (String(r[11] || "").toUpperCase() === "QRIS" && isInternalQrisConfigured(env)) {
+  if (String(r[11] || "").toUpperCase() === "QRIS" && isQrisCheckoutAvailable(env)) {
     throw new Error("Verifikasi QRIS internal memerlukan lapisan transaksi D1 aktif.");
   }
   if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan sudah dibatalkan.");
@@ -3257,7 +3499,7 @@ function parseOrderText(text) {
 }
 
 async function createOrder(env, input) {
-  if (String(input?.paymentMethod || "").toUpperCase() === "QRIS" && !isInternalQrisConfigured(env)) {
+  if (String(input?.paymentMethod || "").toUpperCase() === "QRIS" && !isQrisCheckoutAvailable(env)) {
     throw new Error("QRIS dinamis belum aktif. Pilih Transfer Bank atau COD.");
   }
   const transactionState = await transactionReadiness(env);
@@ -3739,7 +3981,7 @@ function createMessagingServices(env) {
     async listProducts() {
       const rows = await readTelegramCatalogRows(env);
       return rows.map(parseCatalogProduct).filter(product =>
-        product.active && product.priceValid && product.stockValid
+        product.priceValid && product.stockValid
       ).map(product => ({
         sku: product.sku,
         name: product.name,
@@ -3804,13 +4046,13 @@ function createMessagingServices(env) {
     },
     createOrder(input) {
       if (String(input?.paymentMethod || "").toUpperCase() === "QRIS") {
-        throw new Error("QRIS dinamis hanya tersedia melalui tombol checkout katalog. Ketik /start lalu pilih produk.");
+        throw new Error("Untuk QRIS, buka /start lalu pilih produk melalui tombol katalog. Bot akan mengirim QR dan nominal yang tepat.");
       }
       return createOrder(env, input);
     },
     getPaymentInstructions(order) {
       if (String(order.paymentMethod).toUpperCase() === "QRIS") {
-        return "QRIS statis tidak digunakan. Buka katalog dan gunakan tombol checkout untuk mendapatkan QRIS dinamis.";
+        return "Untuk QRIS, gunakan tombol checkout katalog agar bot menampilkan QR yang sesuai serta nominal transfer dan kode unik.";
       }
       if (String(order.paymentMethod).toUpperCase() === "TRANSFER") {
         return "Instruksi transfer akan diberikan admin.";

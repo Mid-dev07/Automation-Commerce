@@ -189,33 +189,41 @@ export async function routeMessagingCommand(event, command, mode, services) {
       "KATALOG — melihat produk dan harga",
       "PESANAN — melihat pesanan terakhir",
       "STATUS ID_PESANAN — memeriksa satu pesanan",
-      "BELI SKU JUMLAH METODE — membuat pesanan",
+      "BELI SKU JUMLAH TRANSFER/COD — membuat pesanan",
+      "Untuk QRIS, pilih produk dari tombol katalog agar bot mengirim QR dan nominal pembayaran.",
       "ADMIN — meminta bantuan admin",
       "",
-      "Contoh: BELI SEI-001 2 QRIS"
+      "Contoh: BELI SEI-001 2 COD"
     ].join("\n")));
   } else if (command.kind === "CATALOG") {
-    const products = await services.listProducts();
-    const active = (products || []).filter(product =>
-      product.active !== false &&
-      product.priceValid !== false &&
-      product.stockValid !== false
+    const catalog = (await services.listProducts() || []).filter(product =>
+      product.priceValid !== false && product.stockValid !== false
     ).slice(0, 20);
 
-    if (!active.length) {
-      actions.push(textAction("Katalog belum memiliki produk aktif."));
+    if (!catalog.length) {
+      actions.push(textAction("Katalog belum memiliki produk yang dapat ditampilkan."));
     } else {
-      const lines = active.map(product => {
+      const lines = catalog.map(product => {
         const stock = product.stock == null ? "Tidak dibatasi" : String(product.stock);
+        const availability = product.active === false
+          ? "TIDAK TERSEDIA (nonaktif)"
+          : Number(product.stock) === 0
+            ? "STOK HABIS"
+            : "TERSEDIA";
         return [
           product.sku + " — " + product.name,
           "Harga: " + formatPrice(product.price),
-          "Stok: " + stock
+          "Stok: " + stock,
+          "Status: " + availability
         ].join("\n");
       });
+      const available = catalog.filter(product =>
+        product.active !== false && (product.stock == null || Number(product.stock) > 0)
+      ).length;
       actions.push(textAction(
         "🛍️ KATALOG SEITON\n\n" + lines.join("\n\n") +
-        "\n\nUntuk memesan: BELI SKU JUMLAH QRIS / TRANSFER / COD"
+        "\n\n" + available + " dari " + catalog.length + " produk dapat dipesan." +
+        "\nUntuk memesan produk tersedia: BELI SKU JUMLAH QRIS / TRANSFER / COD"
       ));
     }
   } else if (command.kind === "ORDERS") {

@@ -7,6 +7,9 @@ import {
   verifyQrisPayload,
   parseQrisPayload,
   buildDynamicQrisPayload,
+  isInternalQrisConfigured,
+  isStaticQrisFallbackConfigured,
+  getQrisCheckoutMode,
   parseMidtransAmount,
   normalizeMidtransStatus,
   verifyMidtransNotification
@@ -294,4 +297,18 @@ test("receipt OCR evaluation is deterministic and never certifies settlement", a
     createdAt: new Date(Date.now() - 60_000).toISOString()
   }, { amount: 75038, merchant_name: "SEITON ID", transaction_datetime: new Date().toISOString() });
   assert.equal(mismatch.status, "MISMATCH");
+});
+
+
+test("static merchant QR is used as a manual-amount fallback while dynamic remains opt-in", () => {
+  const env = {
+    QRIS_STATIC_PAYLOAD: staticMerchantTemplate(),
+    QRIS_STATIC_FALLBACK_ENABLED: "true",
+    QRIS_INTERNAL_ENABLED: "false"
+  };
+  assert.equal(isInternalQrisConfigured(env), false);
+  assert.equal(isStaticQrisFallbackConfigured(env), true);
+  assert.equal(getQrisCheckoutMode(env), "STATIC_FALLBACK");
+  assert.equal(getQrisCheckoutMode({ ...env, QRIS_STATIC_FALLBACK_ENABLED: "false" }), "DISABLED");
+  assert.equal(getQrisCheckoutMode({ ...env, QRIS_INTERNAL_ENABLED: "true" }), "DYNAMIC");
 });

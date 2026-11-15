@@ -372,7 +372,9 @@ test("routes catalog requests through the provider-independent product service",
   );
   assert.equal(result.actions.length, 1);
   assert.match(result.actions[0].text, /SEI-001/);
-  assert.doesNotMatch(result.actions[0].text, /SEI-002/);
+  assert.match(result.actions[0].text, /SEI-002/);
+  assert.match(result.actions[0].text, /TIDAK TERSEDIA/);
+  assert.match(result.actions[0].text, /1 dari 2 produk dapat dipesan/);
 });
 
 test("order creation forwards channel-scoped identity and stable idempotency key", async () => {

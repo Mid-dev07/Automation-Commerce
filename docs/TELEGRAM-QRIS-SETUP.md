@@ -17,7 +17,7 @@ The Worker validates the static payload CRC, merchant-account information, count
 1. The customer creates a QRIS order.
 2. The Worker changes point-of-initiation to `12`, inserts tag `54` with the exact expected amount, and recalculates tag `63` CRC16/CCITT-FALSE.
 3. The QR payload is rendered to PNG and sent in Telegram, along with base total, unique code, and exact transfer amount.
-4. The customer uploads a screenshot as a Telegram photo or image document. PDF remains accepted but routes to manual review because the configured vision model accepts images, not raw PDF files.
+4. If dynamic issuance is approved, the customer scans a QR containing the amount. Otherwise, the fallback displays the original static merchant QR and instructs the customer to enter the exact amount (order total plus unique suffix) manually. The customer then uploads a screenshot as a Telegram photo or image document. PDF remains accepted but routes to manual review.
 5. Workers AI extracts visible amount, merchant, transaction timestamp, and reference. Deterministic server code compares them to the D1 order and rejects re-use of evidence or transaction references.
 6. Admin sees both the original evidence and OCR assessment, then checks the merchant account's actual transaction history before approving and issuing a pickup receipt.
 
@@ -33,11 +33,20 @@ The Worker validates the static payload CRC, merchant-account information, count
 ## Release order
 
 1. Pass CI and tests.
-2. Apply `migrations/0011_qris_payments.sql` to `seiton-transactions-prod`.
+2. Ensure migrations 0011 and 0012 are applied to `seiton-transactions-prod`.
 3. Add the Workers AI binding named `AI`.
-4. Store `QRIS_STATIC_PAYLOAD` as a Worker Secret and leave `QRIS_INTERNAL_ENABLED=false`.
-5. Obtain acquirer confirmation for static-to-dynamic payload issuance.
-6. Test exact amount, merchant credit, and receipt matching using small transactions and different issuer apps.
-7. Only after the checks above, set `QRIS_INTERNAL_ENABLED=true`.
+4. Store `QRIS_STATIC_PAYLOAD` as a Worker Secret.
+5. Enable `QRIS_STATIC_FALLBACK_ENABLED=true` so customers can scan the original static QR and type the exact expected amount.
+6. Obtain acquirer confirmation for static-to-dynamic payload issuance; test small payments with different issuer apps.
+7. Only after acquirer validation, set `QRIS_INTERNAL_ENABLED=true` to prioritize dynamic QR.
 
 No QRIS option appears while the feature flag is disabled or the static payload is absent/invalid.
+
+
+## Customer catalog visibility
+
+The customer Telegram catalog now lists all valid D1 products, including inactive or sold-out records, with explicit availability labels. Only active products with available stock receive a purchase button. This avoids confusing catalog-count differences without accidentally selling disabled or out-of-stock items.
+
+## Telegram product form
+
+Admin add/edit is a guided one-field-at-a-time wizard, stored in D1 for 30 minutes. The admin reviews the completed fields and confirms Save or Cancel. Optional photo and description fields support `/skip` and `/hapus`; no pipe-delimited row is required.

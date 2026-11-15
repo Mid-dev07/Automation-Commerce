@@ -263,8 +263,8 @@ test("Telegram storefront uses branded menus and grouped admin navigation", () =
 });
 
 test("QRIS checkout uses internal static-payload composition and unique-code receipt review", () => {
-  assert.match(worker, /isInternalQrisConfigured/);
-  assert.match(worker, /QRIS_INTERNAL_NOT_CONFIGURED/);
+  assert.match(worker, /getQrisCheckoutMode/);
+  assert.match(worker, /QRIS_CHECKOUT_NOT_CONFIGURED/);
   assert.match(worker, /buildDynamicQrisPayload/);
   assert.match(worker, /generateQrisUniqueCode/);
   assert.match(worker, /expected_amount/);
@@ -277,6 +277,35 @@ test("QRIS checkout uses internal static-payload composition and unique-code rec
   assert.match(worker, /callback_data: "qris:check:"/);
   assert.match(worker, /callback_data: "pc:req:" \+ order\.orderId/);
   assert.match(worker, /UPDATE qris_payments SET status='PAID'/);
+});
+
+test("customer catalog shows unavailable products but only provides purchase buttons for sellable items", () => {
+  assert.match(worker, /function customerCatalogProducts\(rows\)/);
+  assert.match(worker, /function customerProductCanBeOrdered\(row\)/);
+  assert.match(worker, /NONAKTIF/);
+  assert.match(worker, /STOK HABIS/);
+  assert.match(worker, /Produk nonaktif\/stok habis tidak dapat dibeli/);
+  assert.match(worker, /customerCatalogProducts\(rows\)/);
+});
+
+test("Telegram product management uses durable step-by-step form drafts instead of pipe-separated fields", () => {
+  assert.match(worker, /async function promptAdminProduct/);
+  assert.match(worker, /async function handleAdminProductWizardReply/);
+  assert.match(worker, /async function handleAdminProductWizardConfirm/);
+  assert.match(worker, /admin_product_drafts/);
+  assert.match(worker, /FIELD=/);
+  assert.match(worker, /callback_data:"adm:productform:save:"\+formId/);
+  assert.doesNotMatch(worker, /async function handleAdminProductForm\(/);
+  assert.doesNotMatch(worker, /Kirim satu pesan dengan 7 kolom dipisahkan tanda/);
+});
+
+test("QRIS checkout presents dynamic mode first and static manual amount fallback", () => {
+  assert.match(worker, /getQrisCheckoutMode\(env\)/);
+  assert.match(worker, /STATIC_FALLBACK/);
+  assert.match(worker, /QRIS STATIS SEITON\.ID/);
+  assert.match(worker, /TRANSFER PERSIS:/);
+  assert.match(worker, /qris_mode/);
+  assert.match(worker, /QRIS \(Nominal Manual\)/);
 });
 
 test("customers can re-display their own active dynamic QRIS from Pesanan Saya", () => {

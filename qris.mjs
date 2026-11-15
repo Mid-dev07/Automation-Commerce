@@ -152,10 +152,7 @@ export function buildDynamicQrisPayload(staticPayload, amount) {
 }
 
 
-/** Internal Seiton QRIS issuance gate. */
-export function isInternalQrisConfigured(env) {
-  if (String(env?.QRIS_INTERNAL_ENABLED || "false").toLowerCase() !== "true") return false;
-  const template = clean(env?.QRIS_STATIC_PAYLOAD, 4096);
+function isValidStaticMerchantTemplate(template) {
   if (!template) return false;
   try {
     const parsed = parseQrisPayload(template);
@@ -167,6 +164,28 @@ export function isInternalQrisConfigured(env) {
   } catch {
     return false;
   }
+}
+
+/** Dynamic payload generation remains opt-in until the QRIS acquirer confirms acceptance. */
+export function isInternalQrisConfigured(env) {
+  return String(env?.QRIS_INTERNAL_ENABLED || "false").toLowerCase() === "true"
+    && isValidStaticMerchantTemplate(clean(env?.QRIS_STATIC_PAYLOAD, 4096));
+}
+
+/** Static MPM fallback is safe to display; the customer enters the exact amount manually. */
+export function isStaticQrisFallbackConfigured(env) {
+  return String(env?.QRIS_STATIC_FALLBACK_ENABLED || "false").toLowerCase() === "true"
+    && isValidStaticMerchantTemplate(clean(env?.QRIS_STATIC_PAYLOAD, 4096));
+}
+
+export function getQrisCheckoutMode(env) {
+  if (isInternalQrisConfigured(env)) return "DYNAMIC";
+  if (isStaticQrisFallbackConfigured(env)) return "STATIC_FALLBACK";
+  return "DISABLED";
+}
+
+export function isQrisCheckoutAvailable(env) {
+  return getQrisCheckoutMode(env) !== "DISABLED";
 }
 
 export function extractQrisMerchantProfile(payload) {
