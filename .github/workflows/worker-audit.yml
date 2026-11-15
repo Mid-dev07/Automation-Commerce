@@ -32,5 +32,7 @@ jobs:
         run: node --check otp-portal/email-parser.js
       - name: Check site-admin Worker syntax
         run: node --check site-admin/worker.js
+      - name: Check owner operations module syntax
+        run: node --check site-admin/owner-operations.js
       - name: Run regression tests
         run: node --test tests/*.test.cjs tests/*.test.mjs otp-portal/*.test.mjs
