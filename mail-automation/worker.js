@@ -1,4 +1,5 @@
 import { parseEmail } from "./email-parser.js";
+import { extractVerificationCode } from "./otp-extractor.js";
 
 const PANEL_ORIGIN = "https://mail.seiton.biz.id";
 const PANEL_HOST = "mail.seiton.biz.id";
@@ -158,27 +159,6 @@ function parseAliasRecipient(value) {
   const match = localPart.match(/^receiver\+([a-f0-9]{24})$/);
   if (!match) return null;
   return { slug: match[1], address: normalized };
-}
-
-function extractVerificationCode(subjectValue, bodyValue) {
-  const subject = clean(subjectValue, 300);
-  const body = clean(bodyValue, MAX_BODY_CHARS);
-  const lines = (subject + "\n" + body).split(/\r?\n/).slice(0, 120);
-  const patterns = [
-    /(?:confirmation|login|verification|security)\s+code[\s:=-]*(?:<[^>]+>\s*)*(\d{6})\b/i,
-    /(?:verification\s+code|verify(?:\s+your)?\s+account|security\s+code|authentication\s+code|one[\s-]?time(?:\s+password|\s+code)?|passcode|otp|kode\s+(?:verifikasi|otp|keamanan)|kode\s+anda|your\s+code|use(?:\s+this)?\s+code|code\s+is)\D{0,45}([A-Z0-9]{4,10})/i,
-    /(?:G-|FB-)(\d{4,8})\b/i
-  ];
-  for (const line of lines) {
-    for (const pattern of patterns) {
-      const match = line.match(pattern);
-      if (match && match[1]) {
-        const code = match[1].toUpperCase();
-        if (/^\d{4,8}$/.test(code) || /^[A-Z0-9]{5,10}$/.test(code)) return code;
-      }
-    }
-  }
-  return "";
 }
 
 function getCookie(request, name) {
@@ -1123,7 +1103,7 @@ async function handleInboundEmail(message, env) {
   const sender = clean(message.from || parsed.from, 254);
   const subject = clean(parsed.subject || "(Tanpa subjek)", 300);
   const body = clean(parsed.text || "", MAX_BODY_CHARS);
-  const code = extractVerificationCode(subject, body);
+  const code = extractVerificationCode(subject, parsed.searchText || body);
   const originalMessageId = clean(message.headers.get("message-id") || "", 300) ||
     recipient.address + ":" + sender + ":" + subject + ":" + String(now) + ":" + body.slice(0, 300);
   const messageId = await sha256Hex(originalMessageId);
