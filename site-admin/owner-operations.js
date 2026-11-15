@@ -243,7 +243,7 @@ const $=id=>document.getElementById(id);
 const statuses=[["KONTAK_BARU","Kontak baru"],["KONSULTASI","Konsultasi"],["PENAWARAN","Penawaran dikirim"],["MENUNGGU_DP","Menunggu DP"],["MENUNGGU_BAHAN","Menunggu bahan"],["DIKERJAKAN","Sedang dikerjakan"],["MENUNGGU_REVIEW","Menunggu pemeriksaan"],["MENUNGGU_PELUNASAN","Menunggu pelunasan"],["SERAH_TERIMA","Serah terima"],["MAINTENANCE","Maintenance"],["SELESAI","Selesai"],["DIBATALKAN","Dibatalkan"]];
 const money=n=>"Rp "+Number(n||0).toLocaleString("id-ID");
 const api=async(path,opts={})=>{const r=await fetch(path,{credentials:"same-origin",cache:"no-store",...opts});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||"Permintaan gagal ("+r.status+").");return d;};
-let projects=[];
+let projects=[],paymentRequestKey="";
 function note(msg,bad=false){$("error").classList.toggle("hidden",!bad);$("notice").classList.toggle("hidden",bad);$(bad?"error":"notice").textContent=msg;}
 function options(selected){return statuses.map(x=>"<option value='"+x[0]+"' "+(x[0]===selected?"selected":"")+">"+x[1]+"</option>").join("");}
 function loadOptions(){$("status").innerHTML=options("KONTAK_BARU");$("filterStatus").innerHTML="<option value=''>Semua tahap</option>"+statuses.map(x=>"<option value='"+x[0]+"'>"+x[1]+"</option>").join("");}
