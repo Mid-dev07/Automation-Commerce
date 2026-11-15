@@ -398,7 +398,7 @@ test("repeated payment approval never sends a second receipt or digital fulfillm
 });
 
 
-test("operational alerts are opt-in and report failed mirrors plus stale payment reviews", () => {
+test("operational alerts are opt-in and report failed, stalled mirrors plus stale payment reviews", () => {
   assert.match(worker, /OPERATIONAL_ALERTS_ENABLED/);
   assert.match(worker, /async function dispatchOperationalAlerts\(env\)/);
   assert.match(worker, /operational_alert_state/);
@@ -406,6 +406,11 @@ test("operational alerts are opt-in and report failed mirrors plus stale payment
   assert.match(worker, /payment_requested_at<>''[\s\S]{0,120}2\.0\/24\.0/);
   assert.match(worker, /dispatchOperationalAlerts\(env\)/);
   assert.match(worker, /failed_mirror_outbox/);
+  assert.match(worker, /stalled_mirror_outbox/);
+  assert.ok(worker.includes("status IN ('PENDING','PROCESSING')"));
+  assert.ok(worker.includes("attempts>=5"));
+  assert.ok(worker.includes("julianday('now')-julianday(created_at)>=(1.0/24.0)"));
+  assert.ok(worker.includes('key:"stalled_mirror"'));
   assert.match(worker, /stale_payment_verification/);
 });
 
