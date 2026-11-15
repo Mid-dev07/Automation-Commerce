@@ -166,11 +166,18 @@ async function createOrderD1(db, input) {
     SELECT ?,?,?,?,?,?,?,p.sku,p.name,?,p.price,p.price*?, ?,p.price*?+?, ?, ?,1,?
     FROM catalog_products p
     WHERE p.sku = ? COLLATE NOCASE AND p.active = 1
-      AND (p.stock IS NULL OR p.stock >= ?)`).bind(
+      AND (p.stock IS NULL OR p.stock >= ?)
+      AND EXISTS (
+        SELECT 1 FROM payment_method_settings pms
+        WHERE pms.method_key = ? AND pms.enabled = 1
+          AND (? <> 'TRANSFER' OR EXISTS (
+            SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled = 1
+          ))
+      )`).bind(
         id, dedupe, createdAt, createdMs, clean(input.channel || "telegram",24),
         clean(input.customerId,128), clean(input.customerName || "Pelanggan",100),
         qty, qty, shipping, qty, shipping, method, "MENUNGGU_PEMBAYARAN",
-        createdAt, sku, qty
+        createdAt, sku, qty, method, method
       ),
     db.prepare(`INSERT OR IGNORE INTO inventory_movements(order_id,sku,movement_type,quantity,created_at)
       SELECT order_id,sku,'RESERVE',quantity,? FROM orders
@@ -185,6 +192,13 @@ async function createOrderD1(db, input) {
   if (current) {
     const created = current.order_id === id;
     return { ...current, duplicate: !created, created: created, stock_reserved: Boolean(current.stock_reserved) };
+  }
+  const methodAvailable = await db.prepare(
+    "SELECT 1 AS available FROM payment_method_settings pms WHERE pms.method_key=? AND pms.enabled=1 " +
+    "AND (? <> 'TRANSFER' OR EXISTS (SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled=1))"
+  ).bind(method,method).first();
+  if (!methodAvailable) {
+    throw new Error("Metode pembayaran baru saja dinonaktifkan atau belum dikonfigurasi admin. Pilih metode lain.");
   }
   const fresh = await db.prepare("SELECT stock,active FROM catalog_products WHERE sku=? COLLATE NOCASE").bind(sku).first();
   if (!fresh || !fresh.active) throw new Error("Produk tidak ditemukan atau sedang nonaktif.");
