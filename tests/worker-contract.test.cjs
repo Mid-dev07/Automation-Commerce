@@ -396,3 +396,22 @@ test("repeated payment approval never sends a second receipt or digital fulfillm
   assert.match(worker, /already_approved:true/);
   assert.match(worker, /Sudah disetujui sebelumnya; tidak ada persetujuan ulang/);
 });
+
+
+test("operational alerts are opt-in and report failed mirrors plus stale payment reviews", () => {
+  assert.match(worker, /OPERATIONAL_ALERTS_ENABLED/);
+  assert.match(worker, /async function dispatchOperationalAlerts\(env\)/);
+  assert.match(worker, /operational_alert_state/);
+  assert.match(worker, /status='FAILED'[\s\S]{0,120}SHEET_MIRROR/);
+  assert.match(worker, /payment_requested_at<>''[\s\S]{0,120}2\.0\/24\.0/);
+  assert.match(worker, /dispatchOperationalAlerts\(env\)/);
+  assert.match(worker, /failed_mirror_outbox/);
+  assert.match(worker, /stale_payment_verification/);
+});
+
+test("owner operations CRM never records a refund larger than net confirmed payments", async () => {
+  const ownerOps = fs.readFileSync(path.join(root, "site-admin/owner-operations.js"), "utf8");
+  assert.match(ownerOps, /type==="PENGEMBALIAN"/);
+  assert.match(ownerOps, /Nominal pengembalian melebihi pembayaran bersih/);
+  assert.match(ownerOps, /confirmedReceived!==true/);
+});
