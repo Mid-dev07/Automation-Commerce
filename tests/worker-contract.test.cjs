@@ -295,7 +295,7 @@ test("Telegram product management uses durable step-by-step form drafts instead 
   assert.match(worker, /admin_product_drafts/);
   assert.match(worker, /FIELD=/);
   assert.match(worker, /callback_data:"adm:productform:save:"\+formId/);
-  assert.doesNotMatch(worker, /String\(input \|\| ""\)\.split\("\\|"/);
+  assert.doesNotMatch(worker, /async function handleAdminProductForm\(/);
   assert.doesNotMatch(worker, /Kirim satu pesan dengan 7 kolom dipisahkan tanda/);
 });
 
