@@ -316,3 +316,21 @@ test("customers can re-display their own active dynamic QRIS from Pesanan Saya",
   assert.match(worker, /String\(order\.customer_id\) !== String\(userId\)/);
   assert.match(worker, /payment\.status === "PAID"/);
 });
+
+
+test("owner-only bot diagnostics validates Telegram API and reads transactional catalog/order health", () => {
+  assert.match(worker, /async function handleAdminBotDiagnostics\(request, env\)/);
+  assert.match(worker, /verifyDashboardAccess\(request, env\)[\s\S]{0,120}401/);
+  assert.match(worker, /getMe/);
+  assert.match(worker, /getWebhookInfo/);
+  assert.match(worker, /telegram\.webhook_configured = webhookUrl === expectedWebhookUrl/);
+  assert.match(worker, /FROM catalog_products/);
+  assert.match(worker, /FROM orders/);
+  assert.match(worker, /last_error_message/);
+  assert.doesNotMatch(worker, /telegram_token:/i);
+});
+
+test("bot diagnostics endpoint is only exposed under an authenticated admin route", () => {
+  assert.match(worker, /url\.pathname === "\/api\/admin\/bot\/diagnostics"[\s\S]{0,150}handleAdminBotDiagnostics/);
+  assert.match(worker, /async function handleAdminBotDiagnostics/);
+});
