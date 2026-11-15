@@ -9,7 +9,6 @@ import {
   completeSheetMirrorOutbox, failSheetMirrorOutbox
 } from "./transaction-layer.js";
 import {
-  isInternalQrisConfigured,
   isQrisCheckoutAvailable,
   getQrisCheckoutMode,
   buildDynamicQrisPayload,
@@ -3962,7 +3961,7 @@ function createMessagingServices(env) {
     async listProducts() {
       const rows = await readTelegramCatalogRows(env);
       return rows.map(parseCatalogProduct).filter(product =>
-        product.active && product.priceValid && product.stockValid
+        product.priceValid && product.stockValid
       ).map(product => ({
         sku: product.sku,
         name: product.name,
