@@ -145,6 +145,13 @@ async function recordProjectPayment(env,id,b){
   const type=clean(b.paymentType,20).toUpperCase();
   if(!OWNER_PAYMENT_TYPES.includes(type))return json({ok:false,error:"Jenis pembayaran tidak dikenal."},400);
   const amount=safeAmount(b.amount,"Nominal pembayaran",false),method=clean(b.paymentMethod,40),reference=clean(b.paymentReference,120),note=clean(b.note,500);
+  if(type==="PENGEMBALIAN"){
+    const balance=await env.SITE_DB.prepare(
+      "SELECT COALESCE(SUM(CASE WHEN payment_type='PENGEMBALIAN' THEN -amount ELSE amount END),0) AS net_paid " +
+      "FROM owner_project_payments WHERE project_id=?"
+    ).bind(id).first();
+    if(amount>Number(balance?.net_paid||0))return json({ok:false,error:"Nominal pengembalian melebihi pembayaran bersih yang tercatat."},400);
+  }
   const now=new Date().toISOString(),paymentId=crypto.randomUUID(),eventId=crypto.randomUUID();
   await env.SITE_DB.batch([
     env.SITE_DB.prepare("INSERT INTO owner_project_payments(payment_id,project_id,payment_type,amount,payment_method,payment_reference,note,recorded_by,confirmed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
