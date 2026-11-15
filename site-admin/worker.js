@@ -356,7 +356,7 @@ if(u.pathname==="/api/control/export"&&req.method==="GET"){
   if(origin&&!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
   const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
   const type=controlText(u.searchParams.get("type"),20);
-  const from=controlText(u.searchParams.get("from"),10),to=controlText(u.searchParams.get("to"),10);
+  const from=String(u.searchParams.get("from")||""),to=String(u.searchParams.get("to")||"");
   const validDate=value=>!value||/^\\d{4}-\\d{2}-\\d{2}$/.test(value)&&(()=>{const d=new Date(value+"T00:00:00.000Z");return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===value;})();
   if(!["orders","finance","daily","inventory"].includes(type))return secure(j({ok:false,error:"Jenis ekspor tidak dikenal."},400));
   if(!validDate(from)||!validDate(to)||(from&&to&&from>to))return secure(j({ok:false,error:"Rentang tanggal tidak valid."},400));
@@ -374,7 +374,7 @@ if(u.pathname==="/api/control/export"&&req.method==="GET"){
       return secure(j({ok:false,error:"Backend mengembalikan format laporan yang tidak dikenali."},502));
     }
     try{
-      await newAuditStatement(env,{action:"REPORT_EXPORT_SENT",resource:"report_export",summary:{type,from:from||null,to:to||null},clientHash:session.client_hash});
+      await newAuditStatement(env,{action:"REPORT_EXPORT_SENT",resource:"report_export",summary:{type,from:from||null,to:to||null},clientHash:session.client_hash}).run();
     }catch(auditError){
       try{await upstream.body?.cancel();}catch{}
       console.error(JSON.stringify({event:"owner_control_export_audit_failed",type,error:String(auditError&&auditError.message||auditError)}));
