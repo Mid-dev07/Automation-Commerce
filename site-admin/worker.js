@@ -176,6 +176,50 @@ function page(){const html=[
 "document.addEventListener('click',e=>{if(e.target.closest('[data-del-svc]')){const i=Array.from(document.querySelectorAll('[data-svc]')).indexOf(e.target.closest('[data-svc]'));data.produk.splice(i,1);render();}if(e.target.closest('[data-del-addon]')){const i=Array.from(document.querySelectorAll('[data-addon]')).indexOf(e.target.closest('[data-addon]'));data.tambahan.splice(i,1);render();}});$('logout').addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});}catch(e){}location.reload();});$('refreshAll').addEventListener('click',async()=>{const button=$('refreshAll');button.disabled=true;button.textContent='Memuat…';const jobs=[loadBotConsole().catch(e=>note('Monitoring bot belum tersedia: '+e.message,true)),loadAudit(),loadSessions()];if(activeView==='otp')jobs.push(loadOtpMailboxes());const results=await Promise.allSettled(jobs);$('status').textContent=results.some(x=>x.status==='rejected')?'SEBAGIAN GAGAL':'DATA DIPERBARUI';button.disabled=false;button.textContent='Perbarui data';});check();})();",
 "</script></body></html>"
 ].join("");return html;}
+
+async function parseControlJson(request,maxBytes=16384){
+  const contentType=String(request.headers.get("Content-Type")||"").toLowerCase();
+  if(!contentType.includes("application/json"))return {ok:false,status:415,error:"Content-Type harus application/json."};
+  const declared=Number(request.headers.get("Content-Length")||0);
+  if(Number.isFinite(declared)&&declared>maxBytes)return {ok:false,status:413,error:"Ukuran data melebihi batas."};
+  const reader=request.body?.getReader();
+  if(!reader)return {ok:false,status:400,error:"Body permintaan kosong."};
+  const chunks=[];let total=0;
+  try{
+    while(true){
+      const part=await reader.read();if(part.done)break;
+      total+=part.value.byteLength;
+      if(total>maxBytes){try{await reader.cancel();}catch{}return {ok:false,status:413,error:"Ukuran data melebihi batas."};}
+      chunks.push(part.value);
+    }
+  }catch{return {ok:false,status:400,error:"Body permintaan tidak dapat dibaca."};}
+  const bytes=new Uint8Array(total);let offset=0;
+  for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+  try{
+    const value=JSON.parse(new TextDecoder().decode(bytes));
+    if(!value||typeof value!=="object"||Array.isArray(value))return {ok:false,status:400,error:"Format JSON harus berupa objek."};
+    return {ok:true,value};
+  }catch{return {ok:false,status:400,error:"JSON tidak valid."};}
+}
+async function fetchOrderAdmin(env,token,path,method="GET",body){
+  if(!env.ORDER_BACKEND)throw new Error("Service binding Order Worker tidak tersedia.");
+  const headers={Authorization:"Bearer "+token};
+  if(body!==undefined)headers["Content-Type"]="application/json";
+  return env.ORDER_BACKEND.fetch(new Request("https://internal"+path,{method,headers,body:body===undefined?undefined:JSON.stringify(body)}));
+}
+async function proxyOrderJson(env,token,path,method="GET",body){
+  const upstream=await fetchOrderAdmin(env,token,path,method,body);
+  const payload=await upstream.json().catch(()=>({ok:false,error:"Respons Order Worker tidak valid."}));
+  return {status:upstream.status,payload};
+}
+function controlText(value,max=120){
+  return String(value??"").trim().slice(0,max);
+}
+function validOrderReference(value){
+  const id=controlText(value,80);
+  return Boolean(id)&&id.length<=80&&!/[\u0000-\u001f\u007f]/.test(id);
+}
+
 export default {async fetch(req,env){const u=new URL(req.url);try{
 if(u.pathname==="/api/pricing"&&req.method==="OPTIONS"){const origin=req.headers.get("Origin")||"";if(!ORIGINS.has(origin))return secure(new Response(null,{status:403}));return secure(new Response(null,{status:204,headers:{"Access-Control-Allow-Origin":origin,"Access-Control-Allow-Methods":"GET, OPTIONS","Access-Control-Allow-Headers":"Content-Type","Access-Control-Max-Age":"600","Vary":"Origin"}}));}
 if(u.pathname==="/api/pricing"&&req.method==="GET"){const origin=req.headers.get("Origin")||"",h={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","Vary":"Origin"};if(ORIGINS.has(origin))h["Access-Control-Allow-Origin"]=origin;return secure(new Response(JSON.stringify(await getPricing(env)),{headers:h}));}
@@ -234,6 +278,74 @@ if(u.pathname==="/api/logout"&&req.method==="POST"){
   }
   return secure(j({ok:true},200,{"Set-Cookie":cookieHead("",0)}));
 }
+
+if(u.pathname==="/api/control/data"&&req.method==="GET"){
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  try{const result=await proxyOrderJson(env,session.token,"/api/admin/data");return secure(j(result.payload,result.status));}
+  catch(e){console.error(JSON.stringify({event:"owner_control_data_proxy_failed",error:String(e&&e.message||e)}));return secure(j({ok:false,error:"Data operasional belum dapat dihubungi."},503));}
+}
+if(u.pathname==="/api/control/payment-methods"&&req.method==="GET"){
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  try{const result=await proxyOrderJson(env,session.token,"/api/admin/payment-methods");return secure(j(result.payload,result.status));}
+  catch(e){console.error(JSON.stringify({event:"owner_control_payment_methods_read_failed",error:String(e&&e.message||e)}));return secure(j({ok:false,error:"Konfigurasi pembayaran belum dapat dibaca."},503));}
+}
+if(u.pathname==="/api/control/payment-methods"&&req.method==="POST"){
+  if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  const parsed=await parseControlJson(req,12000);if(!parsed.ok)return secure(j({ok:false,error:parsed.error},parsed.status));
+  const b=parsed.value,action=controlText(b.action,30);let payload;
+  if(action==="set_method"){
+    const method=controlText(b.method_key,20).toUpperCase();
+    if(!["QRIS","TRANSFER","COD"].includes(method)||typeof b.enabled!=="boolean")return secure(j({ok:false,error:"Metode atau status tidak valid."},400));
+    payload={action:"set_method",method_key:method,enabled:b.enabled};
+  }else if(action==="save_bank"){
+    const accountId=controlText(b.account_id,80),bankName=controlText(b.bank_name,80),holder=controlText(b.account_holder,100);
+    const accountNumber=controlText(b.account_number,40).replace(/[\s-]/g,""),note=controlText(b.note,200);
+    const enabled=b.enabled===undefined?true:b.enabled;
+    if((accountId&&!/^[A-Za-z0-9_-]{8,80}$/.test(accountId))||!bankName||!holder||!/^[0-9]{5,32}$/.test(accountNumber)||typeof enabled!=="boolean"){
+      return secure(j({ok:false,error:"Lengkapi nama bank, pemilik, nomor rekening 5–32 digit, dan status yang valid."},400));
+    }
+    payload={action:"save_bank",...(accountId?{account_id:accountId}:{}),bank_name:bankName,account_holder:holder,account_number:accountNumber,note,enabled};
+  }else if(action==="toggle_bank"){
+    const accountId=controlText(b.account_id,80);
+    if(!/^[A-Za-z0-9_-]{8,80}$/.test(accountId)||typeof b.enabled!=="boolean")return secure(j({ok:false,error:"Rekening atau status tidak valid."},400));
+    payload={action:"toggle_bank",account_id:accountId,enabled:b.enabled};
+  }else return secure(j({ok:false,error:"Aksi pengaturan pembayaran tidak dikenal."},400));
+  try{const result=await proxyOrderJson(env,session.token,"/api/admin/payment-methods","POST",payload);return secure(j(result.payload,result.status));}
+  catch(e){console.error(JSON.stringify({event:"owner_control_payment_methods_write_failed",error:String(e&&e.message||e)}));return secure(j({ok:false,error:"Pengaturan metode pembayaran gagal diteruskan."},503));}
+}
+if(u.pathname==="/api/control/payment"&&req.method==="POST"){
+  if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  const parsed=await parseControlJson(req,4096);if(!parsed.ok)return secure(j({ok:false,error:parsed.error},parsed.status));
+  const orderId=controlText(parsed.value.order_id,80),action=controlText(parsed.value.action,12);
+  if(!validOrderReference(orderId)||!["approve","reject"].includes(action))return secure(j({ok:false,error:"Pesanan atau aksi verifikasi tidak valid."},400));
+  try{const result=await proxyOrderJson(env,session.token,"/api/admin/payment","POST",{order_id:orderId,action});return secure(j(result.payload,result.status));}
+  catch(e){console.error(JSON.stringify({event:"owner_control_payment_action_failed",error:String(e&&e.message||e)}));return secure(j({ok:false,error:"Aksi pembayaran gagal diteruskan ke backend."},503));}
+}
+if(u.pathname==="/api/control/order-status"&&req.method==="POST"){
+  if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  const parsed=await parseControlJson(req,4096);if(!parsed.ok)return secure(j({ok:false,error:parsed.error},parsed.status));
+  const orderId=controlText(parsed.value.order_id,80),status=controlText(parsed.value.status,40).toUpperCase();
+  const allowed=["MENUNGGU_PEMBAYARAN","MENUNGGU_VERIFIKASI","DIBAYAR","DIPROSES","DIKIRIM","SELESAI","DIBATALKAN"];
+  if(!validOrderReference(orderId)||!allowed.includes(status))return secure(j({ok:false,error:"Pesanan atau status tidak valid."},400));
+  try{const result=await proxyOrderJson(env,session.token,"/api/admin/order-status","POST",{order_id:orderId,status});return secure(j(result.payload,result.status));}
+  catch(e){console.error(JSON.stringify({event:"owner_control_order_status_failed",error:String(e&&e.message||e)}));return secure(j({ok:false,error:"Perubahan status gagal diteruskan ke backend."},503));}
+}
+if(u.pathname==="/api/control/proof"&&req.method==="GET"){
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  const orderId=controlText(u.searchParams.get("order_id"),80);
+  if(!validOrderReference(orderId))return secure(j({ok:false,error:"ID pesanan tidak valid."},400));
+  try{
+    const upstream=await fetchOrderAdmin(env,session.token,"/api/admin/proof?order_id="+encodeURIComponent(orderId));
+    if(!upstream.ok){const payload=await upstream.json().catch(()=>({error:"Bukti pembayaran tidak dapat diambil."}));return secure(j({ok:false,error:controlText(payload.error,240)||"Bukti pembayaran tidak dapat diambil."},upstream.status));}
+    const contentType=String(upstream.headers.get("Content-Type")||"application/octet-stream").split(";")[0].toLowerCase();
+    if(!["image/jpeg","image/png","image/webp","application/pdf","application/octet-stream"].includes(contentType))return secure(j({ok:false,error:"Tipe file bukti tidak diizinkan."},415));
+    return secure(new Response(upstream.body,{status:200,headers:{"Content-Type":contentType,"Content-Disposition":"inline; filename=\"payment-proof\"","Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"}}));
+  }catch(e){console.error(JSON.stringify({event:"owner_control_payment_proof_failed",error:String(e&&e.message||e)}));return secure(j({ok:false,error:"Bukti pembayaran belum dapat diambil."},503));}
+}
+
 if(u.pathname==="/api/admin/audit"&&req.method==="GET"){
   const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
   const raw=Number(u.searchParams.get("limit")||30),limit=Number.isFinite(raw)?Math.max(1,Math.min(100,Math.floor(raw))):30;
