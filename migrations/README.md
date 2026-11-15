@@ -16,9 +16,11 @@ Canonical migration directory for `seiton-transactions-prod` is now `migrations/
 | `0010_digital_products.sql` | Digital product inventory and fulfillment | Existing |
 | `0011_qris_payments.sql` | QRIS order ledger, unique amount, and receipt OCR | Applied to production D1 |
 | `0012_qris_static_fallback_product_form.sql` | Static QRIS fallback mode and Telegram product form drafts | Applied to production D1 |
+| `0013_payment_methods_and_bank_accounts.sql` | Admin-controlled checkout methods and multiple bank transfer accounts | Pending release |
 
 ## Important
 
+- Before deploying code that reads migration 0013, apply `0013_payment_methods_and_bank_accounts.sql` to `seiton-transactions-prod`. It is additive and seeds QRIS, Transfer Bank, and COD as enabled; Transfer Bank remains unavailable to customers until at least one active bank account is added.
 - This is a source-of-truth consolidation and deployment index.
 - Migrations 0001–0011 are present in the Seiton production D1 schema; migration 0012 is applied as part of the static fallback/product wizard release.
 - The historical copy under the website repository is retained for traceability. Do not apply both copies.
@@ -34,3 +36,8 @@ Creates the internal QRIS ledger: unique three-digit suffix and exact amount, dy
 ## 0012_qris_static_fallback_product_form.sql
 
 Adds `qris_mode` to the QRIS ledger so each order remembers whether its QR image is dynamic or the original static merchant QR. Adds durable per-admin draft storage for the Telegram product add/edit wizard. It does not alter existing orders or catalog items.
+
+
+## 0013_payment_methods_and_bank_accounts.sql
+
+Adds admin-managed enabled/disabled state for QRIS, Transfer Bank, and COD plus multiple bank account destinations. Disabling a method or account affects new checkout sessions only; existing orders and their payment-verification state remain unchanged. Bank account records are soft-disabled rather than deleted, and bank/number duplicates are blocked by a unique index.
