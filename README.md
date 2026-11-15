@@ -31,3 +31,8 @@ Source terpisah tersedia di `otp-portal/`. Portal menampilkan inbox untuk mailbo
 The Telegram order Worker contains a local QRIS MPM payload composer in `qris.mjs`. It converts a merchant-issued static template to a transaction-specific payload (MPM point-of-initiation `11` → `12`, inserts tag `54`, recalculates tag `63` CRC16/CCITT-FALSE). It does not call a payment gateway or create a transaction through a GoPay API.
 
 The production QRIS feature flag remains disabled until the GoPay-issued template passes cross-wallet scan tests, a small real payment reaches the correct merchant account, and the acquirer confirms this issuance method. Static QRIS remains the live fallback. See [internal QRIS engine and release gates](docs/INTERNAL-QRIS-ENGINE.md).
+
+
+## Unified Owner Control Center
+
+The owner dashboard consolidation specification lives in [docs/UNIFIED-OWNER-CONTROL-CENTER.md](docs/UNIFIED-OWNER-CONTROL-CENTER.md). It defines the single-panel UX, owner-session/BFF architecture, existing API integration map, Mail Automation integration boundary, security requirements, and phased acceptance criteria. Treat it as the design baseline; it does not mean the unified UI has been implemented or deployed.
