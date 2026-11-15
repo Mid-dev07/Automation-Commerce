@@ -27,7 +27,7 @@ The Telegram Worker already calls `getQrisCheckoutMode()` when showing payment m
 - stores the converted dynamic payload when `QRIS_INTERNAL_ENABLED=true`; or
 - stores the original static payload when `QRIS_STATIC_FALLBACK_ENABLED=true`.
 
-Each order currently receives a random 3-digit suffix (`001`–`999`); the expected payment amount is the order total plus that suffix. D1 has a unique index on `qris_payments.expected_amount` to prevent a duplicate expected amount from being assigned to another order. Because the suffix range is finite and expected amounts remain in the ledger, the same base amount has at most 999 unique suffix amounts across the retained ledger. Monitor this capacity before high-volume use.
+Each order currently receives a random 3-digit suffix (`001`–`999`); the expected payment amount is the order total plus that suffix. The suffix range is reduced when needed so the final QRIS amount never exceeds Bank Indonesia's Rp10,000,000 per-transaction ceiling. Checkout rejects a base order total that leaves no room for a positive unique suffix. D1 has a unique index on `qris_payments.expected_amount` to prevent a duplicate expected amount from being assigned to another order. Because the suffix range is finite and expected amounts remain in the ledger, the same base amount has at most 999 unique suffix amounts across the retained ledger. Monitor this capacity before high-volume use.
 
 The QR image is rendered by QuickChart using only the QR payload as input. QuickChart is an image-rendering dependency, not a payment gateway. The payload includes merchant payment data; a strict all-internal rendering path would replace this renderer with a bundled QR encoder.
 
@@ -39,7 +39,7 @@ After the branch is deployed to an isolated test Worker with the Seiton GoPay Me
 /qris_test 10000
 ```
 
-The command is admin-only and private-chat-only. It composes a dynamic payload from the actual Worker Secret and sends the QR image to the admin. It does not create an order or insert a payment ledger row. The requested amount is checked against existing QRIS expected amounts to avoid an obvious collision.
+The command is admin-only and private-chat-only. It composes a dynamic payload from the actual Worker Secret and sends the QR image to the admin. It does not create an order or insert a payment ledger row. The requested amount is checked against existing QRIS expected amounts to avoid an obvious collision. Preview requests are also capped at Rp10,000,000 per transaction.
 
 First scan only: verify the displayed merchant and exact amount in GoPay and at least one other issuer app. Do not pay until the merchant and amount are correct. If a controlled real payment is then performed, confirm that it appears in the correct GoPay Merchant transaction history. This preview QR is not tracked, cancelled, or invalidated by Seiton; treat it as reusable until the acquirer proves otherwise and do not share it with customers.
 
