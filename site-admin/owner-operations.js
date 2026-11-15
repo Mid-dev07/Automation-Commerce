@@ -145,6 +145,18 @@ async function recordProjectPayment(env,id,b){
   const type=clean(b.paymentType,20).toUpperCase();
   if(!OWNER_PAYMENT_TYPES.includes(type))return json({ok:false,error:"Jenis pembayaran tidak dikenal."},400);
   const amount=safeAmount(b.amount,"Nominal pembayaran",false),method=clean(b.paymentMethod,40),reference=clean(b.paymentReference,120),note=clean(b.note,500);
+  const idempotencyKey=clean(b.idempotencyKey,64).toLowerCase();
+  if(!/^[a-f0-9-]{36}$/.test(idempotencyKey))return json({ok:false,error:"Kunci pencatatan pembayaran tidak valid. Muat ulang formulir."},400);
+  const prior=await env.SITE_DB.prepare(
+    "SELECT payment_id,project_id,payment_type,amount,payment_method,payment_reference,note,confirmed_at " +
+    "FROM owner_project_payments WHERE idempotency_key=?"
+  ).bind(idempotencyKey).first();
+  if(prior){
+    const same=prior.project_id===id&&prior.payment_type===type&&Number(prior.amount)===amount&&
+      prior.payment_method===method&&prior.payment_reference===reference&&prior.note===note;
+    if(!same)return json({ok:false,error:"Kunci ini sudah digunakan untuk data pembayaran berbeda. Periksa riwayat sebelum mencatat ulang."},409);
+    return json({ok:true,paymentId:prior.payment_id,recordedAt:prior.confirmed_at,duplicate:true});
+  }
   if(type==="PENGEMBALIAN"){
     const balance=await env.SITE_DB.prepare(
       "SELECT COALESCE(SUM(CASE WHEN payment_type='PENGEMBALIAN' THEN -amount ELSE amount END),0) AS net_paid " +
@@ -154,8 +166,8 @@ async function recordProjectPayment(env,id,b){
   }
   const now=new Date().toISOString(),paymentId=crypto.randomUUID(),eventId=crypto.randomUUID();
   await env.SITE_DB.batch([
-    env.SITE_DB.prepare("INSERT INTO owner_project_payments(payment_id,project_id,payment_type,amount,payment_method,payment_reference,note,recorded_by,confirmed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-      .bind(paymentId,id,type,amount,method,reference,note,"owner",now,now),
+    env.SITE_DB.prepare("INSERT INTO owner_project_payments(payment_id,idempotency_key,project_id,payment_type,amount,payment_method,payment_reference,note,recorded_by,confirmed_at,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+      .bind(paymentId,idempotencyKey,id,type,amount,method,reference,note,"owner",now,now),
     env.SITE_DB.prepare("INSERT INTO owner_project_events(event_id,project_id,actor_id,action,from_status,to_status,summary_json,created_at) VALUES(?,?,?,'PROJECT_PAYMENT_RECORDED',?,?,?,?)")
       .bind(eventId,id,"owner",project.status,project.status,JSON.stringify({payment_type:type,amount,payment_method:method,reference_recorded:Boolean(reference)}),now)
   ]);
@@ -265,7 +277,7 @@ $("createForm").addEventListener("submit",async e=>{e.preventDefault();const b=$
  try{await api("/api/owner/operations/projects",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});$("createForm").reset();$("quoteAmount").value="0";$("revisionLimit").value="0";$("status").value="KONTAK_BARU";note("Proyek dan pelanggan berhasil dicatat.");await refresh();}catch(err){note(err.message,true);}finally{b.disabled=false;}
 });
 $("paymentForm").addEventListener("submit",async e=>{e.preventDefault();const id=$("paymentProject").value;if(!id){note("Pilih proyek terlebih dahulu.",true);return;}const b=$("paymentButton");b.disabled=true;
- try{await api("/api/owner/operations/projects/"+id+"/payments",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({paymentType:$("paymentType").value,amount:Number($("paymentAmount").value),paymentMethod:$("paymentMethod").value,paymentReference:$("paymentReference").value,note:$("paymentNote").value,confirmedReceived:$("confirmedReceived").checked})});$("paymentForm").reset();note("Pembayaran proyek tercatat setelah konfirmasi penerimaan.");await refresh();}catch(err){note(err.message,true);}finally{b.disabled=false;}
+ try{if(!paymentRequestKey)paymentRequestKey=crypto.randomUUID();await api("/api/owner/operations/projects/"+id+"/payments",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({idempotencyKey:paymentRequestKey,paymentType:$("paymentType").value,amount:Number($("paymentAmount").value),paymentMethod:$("paymentMethod").value,paymentReference:$("paymentReference").value,note:$("paymentNote").value,confirmedReceived:$("confirmedReceived").checked})});paymentRequestKey="";$("paymentForm").reset();note("Pembayaran proyek tercatat setelah konfirmasi penerimaan.");await refresh();}catch(err){note(err.message+" Jangan ubah data saat mencoba ulang; periksa riwayat bila hasil jaringan tidak pasti.",true);}finally{b.disabled=false;}
 });
 $("search").addEventListener("input",renderProjects);$("filterStatus").addEventListener("change",renderProjects);$("refresh").addEventListener("click",()=>refresh().catch(e=>note(e.message,true)));
 loadOptions();refresh().catch(e=>note(e.message,true));
