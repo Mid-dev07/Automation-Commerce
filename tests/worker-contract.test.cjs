@@ -244,3 +244,31 @@ test("operational audit endpoint is authenticated and reads order events plus ad
   assert.match(worker, /FROM order_events WHERE event_type IN \('PAYMENT_APPROVED','PAYMENT_REJECTED','STATUS_CHANGED','PICKED_UP'\)/);
   assert.match(worker, /FROM admin_activity_audit ORDER BY created_at_ms DESC LIMIT \?/);
 });
+
+
+test("Telegram storefront uses branded menus and grouped admin navigation", () => {
+  assert.match(worker, /SEITON_LOGO_URL = "https:\/\/seiton\.biz\.id\/logo-horizontal\.png"/);
+  assert.match(worker, /sendSeitonWelcome\(env, chatId, true\)/);
+  assert.match(worker, /sendSeitonWelcome\(env, chatId, false\)/);
+  assert.match(worker, /callback_data: "adm:orders"/);
+  assert.match(worker, /callback_data: "adm:products"/);
+  assert.match(worker, /callback_data: "adm:reports"/);
+  assert.match(worker, /callback_data: "adm:support"/);
+  assert.match(worker, /function adminOrdersKeyboard\(\)/);
+  assert.match(worker, /function adminProductsKeyboard\(\)/);
+  assert.match(worker, /async function showCustomerCategoryMenu\(env, message\)/);
+  assert.match(worker, /callback_data: "cat:items:"/);
+  assert.match(worker, /callback_data: "view:"/);
+  assert.match(worker, /data === "nav:guide"/);
+});
+
+test("QRIS checkout is disabled without a configured merchant and dynamic payment uses provider webhook", () => {
+  assert.match(worker, /QRIS dinamis belum aktif/);
+  assert.match(worker, /if \(method === "QRIS" && !isDynamicQrisConfigured\(env\)\)/);
+  assert.match(worker, /async function sendQrisPaymentScreen\(env, chatId, order\)/);
+  assert.match(worker, /async function handleMidtransWebhook\(request, env\)/);
+  assert.match(worker, /url\.pathname === "\/webhooks\/midtrans"/);
+  assert.match(worker, /settleQrisPaymentTransactional/);
+  assert.match(worker, /callback_data: "qris:check:"/);
+  assert.doesNotMatch(worker, /LINK_QRIS_IMAGE/);
+});

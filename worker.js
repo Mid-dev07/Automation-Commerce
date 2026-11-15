@@ -3,11 +3,19 @@ import {
   findOrderTransactional, findOrderByLegacyRow, listOrdersTransactional,
   listProductsTransactional, findProductTransactional, saveProductTransactional,
   deleteProductTransactional, setLegacyRowTransactional, updateProofTransactional,
-  requestVerificationTransactional, approvePaymentTransactional, rejectPaymentTransactional,
+  requestVerificationTransactional, approvePaymentTransactional, settleQrisPaymentTransactional, rejectPaymentTransactional,
   setOrderStatusTransactional, markPickedUpTransactional, listDashboardDataTransactional,
   orderToSheetRow, OrderCoordinator, claimSheetMirrorOutbox,
   completeSheetMirrorOutbox, failSheetMirrorOutbox
 } from "./transaction-layer.js";
+import {
+  isDynamicQrisConfigured,
+  createMidtransQrisCharge,
+  getMidtransTransactionStatus,
+  verifyMidtransNotification,
+  parseMidtransAmount,
+  normalizeMidtransStatus
+} from "./qris.mjs";
 import {
   listDigitalStockD1,
   markDigitalDeliveredD1,
@@ -59,6 +67,7 @@ const ADMIN_DASHBOARD_HTML = "<!doctype html>\n<html lang=\"id\">\n<head>\n<meta
 const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const TELEGRAM_API = "https://api.telegram.org";
+const SEITON_LOGO_URL = "https://seiton.biz.id/logo-horizontal.png";
 const TZ = "Asia/Jakarta";
 const HEADERS = [
   "order_id", "created_at", "channel", "customer_id", "customer_name",
@@ -234,6 +243,9 @@ export default {
       return json({ ok: true, service: "seiton-order-bot",
         transaction_store: tx.ready ? "READY" : tx.configured ? "MIGRATION_REQUIRED" : "LEGACY",
         time: new Date().toISOString() });
+    }
+    if (request.method === "POST" && url.pathname === "/webhooks/midtrans") {
+      return handleMidtransWebhook(request, env);
     }
     if (request.method === "POST" && url.pathname === "/telegram") {
       return handleTelegram(request, env, ctx);
@@ -526,7 +538,7 @@ async function handleTelegram(request, env, ctx) {
     if (text.startsWith("/start") || text.startsWith("/help")) {
       const admin = isAdmin(chatId, env);
       if (admin) {
-        await sendTelegram(env, chatId, adminMenuText(), adminMenuKeyboard());
+        await sendSeitonWelcome(env, chatId, true);
         await recordAdminActivity(env, {
           actorId: customerId, action: "ADMIN_MENU_OPENED", resourceType: "admin_menu",
           summary: { entry_point: text.startsWith("/start") ? "start" : "help" }
@@ -540,7 +552,7 @@ async function handleTelegram(request, env, ctx) {
         await processMessagingEvent(env, event, createMessagingServices(env));
         await dispatchTelegramMessagingOutbox(env, 20);
       } else {
-        await sendTelegram(env, chatId, customerMenuText(), customerMenuKeyboard());
+        await sendSeitonWelcome(env, chatId, false);
       }
       return;
     }
@@ -599,38 +611,117 @@ async function handleTelegram(request, env, ctx) {
 
 
 function customerMenuText() {
-  return "🛍️ SELAMAT DATANG DI SEITON.ID\nPilih menu di bawah ini. Anda tidak perlu mengetik format pesanan.";
+  return [
+    "🛍️ SEITON.ID",
+    "Selamat datang! Pilih menu untuk mulai berbelanja.",
+    "Katalog, pesanan, dan bantuan tersedia melalui tombol."
+  ].join("\n");
 }
 function adminMenuText() {
-  return "🛠️ PANEL ADMIN SEITON.ID\nPilih tindakan yang ingin dilakukan.";
+  return "🛠️ SEITON.ID — PANEL ADMIN\nPilih area kerja. Menu dikelompokkan agar lebih ringkas.";
 }
 function customerMenuKeyboard() {
   return { inline_keyboard: [
-    [{ text: "🛍️ Belanja Produk", callback_data: "nav:catalog" }],
-    [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
-    [{ text: "💬 Bantuan", callback_data: "nav:help" }]
+    [
+      { text: "🛍️ Katalog Produk", callback_data: "nav:catalog" },
+      { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+    ],
+    [
+      { text: "🧭 Cara Belanja", callback_data: "nav:guide" },
+      { text: "💬 Bantuan", callback_data: "nav:help" }
+    ]
   ] };
 }
 function adminMenuKeyboard() {
   return { inline_keyboard: [
-    [{ text: "📊 Laporan Penjualan", callback_data: "adm:report" }],
-    [{ text: "🆘 Bantuan Pelanggan", callback_data: "adm:handoff" }],
-    [{ text: "📈 Dashboard Interaktif", callback_data: "adm:dashboard" }],
+    [
+      { text: "🧾 Pesanan", callback_data: "adm:orders" },
+      { text: "🛍️ Produk", callback_data: "adm:products" }
+    ],
+    [
+      { text: "📊 Laporan & Dashboard", callback_data: "adm:reports" },
+      { text: "💬 Bantuan Pelanggan", callback_data: "adm:support" }
+    ],
+    [
+      { text: "💳 Verifikasi Pembayaran", callback_data: "adm:paymentchecks" },
+      { text: "🎟️ Pengambilan", callback_data: "adm:pickup" }
+    ],
+    [{ text: "🛒 Tampilan Pelanggan", callback_data: "nav:home" }]
+  ] };
+}
+function adminOrdersKeyboard() {
+  return { inline_keyboard: [
+    [
+      { text: "📋 Pesanan Terbaru", callback_data: "adm:recent" },
+      { text: "🔄 Ubah Status", callback_data: "adm:statuslist" }
+    ],
+    [
+      { text: "💳 Verifikasi Bayar", callback_data: "adm:paymentchecks" },
+      { text: "🎟️ Antrean Ambil", callback_data: "adm:pickup" }
+    ],
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+  ] };
+}
+function adminProductsKeyboard() {
+  return { inline_keyboard: [
+    [
+      { text: "🗂️ Kelola Katalog", callback_data: "adm:catalog" },
+      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" }
+    ],
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+  ] };
+}
+function adminReportsKeyboard() {
+  return { inline_keyboard: [
+    [
+      { text: "📊 Ringkasan Penjualan", callback_data: "adm:report" },
+      { text: "📈 Dashboard", callback_data: "adm:dashboard" }
+    ],
     [{ text: "📥 Unduh Laporan", callback_data: "adm:exports" }],
-    [{ text: "💳 Konfirmasi Pembayaran", callback_data: "adm:paymentchecks" }],
-    [{ text: "📦 Validasi Pengambilan", callback_data: "adm:pickup" }],
-    [{ text: "📋 Pesanan Terbaru", callback_data: "adm:recent" }],
-    [{ text: "🔄 Perbarui Status Pesanan", callback_data: "adm:statuslist" }],
-    [{ text: "📦 Lihat Katalog", callback_data: "adm:catalog" }],
-    [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
-    [{ text: "🛍️ Tampilan Pelanggan", callback_data: "nav:home" }]
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+  ] };
+}
+function adminSupportKeyboard() {
+  return { inline_keyboard: [
+    [{ text: "🆘 Antrean Bantuan Pelanggan", callback_data: "adm:handoff" }],
+    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
   ] };
 }
 function adminCatalogKeyboard() {
   return { inline_keyboard: [
-    [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
+    [
+      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" },
+      { text: "⬅️ Menu Admin", callback_data: "adm:products" }
+    ]
   ] };
+}
+const CUSTOMER_CATALOG_PAGE_SIZE = 5;
+const CUSTOMER_CATEGORY_META = {
+  digital: { title: "AI & Akun Digital", button: "🤖 AI & Digital" },
+  email: { title: "Email & OTP", button: "✉️ Email & OTP" },
+  website: { title: "Website & UMKM", button: "🌐 Website & UMKM" },
+  automation: { title: "Bot & Otomasi", button: "⚙️ Bot & Otomasi" },
+  other: { title: "Produk Lainnya", button: "📦 Produk Lainnya" }
+};
+const CUSTOMER_CATEGORY_ORDER = ["digital", "email", "website", "automation", "other"];
+function customerCategoryForProduct(row) {
+  const sku = String(row?.[0] || "").trim().toUpperCase();
+  const text = [row?.[1], row?.[6]].map(value => String(value || "").toLowerCase()).join(" ");
+  if (/^MUSE-|\bmuse\b|\bai\b|gemini|chatgpt|claude|grok|capcut|eleven.?labs/.test(sku + " " + text)) return "digital";
+  if (/^OTP-|\botp\b|email|e-mail|mailbox|domain/.test(sku + " " + text)) return "email";
+  if (/^SEI-|website|katalog|umkm/.test(sku + " " + text)) return "website";
+  if (/^S-|bot|automation|automated|otomasi|integrasi/.test(sku + " " + text)) return "automation";
+  return "other";
+}
+function customerCategoryTitle(key) {
+  return CUSTOMER_CATEGORY_META[key]?.title || "Semua Produk";
+}
+function activeCustomerCatalogProducts(rows) {
+  return (rows || []).filter(row => {
+    if (!row?.[0]) return false;
+    const product = parseCatalogProduct(row);
+    return product.active && product.priceValid && product.stockValid;
+  });
 }
 async function ensureCatalogHeaders(env) {
   const headers = await readSheet(env, "Katalog_Produk!A1:G1");
@@ -763,6 +854,36 @@ async function sendTelegramPhoto(env, chatId, photo, caption, replyMarkup = null
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
   });
   if (!response.ok) throw new Error("Telegram sendPhoto gagal (" + response.status + "): " + (await response.text()).slice(0,300));
+}
+
+async function sendSeitonWelcome(env, chatId, isAdminUser = false) {
+  const text = isAdminUser ? adminMenuText() : customerMenuText();
+  const keyboard = isAdminUser ? adminMenuKeyboard() : customerMenuKeyboard();
+  try {
+    await sendTelegramPhoto(env, chatId, SEITON_LOGO_URL, text, keyboard);
+  } catch (error) {
+    console.warn(JSON.stringify({level:"warn",event:"telegram_brand_image_fallback",message:String(error?.message||"IMAGE_SEND_FAILED").slice(0,100)}));
+    await sendTelegram(env, chatId, text, keyboard);
+  }
+}
+
+async function sendTelegramPhotoBlob(env, chatId, blob, caption, replyMarkup = null) {
+  if (!env.TELEGRAM_TOKEN) throw new Error("TELEGRAM_TOKEN belum diatur");
+  const form = new FormData();
+  form.append("chat_id", String(chatId));
+  form.append("photo", blob, "seiton-qris.png");
+  form.append("caption", String(caption || "").slice(0,1024));
+  if (replyMarkup) form.append("reply_markup", JSON.stringify(replyMarkup));
+  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendPhoto", {
+    method: "POST",
+    body: form
+  });
+  let result = {};
+  try { result = await response.json(); } catch {}
+  if (!response.ok || result.ok === false) {
+    throw new Error("Telegram QRIS image gagal dikirim (" + response.status + ")");
+  }
+  return result;
 }
 
 async function telegramApiRequest(env, method, payload) {
@@ -951,38 +1072,61 @@ async function handleTelegramCallback(env, query) {
 
   if (data === "nav:home" || data === "adm:home") {
     const showAdmin = data === "adm:home" && admin;
-    await updateTelegramMessage(env, message, {
-      text: showAdmin ? adminMenuText() : customerMenuText(),
-      replyMarkup: showAdmin ? adminMenuKeyboard() : customerMenuKeyboard(),
-      clearMedia: true
-    });
+    await deleteTelegramMessage(env, message);
+    await sendSeitonWelcome(env, chatId, showAdmin);
     return;
   }
 
-  if (data === "nav:catalog" || data.startsWith("cat:page:")) {
-    const page = data.startsWith("cat:page:") ? Number(data.slice("cat:page:".length)) : 0;
-    await showCustomerCatalogPage(env, message, page);
+  if (data === "nav:catalog" || data === "nav:refresh") {
+    await showCustomerCategoryMenu(env, message);
     return;
   }
 
-  if (data.startsWith("buy:")) {
-    const sku = data.slice(4);
+  if (data.startsWith("cat:items:")) {
+    const parts = data.split(":");
+    await showCustomerCatalogPage(env, message, Number(parts[3] || 0), parts[2] || "all");
+    return;
+  }
+
+  // Keep old catalog buttons working after the storefront redesign.
+  if (data.startsWith("cat:page:")) {
+    await showCustomerCatalogPage(env, message, Number(data.slice("cat:page:".length)), "all");
+    return;
+  }
+
+  if (data.startsWith("buy:") || data.startsWith("view:")) {
+    const sku = data.startsWith("view:") ? data.slice(5) : data.slice(4);
     const rows = await readTelegramCatalogRows(env);
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
-    if (!p || ["FALSE","0","NONAKTIF","NO"].includes(String(p[4] ?? "TRUE").toUpperCase())) throw new Error("Produk tidak tersedia");
-    const stock = p[3] === "" || p[3] == null ? null : Number(p[3]);
-    const buttons = [1,2,3,5].filter(q => stock === null || (Number.isFinite(stock) && stock >= q))
-      .map(q => ({ text: q + " pcs", callback_data: "qty:" + sku + ":" + q }));
-    const productText = "Produk: " + (p[1] || sku) + "\nHarga: " + rupiah(p[2]) + "\nStok: " + (stock === null ? "Tidak dibatasi" : stock) + (p[6] ? "\n" + p[6] : "") + "\n\nPilih jumlah:";
-    const productKeyboard = { inline_keyboard: [
-      buttons,
-      [{ text: "⬅️ Kembali ke katalog", callback_data: "nav:catalog" }]
-    ] };
+    if (!p) throw new Error("Produk tidak ditemukan atau sudah tidak tersedia.");
+    const product = parseCatalogProduct(p);
+    if (!product.active || !product.priceValid || !product.stockValid) throw new Error("Produk tidak tersedia. Refresh katalog.");
+    const category = customerCategoryForProduct(p);
+    const visibleProducts = activeCustomerCatalogProducts(rows).filter(row => customerCategoryForProduct(row) === category);
+    const index = visibleProducts.findIndex(row => String(row[0] || "").toUpperCase() === product.sku.toUpperCase());
+    const page = index < 0 ? 0 : Math.floor(index / CUSTOMER_CATALOG_PAGE_SIZE);
+    const canBuy = product.stock === null || product.stock > 0;
+    const quantityButtons = canBuy
+      ? [1,2,3,5].filter(q => product.stock === null || product.stock >= q)
+        .map(q => ({ text: q + " pcs", callback_data: "qty:" + product.sku + ":" + q }))
+      : [];
+    const detail = [
+      "📦 DETAIL PRODUK",
+      product.name,
+      "Harga: " + rupiah(product.price),
+      "Stok: " + (product.stock === null ? "Tidak dibatasi" : product.stock === 0 ? "Habis" : product.stock + " tersedia"),
+      product.description,
+      canBuy ? "Pilih jumlah:" : "Stok habis. Produk belum dapat dipesan."
+    ].filter(Boolean).join("\n");
     await updateTelegramMessage(env, message, {
-      text: productText,
+      text: detail,
       photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
       clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
-      replyMarkup: productKeyboard
+      replyMarkup: { inline_keyboard: [
+        ...(quantityButtons.length ? [quantityButtons] : []),
+        [{ text: "⬅️ Kembali ke Kategori", callback_data: "cat:items:" + category + ":" + page }],
+        [{ text: "🗂️ Semua Kategori", callback_data: "nav:catalog" }]
+      ] }
     });
     return;
   }
@@ -990,14 +1134,14 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("qty:")) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]);
     if (!Number.isInteger(qty) || qty < 1 || qty > 1000) throw new Error("Jumlah tidak valid");
+    const paymentMethods = [];
+    if (isDynamicQrisConfigured(env)) paymentMethods.push([{ text: "⚡ QRIS Dinamis", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }]);
+    paymentMethods.push([{ text: "🏦 Transfer Bank", callback_data: "pay:" + sku + ":" + qty + ":TRANSFER" }]);
+    paymentMethods.push([{ text: "💵 COD", callback_data: "pay:" + sku + ":" + qty + ":COD" }]);
+    paymentMethods.push([{ text: "⬅️ Kembali", callback_data: "buy:" + sku }]);
     await updateTelegramMessage(env, message, {
       text: "Jumlah dipilih: " + qty + "\nPilih metode pembayaran:",
-      replyMarkup: { inline_keyboard: [
-        [{ text: "QRIS", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }],
-        [{ text: "Transfer Bank", callback_data: "pay:" + sku + ":" + qty + ":TRANSFER" }],
-        [{ text: "COD", callback_data: "pay:" + sku + ":" + qty + ":COD" }],
-        [{ text: "⬅️ Kembali", callback_data: "buy:" + sku }]
-      ] }
+      replyMarkup: { inline_keyboard: paymentMethods }
     });
     return;
   }
@@ -1005,6 +1149,7 @@ async function handleTelegramCallback(env, query) {
   if (data.startsWith("pay:")) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
     if (!["QRIS","TRANSFER","COD"].includes(method)) throw new Error("Metode pembayaran tidak valid");
+    if (method === "QRIS" && !isDynamicQrisConfigured(env)) throw new Error("QRIS dinamis belum aktif. Pilih Transfer Bank atau COD.");
     const rows = await readTelegramCatalogRows(env, "Katalog_Produk!A2:G");
     const p = rows.find(r => String(r[0] || "").trim().toUpperCase() === sku.toUpperCase());
     if (!p) throw new Error("Produk tidak ditemukan");
@@ -1024,6 +1169,20 @@ async function handleTelegramCallback(env, query) {
     const result = await createOrder(env, { sku: sku.toUpperCase(), quantity: qty, paymentMethod: method,
       channel: "telegram", customerId: userId, customerName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" "),
       idempotencyKey: String(query.id || "") });
+    if (String(method).toUpperCase() === "QRIS") {
+      await deleteTelegramMessage(env, message);
+      try {
+        await sendQrisPaymentScreen(env, chatId, result);
+      } catch (error) {
+        console.error(JSON.stringify({level:"error",event:"qris_charge_or_delivery_failed",order_id:result.orderId,message:String(error?.message||"QRIS_FAILED").slice(0,160)}));
+        for (const adminId of String(env.ADMIN_CHAT_ID || "").split(",").map(value=>value.trim()).filter(Boolean)) {
+          try { await sendTelegram(env, adminId, "⚠️ QRIS untuk order " + result.orderId + " gagal dibuat/dikirim. Periksa transaksi Midtrans sebelum membatalkan order."); } catch {}
+        }
+        await sendTelegram(env, chatId,
+          "⚠️ Kode QRIS belum dapat ditampilkan untuk order " + result.orderId + ". Jangan lakukan pembayaran dari kode lain. Pesanan belum dibatalkan; hubungi admin Seiton.id untuk pemeriksaan sebelum mencoba kembali.");
+      }
+      return;
+    }
     await updateTelegramMessage(env, message, {
       text: orderConfirmation(result, env),
       replyMarkup: orderConfirmationKeyboard(result)
@@ -1048,6 +1207,8 @@ async function handleTelegramCallback(env, query) {
         buttons.push([{ text: "🎟️ Lihat Resi " + orderId.slice(-8), callback_data: "ticket:" + orderId }]);
       } else if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
         buttons.push([{ text: "📎 Kirim / Perbarui Bukti " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
+      } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+        buttons.push([{ text: "⚡ Periksa QRIS " + orderId.slice(-8), callback_data: "qris:check:" + orderId }]);
       } else if (String(r[12] || "") === "MENUNGGU_PEMBAYARAN" && String(r[11] || "").toUpperCase() !== "COD") {
         buttons.push([{ text: "💳 Konfirmasi Bayar " + orderId.slice(-8), callback_data: "pc:req:" + orderId }]);
       }
@@ -1061,10 +1222,47 @@ async function handleTelegramCallback(env, query) {
     return;
   }
 
+  if (data === "nav:guide") {
+    await updateTelegramMessage(env, message, {
+      text: [
+        "🧭 CARA BELANJA DI SEITON.ID",
+        "",
+        "1. Buka Katalog Produk dan pilih kategori.",
+        "2. Pilih produk untuk melihat foto, harga, dan stok.",
+        "3. Tentukan jumlah serta metode pembayaran.",
+        "4. Periksa ringkasan pesanan sebelum membuat order.",
+        "5. Ikuti instruksi pembayaran dan pantau status di Pesanan Saya.",
+        "",
+        "Anda cukup menggunakan tombol, tidak perlu mengetik format order."
+      ].join("\n"),
+      replyMarkup: { inline_keyboard: [
+        [
+          { text: "🛍️ Buka Katalog", callback_data: "nav:catalog" },
+          { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+        ],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
+      clearMedia: true
+    });
+    return;
+  }
+
   if (data === "nav:help") {
     await updateTelegramMessage(env, message, {
-      text: "Bantuan Seiton.id\nPilih Belanja Produk untuk membuat pesanan melalui tombol. Untuk bantuan admin, silakan hubungi admin toko.",
-      replyMarkup: customerMenuKeyboard(),
+      text: [
+        "💬 BANTUAN SEITON.ID",
+        "",
+        "Katalog Produk untuk berbelanja, Pesanan Saya untuk memeriksa status pembayaran/resi.",
+        "Untuk kendala transaksi, hubungi admin Seiton.id."
+      ].join("\n"),
+      replyMarkup: { inline_keyboard: [
+        [
+          { text: "🛍️ Katalog Produk", callback_data: "nav:catalog" },
+          { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+        ],
+        [{ text: "🧭 Cara Belanja", callback_data: "nav:guide" }],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
       clearMedia: true
     });
     return;
@@ -1076,6 +1274,21 @@ async function handleTelegramCallback(env, query) {
       return;
     }
     const action = data.slice(4);
+    if (action === "orders" || action === "products" || action === "reports" || action === "support") {
+      const menus = {
+        orders: { title: "🧾 KELOLA PESANAN", description: "Pesanan masuk, pembayaran, status, dan pengambilan.", keyboard: adminOrdersKeyboard() },
+        products: { title: "🛍️ KELOLA PRODUK", description: "Atur katalog, harga, stok, foto, dan produk baru.", keyboard: adminProductsKeyboard() },
+        reports: { title: "📊 LAPORAN & ANALITIK", description: "Ringkasan transaksi, dashboard, dan ekspor data.", keyboard: adminReportsKeyboard() },
+        support: { title: "💬 LAYANAN PELANGGAN", description: "Tangani permintaan bantuan dan percakapan pelanggan.", keyboard: adminSupportKeyboard() }
+      };
+      const menu = menus[action];
+      await updateTelegramMessage(env, message, {
+        text: menu.title + "\n" + menu.description,
+        replyMarkup: menu.keyboard,
+        clearMedia: true
+      });
+      return;
+    }
     if (action === "handoff") {
       await showTelegramHandoffQueue(env, message, chatId);
       return;
@@ -1211,6 +1424,11 @@ async function handleTelegramCallback(env, query) {
     }
     await recordAdminActivity(env, { actorId: userId, action: "REPORT_EXPORT_SENT", resourceType: "sales_export", summary: { report_types: types } });
     await updateTelegramMessage(env, message, { text: "✅ Laporan selesai dikirim.", replyMarkup: adminMenuKeyboard() });
+    return;
+  }
+
+  if (data.startsWith("qris:check:")) {
+    await handleQrisStatusCheck(env, message, chatId, userId, data.slice("qris:check:".length));
     return;
   }
 
@@ -1395,40 +1613,86 @@ async function readTelegramCatalogRows(env, range = "Katalog_Produk!A2:G") {
   return rows.concat(extras.filter(row => !seen.has(String(row[0]).toUpperCase())));
 }
 
-async function showCustomerCatalogPage(env, message, page = 0) {
-  const rows = await readTelegramCatalogRows(env);
-  const products = rows.filter(r => r[0] && parseCatalogProduct(r).active);
+async function showCustomerCategoryMenu(env, message) {
+  const products = activeCustomerCatalogProducts(await readTelegramCatalogRows(env));
   if (!products.length) {
-    await updateTelegramMessage(env, message, { text: "Katalog belum memiliki produk aktif.", replyMarkup: customerMenuKeyboard() });
+    await updateTelegramMessage(env, message, {
+      text: "🛍️ KATALOG SEITON.ID\n\nBelum ada produk aktif yang tersedia.",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
+      clearMedia: true
+    });
     return;
   }
-  const pageCount = products.length;
-  const current = Math.max(0, Math.min(pageCount - 1, Number.isInteger(page) ? page : 0));
-  const p = products[current];
-  const sku = String(p[0]).trim();
-  const parsedProduct = parseCatalogProduct(p);
-  const stock = !parsedProduct.stockValid ? "DATA STOK TIDAK VALID" : parsedProduct.stock === null ? "Tidak dibatasi" : parsedProduct.stock;
-  const caption = [
-    "🛍️ Katalog Produk (" + (current + 1) + "/" + pageCount + ")",
-    String(p[1] || sku),
-    "SKU: " + sku,
-    "Harga: " + rupiah(p[2]),
-    "Stok: " + stock,
-    p[6] ? String(p[6]) : ""
-  ].filter(Boolean).join("\n");
-  const nav = [];
-  if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "cat:page:" + (current - 1) });
-  if (current < pageCount - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "cat:page:" + (current + 1) });
-  const keyboard = { inline_keyboard: [
-    ...(parsedProduct.priceValid && parsedProduct.stockValid && parsedProduct.active ? [[{ text: "🛒 Pilih Produk Ini", callback_data: "buy:" + sku }]] : []),
-    ...(nav.length ? [nav] : []),
-    [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
-  ] };
+  const counts = new Map();
+  for (const row of products) {
+    const category = customerCategoryForProduct(row);
+    counts.set(category, (counts.get(category) || 0) + 1);
+  }
+  const categoryButtons = CUSTOMER_CATEGORY_ORDER.filter(key => counts.has(key)).map(key => ({
+    text: CUSTOMER_CATEGORY_META[key].button + " (" + counts.get(key) + ")",
+    callback_data: "cat:items:" + key + ":0"
+  }));
+  const categoryRows = [];
+  for (let i=0;i<categoryButtons.length;i+=2) categoryRows.push(categoryButtons.slice(i,i+2));
   await updateTelegramMessage(env, message, {
-    text: caption,
-    photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
-    clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
-    replyMarkup: keyboard
+    text: "🛍️ KATALOG SEITON.ID\n\nTersedia " + products.length + " produk aktif. Pilih kategori atau lihat semuanya.",
+    replyMarkup: { inline_keyboard: [
+      [{ text: "🛒 Semua Produk (" + products.length + ")", callback_data: "cat:items:all:0" }],
+      ...categoryRows,
+      [
+        { text: "🔄 Refresh", callback_data: "nav:refresh" },
+        { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
+      ],
+      [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+    ] },
+    clearMedia: true
+  });
+}
+
+async function showCustomerCatalogPage(env, message, page = 0, categoryKey = "all") {
+  const allProducts = activeCustomerCatalogProducts(await readTelegramCatalogRows(env));
+  const safeCategory = categoryKey === "all" || CUSTOMER_CATEGORY_META[categoryKey] ? categoryKey : "all";
+  const products = safeCategory === "all" ? allProducts : allProducts.filter(row => customerCategoryForProduct(row) === safeCategory);
+  if (!products.length) {
+    await updateTelegramMessage(env, message, {
+      text: "Tidak ada produk pada kategori " + customerCategoryTitle(safeCategory) + ".",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "⬅️ Semua Kategori", callback_data: "nav:catalog" }],
+        [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
+      ] },
+      clearMedia: true
+    });
+    return;
+  }
+  const pages = Math.max(1,Math.ceil(products.length/CUSTOMER_CATALOG_PAGE_SIZE));
+  const current = Math.max(0,Math.min(pages-1,Number.isInteger(page)?page:0));
+  const visible = products.slice(current*CUSTOMER_CATALOG_PAGE_SIZE,(current+1)*CUSTOMER_CATALOG_PAGE_SIZE);
+  const title = safeCategory === "all" ? "Semua Produk" : customerCategoryTitle(safeCategory);
+  const buttons = visible.map(row => {
+    const p = parseCatalogProduct(row);
+    const stock = p.stock === 0 ? "Habis" : p.stock === null ? "Ready" : "Stok " + p.stock;
+    let label = p.name + " · " + rupiah(p.price) + " · " + stock;
+    if (label.length > 64) label = label.slice(0,61) + "…";
+    return [{ text: label, callback_data: "view:" + p.sku }];
+  });
+  const nav = [];
+  if (current>0) nav.push({text:"◀️ Sebelumnya",callback_data:"cat:items:"+safeCategory+":"+(current-1)});
+  if (current<pages-1) nav.push({text:"Berikutnya ▶️",callback_data:"cat:items:"+safeCategory+":"+(current+1)});
+  await updateTelegramMessage(env, message, {
+    text: "🛍️ " + title + " (" + (current+1) + "/" + pages + ")\nPilih produk untuk melihat foto, harga, stok, dan detail.",
+    replyMarkup: { inline_keyboard: [
+      ...buttons,
+      ...(nav.length ? [nav] : []),
+      [{ text: "🗂️ Semua Kategori", callback_data: "nav:catalog" }],
+      [
+        { text: "🔄 Refresh", callback_data: "nav:refresh" },
+        { text: "🏠 Menu Utama", callback_data: "nav:home" }
+      ]
+    ] },
+    clearMedia: true
   });
 }
 
@@ -2139,7 +2403,10 @@ async function findOrderById(env, orderId) {
 }
 function orderConfirmationKeyboard(order) {
   const buttons = [];
-  if (String(order.paymentMethod || "").toUpperCase() !== "COD") {
+  const method = String(order.paymentMethod || "").toUpperCase();
+  if (method === "QRIS") {
+    buttons.push([{ text: "🔄 Periksa Pembayaran QRIS", callback_data: "qris:check:" + order.orderId }]);
+  } else if (method !== "COD") {
     buttons.push([{ text: "💳 Saya Sudah Bayar — Minta Verifikasi", callback_data: "pc:req:" + order.orderId }]);
   }
   buttons.push([{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]);
@@ -2154,6 +2421,261 @@ function paymentProofPrompt(orderId) {
     "Admin akan mencocokkan pembayaran sebelum menerbitkan resi pengambilan."
   ].join("\n");
 }
+
+async function getQrisPaymentForOrder(env, orderId) {
+  if (!env.DB) throw new Error("D1_BINDING_MISSING");
+  return env.DB.prepare("SELECT * FROM qris_payments WHERE order_id=?")
+    .bind(String(orderId)).first();
+}
+
+async function createOrReuseQrisPayment(env, order) {
+  if (!isDynamicQrisConfigured(env)) throw new Error("QRIS_DYNAMIC_NOT_CONFIGURED");
+  const existing = await getQrisPaymentForOrder(env, order.orderId);
+  if (existing) {
+    if (existing.status === "PAID") return existing;
+    if (existing.status !== "PENDING") throw new Error("QRIS_TRANSACTION_NOT_PENDING");
+    const expiry = Date.parse(String(existing.expires_at || ""));
+    if (Number.isFinite(expiry) && expiry <= Date.now()) {
+      await env.DB.prepare("UPDATE qris_payments SET status='EXPIRED',updated_at=? WHERE order_id=? AND status='PENDING'")
+        .bind(new Date().toISOString(), order.orderId).run();
+      throw new Error("QRIS_TRANSACTION_EXPIRED");
+    }
+    return existing;
+  }
+
+  const charge = await createMidtransQrisCharge(env, {
+    orderId: order.orderId,
+    amount: Number(order.total),
+    items: [{
+      sku: order.sku,
+      name: order.product,
+      price: Number(order.unitPrice),
+      quantity: Number(order.quantity)
+    }, ...(Number(order.shipping || 0) > 0 ? [{
+      sku: "SEITON-SHIPPING",
+      name: "Biaya pengiriman",
+      price: Number(order.shipping),
+      quantity: 1
+    }] : [])]
+  });
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    "INSERT INTO qris_payments(order_id,provider,provider_order_id,provider_transaction_id,merchant_id,amount,currency,status,raw_provider_status,qr_image_url,expires_at,created_at,updated_at) VALUES(?,'midtrans',?,?,?,?, 'IDR',?,?,?,?,?,?)"
+  ).bind(
+    order.orderId,
+    charge.providerOrderId,
+    charge.transactionId || "",
+    charge.merchantId || "",
+    charge.amount,
+    charge.status === "PAID" ? "PAID" : "PENDING",
+    charge.rawStatus || "pending",
+    charge.qrImageUrl,
+    charge.expiresAt || "",
+    now,
+    now
+  ).run();
+  const saved = await getQrisPaymentForOrder(env, order.orderId);
+  if (!saved) throw new Error("QRIS_TRANSACTION_STORE_FAILED");
+  return saved;
+}
+
+async function fetchMidtransQrisImage(env, imageUrl) {
+  const parsed = new URL(String(imageUrl || ""));
+  const allowedHosts = new Set(["api.midtrans.com", "api.sandbox.midtrans.com"]);
+  if (parsed.protocol !== "https:" || !allowedHosts.has(parsed.hostname)
+    || !/^\/v(?:2|4)\/qris\/[A-Za-z0-9_-]+\/qr-code$/.test(parsed.pathname)) {
+    throw new Error("MIDTRANS_QRIS_IMAGE_URL_INVALID");
+  }
+  const authorization = "Basic " + btoa(String(env.MIDTRANS_SERVER_KEY) + ":");
+  const response = await fetch(parsed.toString(), {
+    method: "GET",
+    headers: { Authorization: authorization, Accept: "image/png,image/jpeg" }
+  });
+  if (!response.ok) throw new Error("MIDTRANS_QRIS_IMAGE_FETCH_FAILED");
+  const contentType = String(response.headers.get("content-type") || "").split(";")[0].toLowerCase();
+  if (!["image/png", "image/jpeg"].includes(contentType)) throw new Error("MIDTRANS_QRIS_IMAGE_TYPE_INVALID");
+  const bytes = await response.arrayBuffer();
+  if (!bytes.byteLength || bytes.byteLength > 5 * 1024 * 1024) throw new Error("MIDTRANS_QRIS_IMAGE_SIZE_INVALID");
+  return new Blob([bytes], { type: contentType });
+}
+
+function formatQrisExpiry(value) {
+  const date = new Date(String(value || ""));
+  return Number.isNaN(date.getTime())
+    ? "Sesuai masa berlaku dari penyedia pembayaran"
+    : new Intl.DateTimeFormat("id-ID", {
+        timeZone: "Asia/Jakarta", dateStyle: "medium", timeStyle: "short"
+      }).format(date) + " WIB";
+}
+
+async function sendQrisPaymentScreen(env, chatId, order) {
+  const payment = await createOrReuseQrisPayment(env, order);
+  if (payment.status === "PAID") {
+    await sendTelegram(env, chatId, "✅ Pembayaran untuk " + order.orderId + " telah terverifikasi. Periksa Pesanan Saya untuk resi.");
+    return;
+  }
+  const image = await fetchMidtransQrisImage(env, payment.qr_image_url);
+  const caption = [
+    "💳 PEMBAYARAN QRIS DINAMIS — SEITON.ID",
+    "Order: " + order.orderId,
+    "Total: " + rupiah(payment.amount),
+    "Status: Menunggu pembayaran",
+    "Batas bayar (perkiraan): " + formatQrisExpiry(payment.expires_at),
+    "",
+    "Scan QR ini menggunakan aplikasi pembayaran yang mendukung QRIS.",
+    "Nominal sudah terisi. Pastikan nama merchant dan jumlah sesuai sebelum membayar.",
+    "Setelah membayar, status akan diperbarui otomatis."
+  ].join("\n");
+  await sendTelegramPhotoBlob(env, chatId, image, caption, {
+    inline_keyboard: [
+      [{ text: "🔄 Periksa Pembayaran", callback_data: "qris:check:" + order.orderId }],
+      [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]
+    ]
+  });
+}
+
+async function qrisEventId(parts) {
+  const source = parts.map(value => String(value ?? "")).join("|");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(source));
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function recordQrisNonPaidStatus(env, orderId, status, rawStatus) {
+  const safeStatus = status === "EXPIRED" ? "EXPIRED" : status === "FAILED" ? "FAILED" : "PENDING";
+  await env.DB.prepare(
+    "UPDATE qris_payments SET status=?,raw_provider_status=?,updated_at=? WHERE order_id=? AND status='PENDING'"
+  ).bind(safeStatus, String(rawStatus || "").slice(0,40), new Date().toISOString(), orderId).run();
+  if (safeStatus === "EXPIRED" || safeStatus === "FAILED") {
+    try { await setOrderStatus(env, orderId, "DIBATALKAN", "midtrans:webhook"); }
+    catch (error) {
+      console.warn(JSON.stringify({level:"warn",event:"qris_expired_order_cancel",order_id:orderId,message:String(error?.message||"CANCEL_FAILED").slice(0,120)}));
+    }
+  }
+}
+
+async function finalizeQrisSettlement(env, settled) {
+  if (!settled || settled.alreadyPaid) return;
+  const row = orderToSheetRow(settled);
+  const customerId = String(settled.customer_id || "");
+  const orderId = String(settled.order_id || "");
+  try {
+    await sendPickupReceipt(env, customerId, row, orderId, String(settled.receipt_code || ""));
+  } catch (error) {
+    console.error(JSON.stringify({level:"error",event:"qris_receipt_delivery",order_id:orderId,message:String(error?.message||"RECEIPT_FAILED").slice(0,160)}));
+  }
+  try {
+    await deliverDigitalProductAfterPayment(env, orderId);
+  } catch (error) {
+    console.error(JSON.stringify({level:"error",event:"qris_digital_fulfillment",order_id:orderId,message:String(error?.message||"FULFILLMENT_FAILED").slice(0,160)}));
+    for (const adminId of String(env.ADMIN_CHAT_ID || "").split(",").map(value=>value.trim()).filter(Boolean)) {
+      try { await sendTelegram(env, adminId, "⚠️ Pembayaran QRIS sudah terkonfirmasi, tetapi fulfillment perlu diperiksa. Order: " + orderId); } catch {}
+    }
+  }
+}
+
+async function reconcileQrisProviderStatus(env, order, payment, status, source) {
+  if (!status || status.providerOrderId !== payment.provider_order_id
+    || status.paymentType !== "qris" || status.currency !== "IDR"
+    || Number(status.amount) !== Number(payment.amount)) {
+    throw new Error("MIDTRANS_STATUS_MISMATCH");
+  }
+  if (payment.provider_transaction_id && status.transactionId
+    && String(payment.provider_transaction_id) !== String(status.transactionId)) {
+    throw new Error("MIDTRANS_TRANSACTION_ID_MISMATCH");
+  }
+  if (status.status === "PAID") {
+    if (!status.transactionId) throw new Error("MIDTRANS_TRANSACTION_ID_MISSING");
+    if (status.fraudStatus !== "accept") throw new Error("MIDTRANS_FRAUD_STATUS_NOT_ACCEPTED");
+    const eventId = await qrisEventId([
+      source, payment.provider_order_id, status.transactionId, status.rawStatus, status.amount
+    ]);
+    const settled = await settleQrisPaymentTransactional(env, order.order_id, {
+      provider: "midtrans",
+      providerOrderId: payment.provider_order_id,
+      transactionId: status.transactionId,
+      merchantId: status.merchantId || payment.merchant_id || "",
+      amount: Number(status.amount),
+      eventId
+    });
+    await finalizeQrisSettlement(env, settled);
+    return { status: "PAID", settled };
+  }
+  await recordQrisNonPaidStatus(env, order.order_id, status.status, status.rawStatus);
+  return { status: status.status };
+}
+
+async function handleQrisStatusCheck(env, message, chatId, userId, orderId) {
+  if (!isDynamicQrisConfigured(env)) throw new Error("QRIS dinamis belum diaktifkan.");
+  const order = await findOrderTransactional(env, orderId);
+  if (!order || String(order.customer_id) !== String(userId)) throw new Error("Pesanan tidak ditemukan untuk akun Telegram ini.");
+  const payment = await getQrisPaymentForOrder(env, orderId);
+  if (!payment) throw new Error("Transaksi QRIS untuk pesanan ini tidak ditemukan.");
+  if (payment.status === "PAID" || String(order.payment_confirmation_status).toUpperCase() === "DISETUJUI") {
+    await updateTelegramMessage(env, message, {
+      text: "✅ Pembayaran QRIS untuk " + orderId + " sudah terverifikasi. Resi tersedia di menu Pesanan Saya.",
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
+    });
+    return;
+  }
+  const status = await getMidtransTransactionStatus(env, payment.provider_order_id);
+  const result = await reconcileQrisProviderStatus(env, order, payment, status, "customer-status-check");
+  if (result.status === "PAID") {
+    await updateTelegramMessage(env, message, {
+      text: "✅ Pembayaran QRIS berhasil diverifikasi oleh penyedia pembayaran. Resi telah dikirim.",
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
+    });
+  } else if (result.status === "EXPIRED") {
+    await updateTelegramMessage(env, message, {
+      text: "⌛ QRIS sudah kedaluwarsa. Buat pesanan baru untuk mendapatkan kode pembayaran baru.",
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
+    });
+  } else if (result.status === "FAILED") {
+    await updateTelegramMessage(env, message, {
+      text: "⚠️ Pembayaran QRIS belum berhasil. Hubungi admin untuk bantuan.",
+      replyMarkup: customerMenuKeyboard(),
+      clearMedia: true
+    });
+  } else {
+    await updateTelegramMessage(env, message, {
+      text: "⏳ Pembayaran belum terdeteksi. Setelah menyelesaikan pembayaran, tekan Periksa Pembayaran kembali.",
+      replyMarkup: { inline_keyboard: [
+        [{ text: "🔄 Periksa Lagi", callback_data: "qris:check:" + orderId }],
+        [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]
+      ] },
+      clearMedia: true
+    });
+  }
+}
+
+async function handleMidtransWebhook(request, env) {
+  if (!env.MIDTRANS_SERVER_KEY) return json({ ok:false,error:"Payment provider is not configured" },503);
+  let notification;
+  try { notification = await request.json(); }
+  catch { return json({ ok:false,error:"Invalid JSON" },400); }
+  if (!await verifyMidtransNotification(notification, env.MIDTRANS_SERVER_KEY)) {
+    return json({ ok:false,error:"Invalid signature" },403);
+  }
+  if (String(notification.payment_type || "").toLowerCase() !== "qris") {
+    return json({ ok:true,ignored:true });
+  }
+  const providerOrderId = String(notification.order_id || "");
+  const payment = await env.DB.prepare("SELECT * FROM qris_payments WHERE provider_order_id=?")
+    .bind(providerOrderId).first();
+  if (!payment) return json({ ok:false,error:"QRIS transaction not found" },404);
+  const notifiedAmount = parseMidtransAmount(notification.gross_amount);
+  if (notifiedAmount === null || notifiedAmount !== Number(payment.amount)) {
+    return json({ ok:false,error:"Payment amount mismatch" },409);
+  }
+  const providerStatus = await getMidtransTransactionStatus(env, providerOrderId);
+  const order = await findOrderTransactional(env, payment.order_id);
+  if (!order) return json({ ok:false,error:"Order not found" },404);
+  const result = await reconcileQrisProviderStatus(env, order, payment, providerStatus, "midtrans-webhook");
+  return json({ ok:true,status:result.status });
+}
+
 async function requestPaymentVerification(env, message, chatId, userId, orderId) {
   const state = await transactionReadiness(env);
   if (state.configured && !state.ready) throw new Error("Lapisan transaksi D1 belum siap. Admin perlu menjalankan /migrasi_d1.");
@@ -2164,6 +2686,9 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
   const method = String(r[11] || "").trim().toUpperCase();
   if (method === "COD") throw new Error("Pesanan COD dibayar saat pengambilan dan tidak memakai verifikasi pembayaran online.");
+  if (method === "QRIS" && isDynamicQrisConfigured(env)) {
+    throw new Error("Pembayaran QRIS dinamis dipantau otomatis. Gunakan tombol Periksa Pembayaran QRIS; bukti manual tidak diperlukan.");
+  }
   if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Metode pembayaran tidak didukung untuk verifikasi online.");
   if (PAID_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase()) && String(r[18] || "")) {
     await sendPickupReceipt(env, String(r[3]), r, orderId, String(r[18]));
@@ -2220,6 +2745,9 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
   if (!found) throw new Error("Pesanan tidak ditemukan.");
   const r = found.row;
   if (String(r[3] || "") !== String(userId)) throw new Error("Pesanan ini bukan milik akun Telegram Anda.");
+  if (String(r[11] || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+    throw new Error("Bukti QRIS dinamis diverifikasi otomatis oleh Midtrans. Gunakan tombol Periksa Pembayaran.");
+  }
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran tidak sedang menunggu verifikasi.");
   let fileId = "", fileType = "";
   if (Array.isArray(message.photo) && message.photo.length) {
@@ -2315,6 +2843,9 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   if (state.ready) {
     const found = await resolveOrderReference(env,reference);
     if (!found) throw new Error("Pesanan tidak ditemukan.");
+    if (String(found.order.payment_method || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+      throw new Error("QRIS dinamis hanya dapat disetujui otomatis setelah status SETTLEMENT diverifikasi langsung dari Midtrans.");
+    }
     const approved = await approvePaymentTransactional(env,found.order.order_id,actor);
     await mirrorTransactionalOrder(env,approved);
     const row = orderToSheetRow(approved);
@@ -2328,6 +2859,9 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
   if (!r || !r[0]) throw new Error("Pesanan tidak ditemukan.");
   if (String(r[13] || "") !== "MENUNGGU_VERIFIKASI") throw new Error("Permintaan pembayaran sudah diproses.");
   if (String(r[11] || "").toUpperCase() === "COD") throw new Error("Pesanan COD tidak menggunakan verifikasi pembayaran online.");
+  if (String(r[11] || "").toUpperCase() === "QRIS" && isDynamicQrisConfigured(env)) {
+    throw new Error("QRIS dinamis hanya dapat disetujui otomatis setelah status SETTLEMENT diverifikasi langsung dari Midtrans.");
+  }
   if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan sudah dibatalkan.");
   const now = new Date().toISOString();
   const receiptCode = "SEI-" + localDateKey(now).replace(/-/g,"") + "-" + crypto.randomUUID().slice(0,6).toUpperCase();
@@ -2642,6 +3176,9 @@ function parseOrderText(text) {
 }
 
 async function createOrder(env, input) {
+  if (String(input?.paymentMethod || "").toUpperCase() === "QRIS" && !isDynamicQrisConfigured(env)) {
+    throw new Error("QRIS dinamis belum aktif. Pilih Transfer Bank atau COD.");
+  }
   const transactionState = await transactionReadiness(env);
   if (transactionState.configured && !transactionState.ready) {
     throw new Error("Lapisan transaksi D1 belum siap. Admin perlu menjalankan /migrasi_d1 sebelum pesanan baru diterima.");
@@ -2910,20 +3447,20 @@ async function buildAdminReport(env) {
 
 function orderConfirmation(order, env) {
   const paymentInfo = order.paymentMethod === "QRIS"
-    ? `\n\n📲 Silakan scan QRIS: ${env.LINK_QRIS_IMAGE || "Hubungi admin untuk QRIS."}`
+    ? "\n\n📲 QRIS dinamis akan dikirim dalam layar pembayaran terpisah."
     : order.paymentMethod === "TRANSFER"
       ? "\n\n🏦 Instruksi transfer akan diberikan admin."
       : "\n\n🚚 Pembayaran COD dipilih.";
   return [
     "✅ *PESANAN DICATAT - SEITON.ID*",
-    `🧾 ID: ${order.orderId}`,
-    `📦 ${order.product} (${order.sku})`,
-    `🔢 Jumlah: ${order.quantity}`,
-    `💵 Harga: ${rupiah(order.unitPrice)}`,
-    `🚚 Ongkir: ${rupiah(order.shipping)}`,
-    `💰 *Total: ${rupiah(order.total)}*`,
-    `💳 Metode: ${order.paymentMethod}`,
-    `⏳ Status: ${order.status}`,
+    "🧾 ID: " + order.orderId,
+    "📦 " + order.product + " (" + order.sku + ")",
+    "🔢 Jumlah: " + order.quantity,
+    "💵 Harga: " + rupiah(order.unitPrice),
+    "🚚 Ongkir: " + rupiah(order.shipping),
+    "💰 *Total: " + rupiah(order.total) + "*",
+    "💳 Metode: " + order.paymentMethod,
+    "⏳ Status: " + order.status,
     paymentInfo,
     "",
     "_Powered by Seiton.id_"
@@ -3185,11 +3722,14 @@ function createMessagingServices(env) {
       };
     },
     createOrder(input) {
+      if (String(input?.paymentMethod || "").toUpperCase() === "QRIS") {
+        throw new Error("QRIS dinamis hanya tersedia melalui tombol checkout katalog. Ketik /start lalu pilih produk.");
+      }
       return createOrder(env, input);
     },
     getPaymentInstructions(order) {
       if (String(order.paymentMethod).toUpperCase() === "QRIS") {
-        return "Instruksi QRIS: " + String(env.LINK_QRIS_IMAGE || "Hubungi admin untuk mendapatkan QRIS.");
+        return "QRIS statis tidak digunakan. Buka katalog dan gunakan tombol checkout untuk mendapatkan QRIS dinamis.";
       }
       if (String(order.paymentMethod).toUpperCase() === "TRANSFER") {
         return "Instruksi transfer akan diberikan admin.";
@@ -3205,6 +3745,10 @@ function createMessagingServices(env) {
 function telegramMessagingReplyMarkup(payload) {
   const buttons = Array.isArray(payload.buttons) ? payload.buttons : [];
   if (!buttons.length) return null;
+  const values = new Set(buttons.map(button => String(button.value || "")));
+  if (values.has("catalog") && values.has("orders") && values.has("help")) {
+    return customerMenuKeyboard();
+  }
   const callbackByValue = {
     catalog: "nav:catalog",
     orders: "nav:orders",
@@ -3230,12 +3774,23 @@ async function dispatchTelegramMessagingOutbox(env, limit = 20) {
     try {
       const payload = JSON.parse(job.payload_json || "{}");
       if (payload.type !== "text" || !payload.text) throw new Error("OUTBOX_PAYLOAD_INVALID");
-      await sendTelegram(
-        env,
-        String(job.recipient_id),
-        String(payload.text),
-        telegramMessagingReplyMarkup(payload)
-      );
+      const isWelcome = /SELAMAT DATANG DI SEITON\.ID|Layanan otomatis Seiton/i.test(String(payload.text || ""));
+      if (isWelcome) {
+        await sendTelegramPhoto(
+          env,
+          String(job.recipient_id),
+          SEITON_LOGO_URL,
+          String(payload.text),
+          telegramMessagingReplyMarkup(payload) || customerMenuKeyboard()
+        );
+      } else {
+        await sendTelegram(
+          env,
+          String(job.recipient_id),
+          String(payload.text),
+          telegramMessagingReplyMarkup(payload)
+        );
+      }
       await completeMessagingOutbox(env, job, null);
       sent += 1;
     } catch (error) {

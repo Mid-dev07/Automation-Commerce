@@ -22,3 +22,8 @@ Canonical migration directory for `seiton-transactions-prod` is now `migrations/
 - The historical copy under the website repository is retained for traceability. Do not apply both copies.
 - Before any new migration: inspect `wrangler.jsonc`, confirm the target database, run a local/staging dry run, and verify the production schema is compatible.
 - Site-admin migrations belong to the separate `seiton-site-content-prod` database and remain under `site-admin/migrations/`.
+
+
+## 0011_qris_payments.sql
+
+Additive schema for Midtrans dynamic QRIS provider transactions and idempotent webhook event history. Apply only during the QRIS release sequence after the provider merchant credentials and webhook configuration are ready. Default feature gate remains disabled until sandbox and live reconciliation complete.
