@@ -255,7 +255,8 @@ export function evaluateQrisReceipt(expected, extracted) {
   let status = "REVIEW";
   if (actualAmount !== null && actualAmount !== expectedAmount) status = "MISMATCH";
   else if (merchantStatus === "MISMATCH" || timestampStatus === "MISMATCH") status = "MISMATCH";
-  else if (actualAmount === expectedAmount && merchantStatus === "MATCHED" && timestampStatus === "MATCHED") status = "MATCHED";
+  else if (actualAmount === expectedAmount && merchantStatus === "MATCHED" && timestampStatus === "MATCHED"
+    && confidence !== null && confidence >= 0.65) status = "MATCHED";
   const confidence = Number(extracted?.confidence);
   return {
     status, amount: actualAmount, merchantName: actualMerchant, merchantStatus,
