@@ -2,7 +2,7 @@ import { parseEmail } from "./email-parser.js";
 
 const PANEL_ORIGIN = "https://mail.seiton.biz.id";
 const PANEL_HOST = "mail.seiton.biz.id";
-const MAIL_DOMAIN = "inbox.seiton.biz.id";
+const MAIL_DOMAIN = "seiton.my.id";
 const BASE_LOCAL_PART = "receiver";
 const MAX_RAW_BYTES = 1024 * 1024;
 const MAX_BODY_CHARS = 18000;
@@ -863,7 +863,7 @@ function formatDate(value) {
   return new Date(Number(value)).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" });
 }
 function emailFor(alias) {
-  return "receiver+" + alias.slug + "@inbox.seiton.biz.id";
+  return "receiver+" + alias.slug + "@seiton.my.id";
 }
 function showAuth(configured) {
   statusBox = byId("authStatus");
