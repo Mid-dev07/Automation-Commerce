@@ -7,6 +7,8 @@ const root = path.resolve(__dirname, "..");
 const worker = fs.readFileSync(path.join(root, "worker.js"), "utf8");
 const layer = fs.readFileSync(path.join(root, "transaction-layer.js"), "utf8");
 const schema = fs.readFileSync(path.join(root, "migrations/0001_transaction_core.sql"), "utf8");
+const paymentMethodsSchema = fs.readFileSync(path.join(root, "migrations/0013_payment_methods_and_bank_accounts.sql"), "utf8");
+
 
 test("transaction layer and Worker are valid JavaScript modules", () => {
   assert.match(worker, /from "\.\/transaction-layer\.js"/);
@@ -168,4 +170,28 @@ test("scheduled outbox dispatch handles both order and catalog mirrors", () => {
 
 test("transaction layer does not expose a gateway-based QRIS settlement path", () => {
   assert.doesNotMatch(layer, /Midtrans|midtrans|settleQrisPayment|qris_webhook_events/);
+});
+
+
+test("QRIS approval requires an exact uploaded receipt and commits the QR ledger with the order", () => {
+  const start = layer.indexOf("async function approvePaymentD1");
+  const end = layer.indexOf("\nasync function rejectPaymentD1", start);
+  const approve = layer.slice(start, end);
+  assert.match(approve, /ocr_status.*MISMATCH/);
+  assert.match(approve, /ocr_amount.*expected/);
+  assert.match(approve, /base!==Number\(o\.total\)/);
+  assert.match(approve, /UPDATE qris_payments SET status='PAID'/);
+  assert.match(approve, /AND qp\.expected_amount=qp\.base_amount\+qp\.unique_code/);
+  assert.match(approve, /checkChanges\(results\[1\]/);
+});
+
+test("payment method migration seeds safe defaults and preserves old orders", () => {
+  assert.match(paymentMethodsSchema, /CREATE TABLE IF NOT EXISTS payment_method_settings/);
+  assert.match(paymentMethodsSchema, /CREATE TABLE IF NOT EXISTS payment_bank_accounts/);
+  assert.match(paymentMethodsSchema, /payment_bank_accounts_bank_number_uq/);
+  assert.match(paymentMethodsSchema, /INSERT OR IGNORE INTO payment_method_settings/);
+  assert.match(paymentMethodsSchema, /'QRIS','QRIS Dinamis',1/);
+  assert.match(paymentMethodsSchema, /'TRANSFER','Transfer Bank',1/);
+  assert.match(paymentMethodsSchema, /'COD','Bayar di Tempat \(COD\)',1/);
+  assert.doesNotMatch(paymentMethodsSchema, /DROP TABLE|DELETE FROM orders|UPDATE orders/);
 });
