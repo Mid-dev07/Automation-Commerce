@@ -1393,11 +1393,21 @@ async function handleTelegramCallback(env, query) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]);
     if (!Number.isInteger(qty) || qty < 1 || qty > 1000) throw new Error("Jumlah tidak valid");
     const paymentMethods = [];
+    const availableMethods = await getAvailablePaymentMethods(env);
     const qrisMode = getQrisCheckoutMode(env);
-    if (qrisMode === "DYNAMIC") paymentMethods.push([{ text: "⚡ QRIS Dinamis", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }]);
-    else if (qrisMode === "STATIC_FALLBACK") paymentMethods.push([{ text: "📷 QRIS (Nominal Manual)", callback_data: "pay:" + sku + ":" + qty + ":QRIS" }]);
-    paymentMethods.push([{ text: "🏦 Transfer Bank", callback_data: "pay:" + sku + ":" + qty + ":TRANSFER" }]);
-    paymentMethods.push([{ text: "💵 COD", callback_data: "pay:" + sku + ":" + qty + ":COD" }]);
+    if (availableMethods.includes("QRIS")) {
+      paymentMethods.push([{
+        text: qrisMode === "DYNAMIC" ? "⚡ QRIS Dinamis" : "📷 QRIS",
+        callback_data: "pay:" + sku + ":" + qty + ":QRIS"
+      }]);
+    }
+    if (availableMethods.includes("TRANSFER")) {
+      paymentMethods.push([{ text: "🏦 Transfer Bank", callback_data: "pay:" + sku + ":" + qty + ":TRANSFER" }]);
+    }
+    if (availableMethods.includes("COD")) {
+      paymentMethods.push([{ text: "💵 COD", callback_data: "pay:" + sku + ":" + qty + ":COD" }]);
+    }
+    if (!paymentMethods.length) throw new Error("Belum ada metode pembayaran yang aktif. Hubungi admin Seiton.id.");
     paymentMethods.push([{ text: "⬅️ Kembali", callback_data: "buy:" + sku }]);
     await updateTelegramMessage(env, message, {
       text: "Jumlah dipilih: " + qty + "\nPilih metode pembayaran:",
@@ -1444,7 +1454,7 @@ async function handleTelegramCallback(env, query) {
       return;
     }
     await updateTelegramMessage(env, message, {
-      text: orderConfirmation(result, env),
+      text: await orderConfirmationWithPaymentInstructions(env, result),
       replyMarkup: orderConfirmationKeyboard(result)
     });
     return;
@@ -2864,7 +2874,7 @@ async function orderConfirmationWithPaymentInstructions(env, order) {
     "Setelah transfer, tekan tombol Saya Sudah Bayar dan unggah bukti transaksi.",
     "Admin akan mencocokkan dana masuk dan nominal sebelum menerbitkan resi."
   ];
-  return base + "\\n\\n" + details.join("\\n");
+  return base + "\n\n" + details.join("\n");
 }
 
 async function getQrisPaymentForOrder(env, orderId) {
