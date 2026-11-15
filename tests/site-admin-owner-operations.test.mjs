@@ -22,7 +22,7 @@ test("CRM schema separates clients, projects, payment entries, and append-only e
 });
 test("owner operations endpoints are protected by owner-session and same-origin checks", async () => {
   const worker = await readFile(new URL("../site-admin/worker.js", import.meta.url), "utf8");
-  assert.match(worker, //api/owner/operations/);
+  assert.match(worker, /\\/api\\/owner\\/operations/);
   assert.match(worker, /activeSession(req,env)/);
   assert.match(worker, /sameOriginAdmin(req)/);
   assert.match(worker, /ownerOperationsPage()/);
