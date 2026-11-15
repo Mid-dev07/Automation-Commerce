@@ -2520,7 +2520,7 @@ async function sendQrisPaymentScreen(env, chatId, order) {
     "Order: " + order.orderId,
     "Total: " + rupiah(payment.amount),
     "Status: Menunggu pembayaran",
-    "Berlaku sampai: " + formatQrisExpiry(payment.expires_at),
+    "Batas bayar (perkiraan): " + formatQrisExpiry(payment.expires_at),
     "",
     "Scan QR ini menggunakan aplikasi pembayaran yang mendukung QRIS.",
     "Nominal sudah terisi. Pastikan nama merchant dan jumlah sesuai sebelum membayar.",
