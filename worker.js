@@ -4046,13 +4046,13 @@ function createMessagingServices(env) {
     },
     createOrder(input) {
       if (String(input?.paymentMethod || "").toUpperCase() === "QRIS") {
-        throw new Error("QRIS dinamis hanya tersedia melalui tombol checkout katalog. Ketik /start lalu pilih produk.");
+        throw new Error("Untuk QRIS, buka /start lalu pilih produk melalui tombol katalog. Bot akan mengirim QR dan nominal yang tepat.");
       }
       return createOrder(env, input);
     },
     getPaymentInstructions(order) {
       if (String(order.paymentMethod).toUpperCase() === "QRIS") {
-        return "QRIS statis tidak digunakan. Buka katalog dan gunakan tombol checkout untuk mendapatkan QRIS dinamis.";
+        return "Untuk QRIS, gunakan tombol checkout katalog agar bot menampilkan QR yang sesuai serta nominal transfer dan kode unik.";
       }
       if (String(order.paymentMethod).toUpperCase() === "TRANSFER") {
         return "Instruksi transfer akan diberikan admin.";
