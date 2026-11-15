@@ -283,7 +283,7 @@ test("customers can re-display their own active dynamic QRIS from Pesanan Saya",
   assert.match(worker, /async function handleQrisPaymentShow\(env, message, chatId, userId, orderId\)/);
   assert.match(worker, /data\.startsWith\("qris:show:"\)/);
   assert.match(worker, /callback_data: "qris:show:" \+ orderId/);
-  assert.match(worker, /text: "📲 Tampilkan QR Lagi"/);
+  assert.match(worker, /text: "📲 Tampilkan QR " \+ orderId\.slice\(-8\)/);
   assert.match(worker, /String\(order\.customer_id\) !== String\(userId\)/);
   assert.match(worker, /payment\.status === "PAID"/);
 });
