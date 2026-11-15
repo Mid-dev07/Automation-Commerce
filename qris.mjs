@@ -1,26 +1,5 @@
-const MIDTRANS_SANDBOX_BASE = "https://api.sandbox.midtrans.com";
-const MIDTRANS_PRODUCTION_BASE = "https://api.midtrans.com";
-const MIDTRANS_QRIS_ACQUIRERS = new Set(["gopay", "airpay_shopee"]);
-
 function clean(value, max = 256) {
   return String(value ?? "").trim().slice(0, max);
-}
-
-function midtransBase(env) {
-  return String(env?.MIDTRANS_ENV || "sandbox").toLowerCase() === "production"
-    ? MIDTRANS_PRODUCTION_BASE
-    : MIDTRANS_SANDBOX_BASE;
-}
-
-function serverAuthorization(serverKey) {
-  if (!serverKey) throw new Error("MIDTRANS_SERVER_KEY_MISSING");
-  return "Basic " + btoa(String(serverKey) + ":");
-}
-
-export function isDynamicQrisConfigured(env) {
-  return String(env?.QRIS_DYNAMIC_ENABLED || "false").toLowerCase() === "true"
-    && Boolean(clean(env?.MIDTRANS_SERVER_KEY, 500))
-    && MIDTRANS_QRIS_ACQUIRERS.has(String(env?.MIDTRANS_QRIS_ACQUIRER || "gopay").toLowerCase());
 }
 
 export function crc16CcittFalse(value) {
@@ -43,6 +22,7 @@ function crcHex(value) {
 export function parseEmvTlv(payload) {
   const input = String(payload ?? "");
   if (!input || input.length > 4096) throw new Error("QRIS_PAYLOAD_LENGTH_INVALID");
+  if (!/^[\x20-\x7E]+$/.test(input)) throw new Error("QRIS_TLV_CHARSET_INVALID");
   const fields = [];
   let offset = 0;
   while (offset < input.length) {
@@ -68,6 +48,7 @@ export function encodeEmvTlv(fields) {
     const tag = String(field?.tag ?? "");
     const value = String(field?.value ?? "");
     if (!/^\d{2}$/.test(tag) || value.length > 99) throw new Error("QRIS_TLV_FIELD_INVALID");
+    if (!/^[\x20-\x7E]*$/.test(value)) throw new Error("QRIS_TLV_VALUE_CHARSET_INVALID");
     return tag + String(value.length).padStart(2, "0") + value;
   }).join("");
 }
@@ -95,11 +76,17 @@ export function parseQrisPayload(payload) {
   if (values["00"] !== "01" || !["11", "12"].includes(values["01"]) || values["53"] !== "360" || values["58"] !== "ID") {
     throw new Error("QRIS_STANDARD_FIELDS_INVALID");
   }
+  let amount = null;
+  if (seen.has("54")) {
+    if (!/^\d{1,13}$/.test(values["54"])) throw new Error("QRIS_AMOUNT_FIELD_INVALID");
+    amount = Number(values["54"]);
+    if (!Number.isSafeInteger(amount) || amount <= 0) throw new Error("QRIS_AMOUNT_FIELD_INVALID");
+  }
   return {
     fields,
     values,
     pointOfInitiation: values["01"] || "",
-    amount: values["54"] ? Number(values["54"]) : null,
+    amount,
     merchantName: values["59"] || "",
     merchantCity: values["60"] || ""
   };
@@ -111,10 +98,10 @@ export function parseQrisPayload(payload) {
  * the merchant's acquirer must permit this issuance method for production use.
  */
 export function buildDynamicQrisPayload(staticPayload, amount) {
-  const nominal = Number(amount);
-  if (!Number.isSafeInteger(nominal) || nominal <= 0 || String(nominal).length > 13) {
-    throw new Error("QRIS_AMOUNT_INVALID");
-  }
+  const amountText = typeof amount === "number" ? String(amount) : String(amount ?? "").trim();
+  if (!/^\d{1,13}$/.test(amountText)) throw new Error("QRIS_AMOUNT_INVALID");
+  const nominal = Number(amountText);
+  if (!Number.isSafeInteger(nominal) || nominal <= 0) throw new Error("QRIS_AMOUNT_INVALID");
   const parsed = parseQrisPayload(staticPayload);
   if (parsed.pointOfInitiation !== "11") throw new Error("QRIS_TEMPLATE_MUST_BE_STATIC_MPM");
   if (!parsed.fields.some(field => Number(field.tag) >= 26 && Number(field.tag) <= 51)) {
@@ -199,9 +186,15 @@ export function extractQrisMerchantProfile(payload) {
 }
 
 export function generateQrisUniqueCode() {
+  // Rejection sampling avoids modulo bias across the 999 available suffixes.
+  const range = 0x100000000;
+  const limit = Math.floor(range / 999) * 999;
   const random = new Uint32Array(1);
-  crypto.getRandomValues(random);
-  return String((random[0] % 999) + 1).padStart(3, "0");
+  for (let attempt = 0; attempt < 128; attempt++) {
+    crypto.getRandomValues(random);
+    if (random[0] < limit) return String((random[0] % 999) + 1).padStart(3, "0");
+  }
+  throw new Error("QRIS_UNIQUE_CODE_GENERATION_FAILED");
 }
 
 export function parseReceiptAmount(value) {
@@ -285,155 +278,3 @@ export function evaluateQrisReceipt(expected, extracted) {
     reasons
   };
 }
-
-export function normalizeMidtransStatus(status) {
-  const value = String(status ?? "").trim().toLowerCase();
-  if (value === "settlement") return "PAID";
-  if (value === "expire") return "EXPIRED";
-  if (value === "cancel" || value === "deny" || value === "failure") return "FAILED";
-  if (value === "pending") return "PENDING";
-  return "UNKNOWN";
-}
-
-export function parseMidtransAmount(value) {
-  const text = String(value ?? "").trim();
-  if (!/^\d+(?:\.00)?$/.test(text)) return null;
-  const amount = Number(text);
-  return Number.isSafeInteger(amount) ? amount : null;
-}
-
-export async function verifyMidtransNotification(payload, serverKey) {
-  const orderId = clean(payload?.order_id, 80);
-  const statusCode = clean(payload?.status_code, 8);
-  const grossAmount = clean(payload?.gross_amount, 32);
-  const signature = clean(payload?.signature_key, 256).toLowerCase();
-  if (!orderId || !statusCode || !grossAmount || !/^[0-9a-f]{128}$/.test(signature) || !serverKey) return false;
-
-  const source = orderId + statusCode + grossAmount + String(serverKey);
-  const digest = await crypto.subtle.digest("SHA-512", new TextEncoder().encode(source));
-  const expected = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
-  if (expected.length !== signature.length) return false;
-  let difference = 0;
-  for (let i = 0; i < expected.length; i++) difference |= expected.charCodeAt(i) ^ signature.charCodeAt(i);
-  return difference === 0;
-}
-
-export async function createMidtransQrisCharge(env, order) {
-  if (!isDynamicQrisConfigured(env)) throw new Error("QRIS_DYNAMIC_NOT_CONFIGURED");
-  const orderId = clean(order?.providerOrderId || order?.orderId, 50);
-  const amount = Number(order?.amount ?? order?.total);
-  if (!orderId || !Number.isSafeInteger(amount) || amount <= 0) throw new Error("MIDTRANS_ORDER_INVALID");
-
-  const acquirer = String(env.MIDTRANS_QRIS_ACQUIRER || "gopay").toLowerCase();
-  const itemDetails = (Array.isArray(order.items) ? order.items : []).map(item => ({
-    id: clean(item.sku || item.id, 50),
-    price: Number(item.price),
-    quantity: Number(item.quantity),
-    name: clean(item.name, 50) || "Produk Seiton"
-  }));
-  if (itemDetails.length) {
-    const subtotal = itemDetails.reduce((sum, item) => sum + item.price * item.quantity, 0);
-    const shipping = Math.max(0, amount - subtotal);
-    if (shipping > 0) itemDetails.push({ id: "SEITON-SHIPPING", price: shipping, quantity: 1, name: "Biaya pengiriman" });
-    if (itemDetails.reduce((sum, item) => sum + item.price * item.quantity, 0) !== amount) {
-      throw new Error("MIDTRANS_ITEM_TOTAL_MISMATCH");
-    }
-  }
-
-  const body = {
-    payment_type: "qris",
-    transaction_details: { order_id: orderId, gross_amount: amount },
-    qris: { acquirer }
-  };
-  if (itemDetails.length) body.item_details = itemDetails;
-  if (order.customerDetails && typeof order.customerDetails === "object") {
-    body.customer_details = order.customerDetails;
-  }
-
-  const response = await fetch(midtransBase(env) + "/v2/charge", {
-    method: "POST",
-    headers: {
-      Authorization: serverAuthorization(env.MIDTRANS_SERVER_KEY),
-      "Content-Type": "application/json",
-      Accept: "application/json"
-    },
-    body: JSON.stringify(body)
-  });
-  let result = {};
-  try { result = await response.json(); } catch {}
-  if (!response.ok || String(result.payment_type || "").toLowerCase() !== "qris"
-    || String(result.order_id || "") !== orderId
-    || parseMidtransAmount(result.gross_amount) !== amount) {
-    throw new Error("MIDTRANS_QRIS_CREATE_FAILED_" + response.status + "_" + clean(result.status_message || result.message, 80));
-  }
-
-  const qrActions = Array.isArray(result.actions) ? result.actions : [];
-  // Prefer the newer ASPI-format image action where Midtrans supplies it.
-  const qrAction = qrActions.find(action => String(action.name || "") === "generate-qr-code-v2")
-    || qrActions.find(action => String(action.name || "") === "generate-qr-code");
-  const qrImageUrl = String(qrAction?.url || "");
-  const allowedHosts = new Set(["api.midtrans.com", "api.sandbox.midtrans.com"]);
-  let parsedUrl;
-  try { parsedUrl = new URL(qrImageUrl); } catch { throw new Error("MIDTRANS_QRIS_IMAGE_URL_INVALID"); }
-  if (parsedUrl.protocol !== "https:" || !allowedHosts.has(parsedUrl.hostname)) {
-    throw new Error("MIDTRANS_QRIS_IMAGE_HOST_INVALID");
-  }
-
-  return {
-    provider: "midtrans",
-    providerOrderId: orderId,
-    transactionId: clean(result.transaction_id, 100),
-    merchantId: clean(result.merchant_id, 80),
-    amount,
-    status: normalizeMidtransStatus(result.transaction_status),
-    rawStatus: clean(result.transaction_status, 40),
-    qrImageUrl,
-    expiresAt: (() => {
-      const explicit = clean(result.expiry_time, 80);
-      if (explicit) return explicit;
-      const transactionTime = clean(result.transaction_time, 80);
-      const parsedTime = transactionTime
-        ? new Date(transactionTime.replace(" ", "T") + (/[zZ]|[+-]\d{2}:\d{2}$/.test(transactionTime) ? "" : "+07:00"))
-        : new Date();
-      const base = Number.isNaN(parsedTime.getTime()) ? new Date() : parsedTime;
-      const defaultMinutes = acquirer === "airpay_shopee" ? 5 : 15;
-      return new Date(base.getTime() + defaultMinutes * 60 * 1000).toISOString();
-    })()
-  };
-}
-
-export async function getMidtransTransactionStatus(env, providerOrderId) {
-  if (!clean(env?.MIDTRANS_SERVER_KEY, 500)) throw new Error("MIDTRANS_SERVER_KEY_MISSING");
-  const orderId = clean(providerOrderId, 50);
-  if (!orderId) throw new Error("MIDTRANS_ORDER_ID_REQUIRED");
-  const response = await fetch(midtransBase(env) + "/v2/" + encodeURIComponent(orderId) + "/status", {
-    method: "GET",
-    headers: {
-      Authorization: serverAuthorization(env.MIDTRANS_SERVER_KEY),
-      Accept: "application/json"
-    }
-  });
-  let result = {};
-  try { result = await response.json(); } catch {}
-  if (!response.ok || String(result.order_id || "") !== orderId) {
-    throw new Error("MIDTRANS_STATUS_LOOKUP_FAILED_" + response.status);
-  }
-  return {
-    providerOrderId: orderId,
-    transactionId: clean(result.transaction_id, 100),
-    amount: parseMidtransAmount(result.gross_amount),
-    paymentType: clean(result.payment_type, 24).toLowerCase(),
-    currency: clean(result.currency, 8).toUpperCase(),
-    fraudStatus: clean(result.fraud_status, 24).toLowerCase(),
-    acquirer: clean(result.acquirer, 32).toLowerCase(),
-    status: normalizeMidtransStatus(result.transaction_status),
-    rawStatus: clean(result.transaction_status, 40),
-    merchantId: clean(result.merchant_id, 80)
-  };
-}
-
-export const qrisInternals = Object.freeze({
-  MIDTRANS_SANDBOX_BASE,
-  MIDTRANS_PRODUCTION_BASE,
-  MIDTRANS_QRIS_ACQUIRERS
-});
