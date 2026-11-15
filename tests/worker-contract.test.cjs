@@ -279,6 +279,20 @@ test("QRIS checkout uses internal static-payload composition and unique-code rec
   assert.match(worker, /UPDATE qris_payments SET status='PAID'/);
 });
 
+test("admin QRIS preview composes a real merchant QR without creating an order or payment row", () => {
+  const start = worker.indexOf('if (/^\\/qris_test');
+  const end = worker.indexOf('if (text.startsWith("/approve"))', start);
+  assert.ok(start >= 0 && end > start, "admin QRIS preview command exists");
+  const command = worker.slice(start, end);
+  assert.match(command, /message\.chat\.type !== "private"/);
+  assert.match(command, /isAdmin\(customerId, env\)/);
+  assert.match(command, /buildDynamicQrisPayload\(env\.QRIS_STATIC_PAYLOAD, amount\)/);
+  assert.match(command, /if \(!merchant\.merchantName\)/);
+  assert.match(command, /qris_payments WHERE expected_amount/);
+  assert.match(command, /QRIS_TEST_QR_GENERATED/);
+  assert.doesNotMatch(command, /INSERT INTO qris_payments|createOrder\(/);
+});
+
 test("customer catalog shows unavailable products but only provides purchase buttons for sellable items", () => {
   assert.match(worker, /function customerCatalogProducts\(rows\)/);
   assert.match(worker, /function customerProductCanBeOrdered\(row\)/);

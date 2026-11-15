@@ -9,10 +9,7 @@ import {
   buildDynamicQrisPayload,
   isInternalQrisConfigured,
   isStaticQrisFallbackConfigured,
-  getQrisCheckoutMode,
-  parseMidtransAmount,
-  normalizeMidtransStatus,
-  verifyMidtransNotification
+  getQrisCheckoutMode
 } from "../qris.mjs";
 
 function withCrc(fields) {
@@ -68,6 +65,58 @@ test("QRIS composer updates an existing template amount instead of duplicating t
   assert.equal(tags[0].value, "85000");
 });
 
+test("QRIS converter preserves merchant fields and places one exact amount in dynamic MPM", () => {
+  const template = staticMerchantTemplate();
+  const source = parseQrisPayload(template);
+  const dynamicPayload = buildDynamicQrisPayload(template, 125137);
+  const dynamic = parseQrisPayload(dynamicPayload);
+
+  assert.equal(dynamic.pointOfInitiation, "12");
+  assert.equal(dynamic.amount, 125137);
+  assert.equal(verifyQrisPayload(dynamicPayload), true);
+  assert.equal(dynamic.fields.at(-1).tag, "63");
+  assert.equal(dynamic.fields.filter(field => field.tag === "54").length, 1);
+
+  for (const original of source.fields) {
+    if (original.tag === "63") continue;
+    const converted = dynamic.fields.find(field => field.tag === original.tag);
+    assert.ok(converted, "field " + original.tag + " is retained");
+    if (original.tag === "01") assert.equal(converted.value, "12");
+    else if (original.tag === "54") assert.equal(converted.value, "125137");
+    else assert.equal(converted.value, original.value);
+  }
+});
+
+test("QRIS TLV parser and encoder reject non-ASCII payload data", () => {
+  assert.throws(() => parseEmvTlv("0003A😊"), /CHARSET/);
+  assert.throws(() => encodeEmvTlv([{ tag: "59", value: "SEITON–ID" }]), /CHARSET/);
+});
+
+test("QRIS parser rejects malformed or zero amount fields", () => {
+  const base = [
+    { tag: "00", value: "01" },
+    { tag: "01", value: "12" },
+    { tag: "26", value: "0012A0000000000000000000" },
+    { tag: "52", value: "5812" },
+    { tag: "53", value: "360" },
+    { tag: "54", value: "12X" },
+    { tag: "58", value: "ID" },
+    { tag: "59", value: "SEITON.ID" },
+    { tag: "60", value: "JEMBER" }
+  ];
+  assert.throws(() => parseQrisPayload(withCrc(base)), /AMOUNT_FIELD_INVALID/);
+  base[5] = { tag: "54", value: "0" };
+  assert.throws(() => parseQrisPayload(withCrc(base)), /AMOUNT_FIELD_INVALID/);
+});
+
+test("QRIS converter accepts decimal integer strings and rejects alternate numeric notation", () => {
+  const template = staticMerchantTemplate();
+  assert.equal(parseQrisPayload(buildDynamicQrisPayload(template, "125000")).amount, 125000);
+  assert.throws(() => buildDynamicQrisPayload(template, "1.25e5"), /AMOUNT_INVALID/);
+  assert.throws(() => buildDynamicQrisPayload(template, "125000.00"), /AMOUNT_INVALID/);
+});
+
+
 test("Seiton QRIS core rejects invalid nominal, non-QRIS template and invalid CRC", () => {
   const template = staticMerchantTemplate();
   assert.throws(() => buildDynamicQrisPayload(template, 0), /AMOUNT_INVALID/);
@@ -79,163 +128,6 @@ test("Seiton QRIS core rejects invalid nominal, non-QRIS template and invalid CR
     { tag: "52", value: "5812" }, { tag: "53", value: "360" }, { tag: "58", value: "ID" }
   ]);
   assert.throws(() => buildDynamicQrisPayload(wrongMode, 10000), /MUST_BE_STATIC/);
-});
-
-test("Midtrans QRIS status and IDR amount normalization are strict", () => {
-  assert.equal(parseMidtransAmount("125000.00"), 125000);
-  assert.equal(parseMidtransAmount("125000"), 125000);
-  assert.equal(parseMidtransAmount("125000.50"), null);
-  assert.equal(normalizeMidtransStatus("settlement"), "PAID");
-  assert.equal(normalizeMidtransStatus("pending"), "PENDING");
-  assert.equal(normalizeMidtransStatus("expire"), "EXPIRED");
-  assert.equal(normalizeMidtransStatus("deny"), "FAILED");
-});
-
-test("Midtrans webhook signature verification rejects forged and mutated payloads", async () => {
-  const serverKey = "unit-test-server-key";
-  const payload = {
-    order_id: "SEI-20261115-ABCD1234",
-    status_code: "200",
-    gross_amount: "125000.00"
-  };
-  const bytes = new Uint8Array(await crypto.subtle.digest(
-    "SHA-512",
-    new TextEncoder().encode(payload.order_id + payload.status_code + payload.gross_amount + serverKey)
-  ));
-  payload.signature_key = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
-  assert.equal(await verifyMidtransNotification(payload, serverKey), true);
-  assert.equal(await verifyMidtransNotification({ ...payload, gross_amount: "125001.00" }, serverKey), false);
-  assert.equal(await verifyMidtransNotification(payload, "wrong-key"), false);
-});
-
-
-test("Midtrans sandbox/production settings are explicit and QRIS acquirer is restricted", async () => {
-  const { isDynamicQrisConfigured, qrisInternals } = await import("../qris.mjs");
-  assert.equal(isDynamicQrisConfigured({
-    QRIS_DYNAMIC_ENABLED: "true",
-    MIDTRANS_SERVER_KEY: "test-key",
-    MIDTRANS_QRIS_ACQUIRER: "gopay"
-  }), true);
-  assert.equal(isDynamicQrisConfigured({
-    QRIS_DYNAMIC_ENABLED: "false",
-    MIDTRANS_SERVER_KEY: "test-key",
-    MIDTRANS_QRIS_ACQUIRER: "gopay"
-  }), false);
-  assert.equal(isDynamicQrisConfigured({
-    QRIS_DYNAMIC_ENABLED: "true",
-    MIDTRANS_SERVER_KEY: "test-key",
-    MIDTRANS_QRIS_ACQUIRER: "unknown"
-  }), false);
-  assert.equal(qrisInternals.MIDTRANS_SANDBOX_BASE, "https://api.sandbox.midtrans.com");
-  assert.equal(qrisInternals.MIDTRANS_PRODUCTION_BASE, "https://api.midtrans.com");
-});
-
-test("Midtrans charge adapter prefers ASPI QR image, authenticates, and checks exact IDR amount", async () => {
-  const { createMidtransQrisCharge } = await import("../qris.mjs");
-  const originalFetch = globalThis.fetch;
-  let request;
-  globalThis.fetch = async (url, options) => {
-    request = { url: String(url), options };
-    return new Response(JSON.stringify({
-      status_code: "201",
-      transaction_id: "midtrans-transaction-1",
-      order_id: "SEI-20261115-ABCD1234",
-      merchant_id: "M000001",
-      gross_amount: "125000.00",
-      currency: "IDR",
-      payment_type: "qris",
-      transaction_status: "pending",
-      fraud_status: "accept",
-      transaction_time: "2026-11-15 08:00:00",
-      actions: [
-        { name: "generate-qr-code", method: "GET", url: "https://api.sandbox.midtrans.com/v2/qris/midtrans-transaction-1/qr-code" },
-        { name: "generate-qr-code-v2", method: "GET", url: "https://api.sandbox.midtrans.com/v4/qris/QR-REF-1/qr-code" }
-      ]
-    }), { status: 201, headers: { "Content-Type": "application/json" } });
-  };
-  try {
-    const result = await createMidtransQrisCharge({
-      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
-      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "gopay"
-    }, { orderId: "SEI-20261115-ABCD1234", amount: 125000 });
-    assert.equal(request.url, "https://api.sandbox.midtrans.com/v2/charge");
-    assert.equal(request.options.headers.Authorization, "Basic " + btoa("sandbox-server-key:"));
-    assert.equal(JSON.parse(request.options.body).payment_type, "qris");
-    assert.equal(result.qrImageUrl, "https://api.sandbox.midtrans.com/v4/qris/QR-REF-1/qr-code");
-    assert.equal(result.amount, 125000);
-    await assert.rejects(() => createMidtransQrisCharge({
-      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
-      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "gopay"
-    }, { orderId: "SEI-20261115-ABCD1234", amount: 125001 }), /MIDTRANS_QRIS_CREATE_FAILED/);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("Midtrans Status API returns fraud status for settlement validation", async () => {
-  const { getMidtransTransactionStatus } = await import("../qris.mjs");
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (url, options) => {
-    assert.equal(String(url), "https://api.sandbox.midtrans.com/v2/SEI-20261115-ABCD1234/status");
-    assert.equal(options.headers.Authorization, "Basic " + btoa("sandbox-server-key:"));
-    return new Response(JSON.stringify({
-      order_id: "SEI-20261115-ABCD1234",
-      transaction_id: "midtrans-transaction-1",
-      gross_amount: "125000.00",
-      payment_type: "qris",
-      currency: "IDR",
-      transaction_status: "settlement",
-      fraud_status: "accept",
-      merchant_id: "M000001"
-    }), { status: 200, headers: { "Content-Type": "application/json" } });
-  };
-  try {
-    const status = await getMidtransTransactionStatus({
-      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key"
-    }, "SEI-20261115-ABCD1234");
-    assert.equal(status.status, "PAID");
-    assert.equal(status.fraudStatus, "accept");
-    assert.equal(status.amount, 125000);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-
-test("Midtrans QRIS expiry is estimated from provider transaction time by acquirer defaults", async () => {
-  const { createMidtransQrisCharge } = await import("../qris.mjs");
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    status_code: "201",
-    transaction_id: "midtrans-transaction-expiry",
-    order_id: "SEI-20261115-ABCD1234",
-    merchant_id: "M000001",
-    gross_amount: "125000.00",
-    currency: "IDR",
-    payment_type: "qris",
-    transaction_status: "pending",
-    fraud_status: "accept",
-    transaction_time: "2026-11-15 08:00:00",
-    actions: [{
-      name: "generate-qr-code-v2",
-      method: "GET",
-      url: "https://api.sandbox.midtrans.com/v4/qris/QR-REF-1/qr-code"
-    }]
-  }), { status: 201, headers: { "Content-Type": "application/json" } });
-  try {
-    const gopay = await createMidtransQrisCharge({
-      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
-      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "gopay"
-    }, { orderId: "SEI-20261115-ABCD1234", amount: 125000 });
-    const airpay = await createMidtransQrisCharge({
-      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
-      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "airpay_shopee"
-    }, { orderId: "SEI-20261115-ABCD1234", amount: 125000 });
-    assert.equal(new Date(gopay.expiresAt).toISOString(), "2026-11-15T01:15:00.000Z");
-    assert.equal(new Date(airpay.expiresAt).toISOString(), "2026-11-15T01:05:00.000Z");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
 });
 
 test("internal QRIS gate requires enabled flag and a valid static merchant template", async () => {

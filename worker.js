@@ -460,6 +460,58 @@ async function handleTelegram(request, env, ctx) {
       await sendTelegram(env,chatId,lines.join("\n"));
       return;
     }
+    if (/^\/qris_test(?:@[a-z0-9_]+)?(?:\s|$)/i.test(text)) {
+      if (message.chat.type !== "private" || !isAdmin(customerId, env) || !isAdmin(chatId, env)) {
+        await sendTelegram(env, chatId, "⛔ Pratinjau QRIS hanya dapat dijalankan admin melalui chat pribadi.");
+        return;
+      }
+      const match = text.match(/^\/qris_test(?:@[a-z0-9_]+)?\s+(\d{1,9})\s*$/i);
+      if (!match) {
+        await sendTelegram(env, chatId, "Format: /qris_test <nominal>\nContoh: /qris_test 10000\nBatas pratinjau: Rp1–Rp100.000.000.");
+        return;
+      }
+      const amount = Number(match[1]);
+      if (!Number.isSafeInteger(amount) || amount < 1 || amount > 100000000) {
+        await sendTelegram(env, chatId, "⚠️ Nominal pratinjau harus berupa bilangan bulat Rp1 sampai Rp100.000.000.");
+        return;
+      }
+      try {
+        if (!env.DB) throw new Error("D1_BINDING_MISSING");
+        if (!String(env.QRIS_STATIC_PAYLOAD || "").trim()) throw new Error("QRIS_STATIC_PAYLOAD_MISSING");
+        const collision = await env.DB.prepare(
+          "SELECT order_id FROM qris_payments WHERE expected_amount=? LIMIT 1"
+        ).bind(amount).first();
+        if (collision) {
+          throw new Error("Nominal tersebut sudah dipakai pesanan " + String(collision.order_id) + ". Pilih nominal uji lain.");
+        }
+        const merchant = extractQrisMerchantProfile(env.QRIS_STATIC_PAYLOAD);
+        if (!merchant.merchantName) throw new Error("QRIS_MERCHANT_NAME_MISSING");
+        const payload = buildDynamicQrisPayload(env.QRIS_STATIC_PAYLOAD, amount);
+        const image = await fetchInternalQrisImage(payload);
+        await sendTelegramPhotoBlob(env, chatId, image, [
+          "🧪 PRATINJAU QRIS DINAMIS INTERNAL",
+          "Merchant: " + (merchant.merchantName || "GoPay Merchant"),
+          "Nominal payload: " + rupiah(amount),
+          "",
+          "Ini hanya QR uji; tidak membuat pesanan atau catatan pembayaran di D1.",
+          "Pindai dahulu dan pastikan nama merchant serta nominal benar. Jangan lanjutkan pembayaran sebelum keduanya cocok.",
+          "Jika dilakukan pembayaran sungguhan, dana akan masuk ke merchant GoPay yang tertanam di QR. Periksa transaksi masuk secara manual.",
+          "QR ini tidak dibatalkan atau dibuat sekali pakai oleh library Seiton. Gunakan hanya untuk uji terkontrol dan jangan bagikan ke pelanggan."
+        ].join("\n"));
+        await recordAdminActivity(env, {
+          actorId: customerId,
+          action: "QRIS_TEST_QR_GENERATED",
+          resourceType: "qris_test",
+          resourceId: "internal-preview",
+          summary: { amount, merchant_name: merchant.merchantName, order_created: false }
+        });
+      } catch (error) {
+        await sendTelegram(env, chatId, "⚠️ Pratinjau QRIS gagal dibuat: " +
+          String(error?.message || "QRIS_TEST_FAILED").slice(0, 240));
+      }
+      return;
+    }
+
     if (text.startsWith("/approve")) {
       if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const reference=text.split(/\s+/)[1];
