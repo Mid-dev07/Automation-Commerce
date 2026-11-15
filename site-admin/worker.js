@@ -357,7 +357,7 @@ if(u.pathname==="/api/control/export"&&req.method==="GET"){
   const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
   const type=controlText(u.searchParams.get("type"),20);
   const from=String(u.searchParams.get("from")||""),to=String(u.searchParams.get("to")||"");
-  const validDate=value=>!value||/^\\d{4}-\\d{2}-\\d{2}$/.test(value)&&(()=>{const d=new Date(value+"T00:00:00.000Z");return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===value;})();
+  const validDate=value=>!value||/^\d{4}-\d{2}-\d{2}$/.test(value)&&(()=>{const d=new Date(value+"T00:00:00.000Z");return Number.isFinite(d.getTime())&&d.toISOString().slice(0,10)===value;})();
   if(!["orders","finance","daily","inventory"].includes(type))return secure(j({ok:false,error:"Jenis ekspor tidak dikenal."},400));
   if(!validDate(from)||!validDate(to)||(from&&to&&from>to))return secure(j({ok:false,error:"Rentang tanggal tidak valid."},400));
   try{
