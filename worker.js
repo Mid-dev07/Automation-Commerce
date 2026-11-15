@@ -485,6 +485,7 @@ async function handleTelegram(request, env, ctx) {
           throw new Error("Nominal tersebut sudah dipakai pesanan " + String(collision.order_id) + ". Pilih nominal uji lain.");
         }
         const merchant = extractQrisMerchantProfile(env.QRIS_STATIC_PAYLOAD);
+        if (!merchant.merchantName) throw new Error("QRIS_MERCHANT_NAME_MISSING");
         const payload = buildDynamicQrisPayload(env.QRIS_STATIC_PAYLOAD, amount);
         const image = await fetchInternalQrisImage(payload);
         await sendTelegramPhotoBlob(env, chatId, image, [
