@@ -396,3 +396,28 @@ test("repeated payment approval never sends a second receipt or digital fulfillm
   assert.match(worker, /already_approved:true/);
   assert.match(worker, /Sudah disetujui sebelumnya; tidak ada persetujuan ulang/);
 });
+
+
+test("operational alerts are opt-in and report failed, stalled mirrors plus stale payment reviews", () => {
+  assert.match(worker, /async function dispatchOperationalAlerts\(env\)/);
+  assert.match(worker, /OPERATIONAL_ALERTS_ENABLED/);
+  assert.match(worker, /operational_alert_state/);
+  assert.match(worker, /failed_mirror/);
+  assert.match(worker, /stalled_mirror/);
+  assert.match(worker, /stale_payment_review/);
+  assert.match(worker, /dispatchOperationalAlerts\(env\)/);
+  assert.match(worker, /failed_mirror_outbox/);
+  assert.match(worker, /stalled_mirror_outbox/);
+  assert.match(worker, /stale_payment_verification/);
+  assert.match(worker, /cooldownMs=6\*60\*60\*1000/);
+  assert.match(worker, /D1 tetap sumber data utama/);
+});
+
+test("operational alert delivery never exposes customer identifiers, payment proof, or amounts", () => {
+  const start = worker.indexOf("async function dispatchOperationalAlerts(env)");
+  const end = worker.indexOf("async function mirrorTransactionalProduct", start);
+  assert.ok(start >= 0 && end > start);
+  const source = worker.slice(start, end);
+  assert.doesNotMatch(source, /customer_name|customer_id|receipt_file_id|ocr_reference|expected_amount/);
+  assert.match(source, /Cocokkan mutasi merchant\/bank sebelum mengambil tindakan/);
+});
