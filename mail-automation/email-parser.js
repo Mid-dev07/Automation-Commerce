@@ -63,7 +63,7 @@ function splitEntity(raw){
 }
 
 function parameter(value,name){
-  const re=new RegExp("(?:^|;)\s*"+name+"\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^;\s]*))","i");
+  const re=new RegExp("(?:^|;)\\s*"+name+"\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^;\\s]*))","i");
   const match=String(value||"").match(re);
   return match?(match[1]??match[2]??match[3]??"").trim():"";
 }
