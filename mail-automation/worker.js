@@ -575,6 +575,50 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
   }, 201);
 }
 
+
+async function handleMachineAliasesGet(url, env, tokenHash) {
+  if (!await hasOwner(env)) {
+    return responseJson({ ok: false, error: "Panel owner belum diinisialisasi." }, 503);
+  }
+  const rawLimit = url.searchParams.get("limit");
+  const rawOffset = url.searchParams.get("offset");
+  if ((rawLimit !== null && !/^\d{1,2}$/.test(rawLimit)) ||
+      (rawOffset !== null && !/^\d{1,5}$/.test(rawOffset))) {
+    return responseJson({ ok: false, error: "Parameter pagination tidak valid." }, 400);
+  }
+  const limit = rawLimit === null ? 25 : Math.min(50, Math.max(1, Number(rawLimit)));
+  const offset = rawOffset === null ? 0 : Number(rawOffset);
+  if (!Number.isSafeInteger(limit) || !Number.isSafeInteger(offset) || offset > 10000) {
+    return responseJson({ ok: false, error: "Parameter pagination di luar batas." }, 400);
+  }
+
+  const count = await env.MAIL_DB.prepare(
+    "SELECT COUNT(*) AS total FROM mail_machine_aliases WHERE token_hash=?"
+  ).bind(tokenHash).first();
+  const result = await env.MAIL_DB.prepare(
+    "SELECT a.id,a.slug,a.label,a.status,a.created_at,a.expires_at,a.last_received_at,a.received_count " +
+    "FROM mail_machine_aliases m JOIN mail_aliases a ON a.id=m.alias_id " +
+    "WHERE m.token_hash=? ORDER BY a.created_at DESC,a.id DESC LIMIT ? OFFSET ?"
+  ).bind(tokenHash, limit, offset).all();
+  const now = Date.now();
+  const aliases = (result.results || []).map((row) => ({
+    id: row.id,
+    email: BASE_LOCAL_PART + "+" + row.slug + "@" + MAIL_DOMAIN,
+    label: clean(row.label, 80),
+    status: row.status === "ACTIVE" && Number(row.expires_at) <= now ? "EXPIRED" : row.status,
+    created_at: Number(row.created_at),
+    expires_at: Number(row.expires_at),
+    last_received_at: row.last_received_at == null ? null : Number(row.last_received_at),
+    received_count: Number(row.received_count || 0)
+  }));
+  const total = Number(count?.total || 0);
+  return responseJson({
+    ok: true,
+    aliases,
+    pagination: { total, limit, offset, has_more: offset + aliases.length < total }
+  });
+}
+
 async function handleMachineMessagesGet(url, env, tokenHash) {
   if (!await hasOwner(env)) {
     return responseJson({ ok: false, error: "Panel owner belum diinisialisasi." }, 503);
@@ -698,10 +742,40 @@ async function handleMachineAliasRevoke(request, env, id, tokenHash) {
   return responseJson({ ok: true, revoked_at: now });
 }
 
+
+async function handleMachineHealth(env) {
+  const checkedAt = Date.now();
+  try {
+    const row = await env.MAIL_DB.prepare("SELECT 1 AS ready").first();
+    const ready = Number(row?.ready) === 1;
+    return responseJson({
+      ok: ready,
+      service: "seiton-mail-automation",
+      database_ready: ready,
+      inbound_email_routing: "unverified",
+      checked_at: checkedAt
+    }, ready ? 200 : 503);
+  } catch {
+    return responseJson({
+      ok: false,
+      service: "seiton-mail-automation",
+      database_ready: false,
+      inbound_email_routing: "unverified",
+      checked_at: checkedAt
+    }, 503);
+  }
+}
+
 async function handleMachineApi(request, env, url) {
   const auth = await authenticateMachine(request, env);
   if (auth.response) return auth.response;
 
+  if (request.method === "GET" && url.pathname === "/api/v1/machine/health") {
+    return handleMachineHealth(env);
+  }
+  if (request.method === "GET" && url.pathname === "/api/v1/machine/aliases") {
+    return handleMachineAliasesGet(url, env, auth.tokenHash);
+  }
   if (request.method === "POST" && url.pathname === "/api/v1/machine/aliases") {
     return handleMachineAliasCreate(request, env, auth.tokenHash);
   }
