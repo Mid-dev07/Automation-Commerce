@@ -287,7 +287,6 @@ if(u.pathname==="/api/admin/sessions/revoke"&&req.method==="POST"){
 }
 
 if((u.pathname==="/otp"||u.pathname==="/otp/")&&req.method==="GET"){
-  if(!(await activeSession(req,env)))return Response.redirect(new URL("/",req.url),302);
   return Response.redirect(new URL("/#email-otp",req.url),302);
 }
 if(u.pathname==="/api/admin/otp/mailboxes"&&req.method==="GET"){
