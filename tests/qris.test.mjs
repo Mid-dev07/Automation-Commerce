@@ -104,3 +104,95 @@ test("Midtrans webhook signature verification rejects forged and mutated payload
   assert.equal(await verifyMidtransNotification({ ...payload, gross_amount: "125001.00" }, serverKey), false);
   assert.equal(await verifyMidtransNotification(payload, "wrong-key"), false);
 });
+
+
+test("Midtrans sandbox/production settings are explicit and QRIS acquirer is restricted", async () => {
+  const { isDynamicQrisConfigured, qrisInternals } = await import("../qris.mjs");
+  assert.equal(isDynamicQrisConfigured({
+    QRIS_DYNAMIC_ENABLED: "true",
+    MIDTRANS_SERVER_KEY: "test-key",
+    MIDTRANS_QRIS_ACQUIRER: "gopay"
+  }), true);
+  assert.equal(isDynamicQrisConfigured({
+    QRIS_DYNAMIC_ENABLED: "false",
+    MIDTRANS_SERVER_KEY: "test-key",
+    MIDTRANS_QRIS_ACQUIRER: "gopay"
+  }), false);
+  assert.equal(isDynamicQrisConfigured({
+    QRIS_DYNAMIC_ENABLED: "true",
+    MIDTRANS_SERVER_KEY: "test-key",
+    MIDTRANS_QRIS_ACQUIRER: "unknown"
+  }), false);
+  assert.equal(qrisInternals.MIDTRANS_SANDBOX_BASE, "https://api.sandbox.midtrans.com");
+  assert.equal(qrisInternals.MIDTRANS_PRODUCTION_BASE, "https://api.midtrans.com");
+});
+
+test("Midtrans charge adapter prefers ASPI QR image, authenticates, and checks exact IDR amount", async () => {
+  const { createMidtransQrisCharge } = await import("../qris.mjs");
+  const originalFetch = globalThis.fetch;
+  let request;
+  globalThis.fetch = async (url, options) => {
+    request = { url: String(url), options };
+    return new Response(JSON.stringify({
+      status_code: "201",
+      transaction_id: "midtrans-transaction-1",
+      order_id: "SEI-20261115-ABCD1234",
+      merchant_id: "M000001",
+      gross_amount: "125000.00",
+      currency: "IDR",
+      payment_type: "qris",
+      transaction_status: "pending",
+      fraud_status: "accept",
+      actions: [
+        { name: "generate-qr-code", method: "GET", url: "https://api.sandbox.midtrans.com/v2/qris/midtrans-transaction-1/qr-code" },
+        { name: "generate-qr-code-v2", method: "GET", url: "https://api.sandbox.midtrans.com/v4/qris/QR-REF-1/qr-code" }
+      ]
+    }), { status: 201, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const result = await createMidtransQrisCharge({
+      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
+      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "gopay"
+    }, { orderId: "SEI-20261115-ABCD1234", amount: 125000 });
+    assert.equal(request.url, "https://api.sandbox.midtrans.com/v2/charge");
+    assert.equal(request.options.headers.Authorization, "Basic " + btoa("sandbox-server-key:"));
+    assert.equal(JSON.parse(request.options.body).payment_type, "qris");
+    assert.equal(result.qrImageUrl, "https://api.sandbox.midtrans.com/v4/qris/QR-REF-1/qr-code");
+    assert.equal(result.amount, 125000);
+    await assert.rejects(() => createMidtransQrisCharge({
+      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
+      QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "gopay"
+    }, { orderId: "SEI-20261115-ABCD1234", amount: 125001 }), /TOTAL_MISMATCH|CHARGE_FAILED/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Midtrans Status API returns fraud status for settlement validation", async () => {
+  const { getMidtransTransactionStatus } = await import("../qris.mjs");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(String(url), "https://api.sandbox.midtrans.com/v2/SEI-20261115-ABCD1234/status");
+    assert.equal(options.headers.Authorization, "Basic " + btoa("sandbox-server-key:"));
+    return new Response(JSON.stringify({
+      order_id: "SEI-20261115-ABCD1234",
+      transaction_id: "midtrans-transaction-1",
+      gross_amount: "125000.00",
+      payment_type: "qris",
+      currency: "IDR",
+      transaction_status: "settlement",
+      fraud_status: "accept",
+      merchant_id: "M000001"
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    const status = await getMidtransTransactionStatus({
+      MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key"
+    }, "SEI-20261115-ABCD1234");
+    assert.equal(status.status, "PAID");
+    assert.equal(status.fraudStatus, "accept");
+    assert.equal(status.amount, 125000);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
