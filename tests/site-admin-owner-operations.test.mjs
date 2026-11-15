@@ -19,6 +19,8 @@ test("CRM schema separates clients, projects, payment entries, and append-only e
   assert.match(sql, /REFERENCES owner_clients/);
   assert.match(sql, /PENGEMBALIAN/);
   assert.match(sql, /passwords, OTPs, access tokens, bank credentials/i);
+  assert.match(sql, /idempotency_key TEXT NOT NULL UNIQUE/);
+  assert.match(sql, /owner_project_refund_guard/);
 });
 test("owner operations endpoints are protected by owner-session and same-origin checks", async () => {
   const worker = await readFile(new URL("../site-admin/worker.js", import.meta.url), "utf8");
