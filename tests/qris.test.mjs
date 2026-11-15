@@ -163,7 +163,7 @@ test("Midtrans charge adapter prefers ASPI QR image, authenticates, and checks e
     await assert.rejects(() => createMidtransQrisCharge({
       MIDTRANS_ENV: "sandbox", MIDTRANS_SERVER_KEY: "sandbox-server-key",
       QRIS_DYNAMIC_ENABLED: "true", MIDTRANS_QRIS_ACQUIRER: "gopay"
-    }, { orderId: "SEI-20261115-ABCD1234", amount: 125001 }), /TOTAL_MISMATCH|CHARGE_FAILED/);
+    }, { orderId: "SEI-20261115-ABCD1234", amount: 125001 }), /MIDTRANS_QRIS_CREATE_FAILED/);
   } finally {
     globalThis.fetch = originalFetch;
   }
