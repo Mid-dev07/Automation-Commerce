@@ -2585,6 +2585,7 @@ async function reconcileQrisProviderStatus(env, order, payment, status, source) 
   }
   if (status.status === "PAID") {
     if (!status.transactionId) throw new Error("MIDTRANS_TRANSACTION_ID_MISSING");
+    if (status.fraudStatus !== "accept") throw new Error("MIDTRANS_FRAUD_STATUS_NOT_ACCEPTED");
     const eventId = await qrisEventId([
       source, payment.provider_order_id, status.transactionId, status.rawStatus, status.amount
     ]);
