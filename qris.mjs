@@ -1,3 +1,5 @@
+export const MAX_QRIS_TRANSACTION_AMOUNT = 10_000_000;
+
 function clean(value, max = 256) {
   return String(value ?? "").trim().slice(0, max);
 }
@@ -101,7 +103,9 @@ export function buildDynamicQrisPayload(staticPayload, amount) {
   const amountText = typeof amount === "number" ? String(amount) : String(amount ?? "").trim();
   if (!/^\d{1,13}$/.test(amountText)) throw new Error("QRIS_AMOUNT_INVALID");
   const nominal = Number(amountText);
-  if (!Number.isSafeInteger(nominal) || nominal <= 0) throw new Error("QRIS_AMOUNT_INVALID");
+  if (!Number.isSafeInteger(nominal) || nominal <= 0 || nominal > MAX_QRIS_TRANSACTION_AMOUNT) {
+    throw new Error("QRIS_AMOUNT_INVALID");
+  }
   const parsed = parseQrisPayload(staticPayload);
   if (parsed.pointOfInitiation !== "11") throw new Error("QRIS_TEMPLATE_MUST_BE_STATIC_MPM");
   if (!parsed.fields.some(field => Number(field.tag) >= 26 && Number(field.tag) <= 51)) {
@@ -185,14 +189,18 @@ export function extractQrisMerchantProfile(payload) {
   };
 }
 
-export function generateQrisUniqueCode() {
-  // Rejection sampling avoids modulo bias across the 999 available suffixes.
+export function generateQrisUniqueCode(maxCode = 999) {
+  const ceiling = Number(maxCode);
+  if (!Number.isInteger(ceiling) || ceiling < 1 || ceiling > 999) {
+    throw new Error("QRIS_UNIQUE_CODE_RANGE_INVALID");
+  }
+  // Rejection sampling avoids modulo bias across the available suffix range.
   const range = 0x100000000;
-  const limit = Math.floor(range / 999) * 999;
+  const limit = Math.floor(range / ceiling) * ceiling;
   const random = new Uint32Array(1);
   for (let attempt = 0; attempt < 128; attempt++) {
     crypto.getRandomValues(random);
-    if (random[0] < limit) return String((random[0] % 999) + 1).padStart(3, "0");
+    if (random[0] < limit) return String((random[0] % ceiling) + 1).padStart(3, "0");
   }
   throw new Error("QRIS_UNIQUE_CODE_GENERATION_FAILED");
 }

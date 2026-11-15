@@ -14,6 +14,7 @@ import {
   buildDynamicQrisPayload,
   extractQrisMerchantProfile,
   generateQrisUniqueCode,
+  MAX_QRIS_TRANSACTION_AMOUNT,
   evaluateQrisReceipt
 } from "./qris.mjs";
 import {
@@ -465,14 +466,14 @@ async function handleTelegram(request, env, ctx) {
         await sendTelegram(env, chatId, "⛔ Pratinjau QRIS hanya dapat dijalankan admin melalui chat pribadi.");
         return;
       }
-      const match = text.match(/^\/qris_test(?:@[a-z0-9_]+)?\s+(\d{1,9})\s*$/i);
+      const match = text.match(/^\/qris_test(?:@[a-z0-9_]+)?\s+(\d{1,8})\s*$/i);
       if (!match) {
-        await sendTelegram(env, chatId, "Format: /qris_test <nominal>\nContoh: /qris_test 10000\nBatas pratinjau: Rp1–Rp100.000.000.");
+        await sendTelegram(env, chatId, "Format: /qris_test <nominal>\nContoh: /qris_test 10000\nBatas pratinjau: Rp1–Rp10.000.000.");
         return;
       }
       const amount = Number(match[1]);
-      if (!Number.isSafeInteger(amount) || amount < 1 || amount > 100000000) {
-        await sendTelegram(env, chatId, "⚠️ Nominal pratinjau harus berupa bilangan bulat Rp1 sampai Rp100.000.000.");
+      if (!Number.isSafeInteger(amount) || amount < 1 || amount > MAX_QRIS_TRANSACTION_AMOUNT) {
+        await sendTelegram(env, chatId, "⚠️ Nominal pratinjau harus berupa bilangan bulat Rp1 sampai Rp10.000.000.");
         return;
       }
       try {
@@ -2802,17 +2803,23 @@ async function createOrReuseQrisPayment(env, order) {
   const existing = await getQrisPaymentForOrder(env, order.orderId);
   if (existing) return existing;
   const baseAmount = Number(order.total);
-  if (!Number.isSafeInteger(baseAmount) || baseAmount <= 0 || baseAmount > 999999999999) {
+  if (!Number.isSafeInteger(baseAmount) || baseAmount <= 0) {
     throw new Error("QRIS_BASE_AMOUNT_INVALID");
+  }
+  if (baseAmount >= MAX_QRIS_TRANSACTION_AMOUNT) {
+    throw new Error("QRIS_BASE_AMOUNT_EXCEEDS_TRANSACTION_LIMIT");
   }
   const staticPayload = String(env.QRIS_STATIC_PAYLOAD || "").trim();
   const merchant = extractQrisMerchantProfile(staticPayload);
   const createdAt = new Date().toISOString();
   for (let attempt = 0; attempt < 60; attempt++) {
-    const uniqueCodeText = generateQrisUniqueCode();
+    const uniqueCodeText = generateQrisUniqueCode(
+      Math.min(999, MAX_QRIS_TRANSACTION_AMOUNT - baseAmount)
+    );
     const uniqueCode = Number(uniqueCodeText);
     const expectedAmount = baseAmount + uniqueCode;
-    if (!Number.isSafeInteger(expectedAmount) || expectedAmount <= baseAmount) {
+    if (!Number.isSafeInteger(expectedAmount) || expectedAmount <= baseAmount
+      || expectedAmount > MAX_QRIS_TRANSACTION_AMOUNT) {
       throw new Error("QRIS_EXPECTED_AMOUNT_INVALID");
     }
     const collision = await env.DB.prepare(
