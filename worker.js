@@ -714,13 +714,19 @@ function customerCategoryForProduct(row) {
 function customerCategoryTitle(key) {
   return CUSTOMER_CATEGORY_META[key]?.title || "Semua Produk";
 }
-function activeCustomerCatalogProducts(rows) {
+function customerCatalogProducts(rows) {
   return (rows || []).filter(row => {
     if (!row?.[0]) return false;
     const product = parseCatalogProduct(row);
-    return product.active && product.priceValid && product.stockValid;
+    return product.priceValid && product.stockValid;
   });
 }
+function customerProductCanBeOrdered(row) {
+  const product = parseCatalogProduct(row);
+  return product.active && product.priceValid && product.stockValid &&
+    (product.stock === null || product.stock > 0);
+}
+
 async function ensureCatalogHeaders(env) {
   const headers = await readSheet(env, "Katalog_Produk!A1:G1");
   if (!headers[0]?.[5] || !headers[0]?.[6]) {
@@ -1100,7 +1106,7 @@ async function handleTelegramCallback(env, query) {
     const product = parseCatalogProduct(p);
     if (!product.active || !product.priceValid || !product.stockValid) throw new Error("Produk tidak tersedia. Refresh katalog.");
     const category = customerCategoryForProduct(p);
-    const visibleProducts = activeCustomerCatalogProducts(rows).filter(row => customerCategoryForProduct(row) === category);
+    const visibleProducts = customerCatalogProducts(rows).filter(row => customerCategoryForProduct(row) === category);
     const index = visibleProducts.findIndex(row => String(row[0] || "").toUpperCase() === product.sku.toUpperCase());
     const page = index < 0 ? 0 : Math.floor(index / CUSTOMER_CATALOG_PAGE_SIZE);
     const canBuy = product.stock === null || product.stock > 0;
@@ -1620,10 +1626,10 @@ async function readTelegramCatalogRows(env, range = "Katalog_Produk!A2:G") {
 }
 
 async function showCustomerCategoryMenu(env, message) {
-  const products = activeCustomerCatalogProducts(await readTelegramCatalogRows(env));
+  const products = customerCatalogProducts(await readTelegramCatalogRows(env));
   if (!products.length) {
     await updateTelegramMessage(env, message, {
-      text: "🛍️ KATALOG SEITON.ID\n\nBelum ada produk aktif yang tersedia.",
+      text: "🛍️ KATALOG SEITON.ID\n\nBelum ada produk yang dapat ditampilkan.",
       replyMarkup: { inline_keyboard: [
         [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }],
         [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
@@ -1633,9 +1639,11 @@ async function showCustomerCategoryMenu(env, message) {
     return;
   }
   const counts = new Map();
+  let availableCount = 0;
   for (const row of products) {
     const category = customerCategoryForProduct(row);
     counts.set(category, (counts.get(category) || 0) + 1);
+    if (customerProductCanBeOrdered(row)) availableCount++;
   }
   const categoryButtons = CUSTOMER_CATEGORY_ORDER.filter(key => counts.has(key)).map(key => ({
     text: CUSTOMER_CATEGORY_META[key].button + " (" + counts.get(key) + ")",
@@ -1644,7 +1652,8 @@ async function showCustomerCategoryMenu(env, message) {
   const categoryRows = [];
   for (let i=0;i<categoryButtons.length;i+=2) categoryRows.push(categoryButtons.slice(i,i+2));
   await updateTelegramMessage(env, message, {
-    text: "🛍️ KATALOG SEITON.ID\n\nTersedia " + products.length + " produk aktif. Pilih kategori atau lihat semuanya.",
+    text: "🛍️ KATALOG SEITON.ID\n\nTerdaftar " + products.length + " produk di " + counts.size +
+      " kategori. Saat ini " + availableCount + " produk dapat dipesan. Produk nonaktif/stok habis tetap terlihat dengan statusnya.",
     replyMarkup: { inline_keyboard: [
       [{ text: "🛒 Semua Produk (" + products.length + ")", callback_data: "cat:items:all:0" }],
       ...categoryRows,
@@ -1659,12 +1668,12 @@ async function showCustomerCategoryMenu(env, message) {
 }
 
 async function showCustomerCatalogPage(env, message, page = 0, categoryKey = "all") {
-  const allProducts = activeCustomerCatalogProducts(await readTelegramCatalogRows(env));
+  const allProducts = customerCatalogProducts(await readTelegramCatalogRows(env));
   const safeCategory = categoryKey === "all" || CUSTOMER_CATEGORY_META[categoryKey] ? categoryKey : "all";
   const products = safeCategory === "all" ? allProducts : allProducts.filter(row => customerCategoryForProduct(row) === safeCategory);
   if (!products.length) {
     await updateTelegramMessage(env, message, {
-      text: "Tidak ada produk pada kategori " + customerCategoryTitle(safeCategory) + ".",
+      text: "Belum ada produk terdaftar pada kategori " + customerCategoryTitle(safeCategory) + ".",
       replyMarkup: { inline_keyboard: [
         [{ text: "⬅️ Semua Kategori", callback_data: "nav:catalog" }],
         [{ text: "🏠 Menu Utama", callback_data: "nav:home" }]
@@ -1677,18 +1686,31 @@ async function showCustomerCatalogPage(env, message, page = 0, categoryKey = "al
   const current = Math.max(0,Math.min(pages-1,Number.isInteger(page)?page:0));
   const visible = products.slice(current*CUSTOMER_CATALOG_PAGE_SIZE,(current+1)*CUSTOMER_CATALOG_PAGE_SIZE);
   const title = safeCategory === "all" ? "Semua Produk" : customerCategoryTitle(safeCategory);
-  const buttons = visible.map(row => {
+  const lines = [];
+  const buttons = [];
+  visible.forEach((row,index) => {
     const p = parseCatalogProduct(row);
-    const stock = p.stock === 0 ? "Habis" : p.stock === null ? "Ready" : "Stok " + p.stock;
-    let label = p.name + " · " + rupiah(p.price) + " · " + stock;
-    if (label.length > 64) label = label.slice(0,61) + "…";
-    return [{ text: label, callback_data: "view:" + p.sku }];
+    const canOrder = customerProductCanBeOrdered(row);
+    const status = !p.active ? "NONAKTIF"
+      : !p.stockValid || !p.priceValid ? "PERLU DIPERBARUI"
+        : p.stock === 0 ? "STOK HABIS" : "TERSEDIA";
+    lines.push(
+      (current*CUSTOMER_CATALOG_PAGE_SIZE+index+1) + ". " + p.name + " (" + p.sku + ")" +
+      "\n   Harga: " + rupiah(p.price) +
+      "\n   Status: " + status
+    );
+    if (canOrder) {
+      let label = p.name + " · " + rupiah(p.price);
+      if (label.length > 64) label = label.slice(0,61) + "…";
+      buttons.push([{ text: "🛍️ " + label, callback_data: "view:" + p.sku }]);
+    }
   });
   const nav = [];
   if (current>0) nav.push({text:"◀️ Sebelumnya",callback_data:"cat:items:"+safeCategory+":"+(current-1)});
   if (current<pages-1) nav.push({text:"Berikutnya ▶️",callback_data:"cat:items:"+safeCategory+":"+(current+1)});
   await updateTelegramMessage(env, message, {
-    text: "🛍️ " + title + " (" + (current+1) + "/" + pages + ")\nPilih produk untuk melihat foto, harga, stok, dan detail.",
+    text: "🛍️ " + title + " (" + (current+1) + "/" + pages + ")\n\n" +
+      lines.join("\n\n") + "\n\nPilih tombol produk yang tersedia untuk melihat foto dan membuat pesanan. Produk nonaktif/stok habis tidak dapat dibeli.",
     replyMarkup: { inline_keyboard: [
       ...buttons,
       ...(nav.length ? [nav] : []),
