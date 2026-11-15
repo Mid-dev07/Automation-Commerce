@@ -253,7 +253,17 @@ export async function createMidtransQrisCharge(env, order) {
     status: normalizeMidtransStatus(result.transaction_status),
     rawStatus: clean(result.transaction_status, 40),
     qrImageUrl,
-    expiresAt: clean(result.expiry_time, 80)
+    expiresAt: (() => {
+      const explicit = clean(result.expiry_time, 80);
+      if (explicit) return explicit;
+      const transactionTime = clean(result.transaction_time, 80);
+      const parsedTime = transactionTime
+        ? new Date(transactionTime.replace(" ", "T") + (/[zZ]|[+-]\d{2}:\d{2}$/.test(transactionTime) ? "" : "+07:00"))
+        : new Date();
+      const base = Number.isNaN(parsedTime.getTime()) ? new Date() : parsedTime;
+      const defaultMinutes = acquirer === "airpay_shopee" ? 5 : 15;
+      return new Date(base.getTime() + defaultMinutes * 60 * 1000).toISOString();
+    })()
   };
 }
 
