@@ -4,7 +4,11 @@ import { extractVerificationCode, extractVerificationCodeDetails } from "../mail
 import { parseEmail } from "../mail-automation/email-parser.js";
 
 test("detects Meta confirmation-code wording and code on a following line", () => {
-  const body = "Please confirm your email for your new Meta account by entering the following confirmation code.\n\nConfirmation code\n482913";
+  const body = [
+    "Please confirm your email for your new Meta account by entering the following confirmation code.",
+    "Confirmation code",
+    "482913"
+  ].join("\n");
   assert.equal(extractVerificationCode("", body), "482913");
 });
 
@@ -22,7 +26,7 @@ test("detects application-specific alphanumeric verification codes", () => {
 
 test("detects Indonesian verification and login language", () => {
   assert.equal(extractVerificationCode("", "Masukkan kode verifikasi berikut: 731905"), "731905");
-  assert.equal(extractVerificationCode("", "Kode login Anda\n194827\nJangan bagikan kode ini kepada siapa pun."), "194827");
+  assert.equal(extractVerificationCode("", ["Kode login Anda", "194827", "Jangan bagikan kode ini kepada siapa pun."].join("\n")), "194827");
 });
 
 test("detects common Spanish and French verification-code labels", () => {
@@ -43,7 +47,7 @@ test("does not mistake order numbers or phone numbers for OTPs", () => {
 test("does not choose between two equally supported verification codes", () => {
   const result = extractVerificationCodeDetails(
     "",
-    "Previous verification code: 111222.\nNew verification code: 333444."
+    ["Previous verification code: 111222.", "New verification code: 333444."].join("\n")
   );
   assert.equal(result.code, "");
   assert.equal(result.status, "ambiguous");
@@ -75,7 +79,7 @@ test("searches both MIME alternatives when the OTP appears only in the HTML part
     "<html><body><p>Enter your confirmation code:</p><strong>826410</strong></body></html>",
     "--mail-boundary--",
     ""
-  ].join("\r\n");
+  ].join("\n");
   const parsed = parseEmail(raw);
   assert.match(parsed.text, /plain text notification/i);
   assert.match(parsed.searchText, /826410/);
