@@ -36,5 +36,7 @@ jobs:
         run: node --check mail-automation/worker.js
       - name: Check Mail Automation email parser syntax
         run: node --check mail-automation/email-parser.js
+      - name: Check Mail Automation OTP extractor syntax
+        run: node --check mail-automation/otp-extractor.js
       - name: Run regression tests
         run: node --test tests/*.test.cjs tests/*.test.mjs otp-portal/*.test.mjs
