@@ -3,6 +3,7 @@ import { parseEmail } from "./email-parser.js";
 const PANEL_ORIGIN = "https://mail.seiton.biz.id";
 const PANEL_HOST = "mail.seiton.biz.id";
 const MAIL_DOMAIN = "seiton.my.id";
+const LEGACY_MAIL_DOMAIN = "inbox.seiton.biz.id";
 const BASE_LOCAL_PART = "receiver";
 const MAX_RAW_BYTES = 1024 * 1024;
 const MAX_BODY_CHARS = 18000;
@@ -151,7 +152,8 @@ async function passwordHash(password, saltBytes) {
 function parseAliasRecipient(value) {
   const normalized = clean(value, 320).toLowerCase();
   const at = normalized.lastIndexOf("@");
-  if (at <= 0 || normalized.slice(at + 1) !== MAIL_DOMAIN) return null;
+  const recipientDomain = normalized.slice(at + 1);
+  if (at <= 0 || (recipientDomain !== MAIL_DOMAIN && recipientDomain !== LEGACY_MAIL_DOMAIN)) return null;
   const localPart = normalized.slice(0, at);
   const match = localPart.match(/^receiver\+([a-f0-9]{24})$/);
   if (!match) return null;
