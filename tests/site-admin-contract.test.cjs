@@ -126,3 +126,44 @@ test("owner admin audit UI labels order-state and Telegram actions", () => {
   assert.match(worker, /Produk diarsipkan/);
   assert.match(worker, /Isi tidak disimpan|isi tidak disimpan/);
 });
+
+
+test("owner panel integrates bot health, Telegram webhook, catalog and recent orders", () => {
+  assert.ok(worker.includes("id='bot-console'"));
+  assert.ok(worker.includes("id='botMetrics'"));
+  assert.ok(worker.includes("id='botProducts'"));
+  assert.ok(worker.includes("id='botOrders'"));
+  assert.ok(worker.includes("loadBotConsole()"));
+  assert.ok(worker.includes("/api/admin/bot/diagnostics"));
+  assert.ok(worker.includes("/api/admin/bot/data"));
+});
+
+test("owner panel uses the existing authenticated service binding for bot catalog CRUD", () => {
+  assert.ok(worker.includes('if(u.pathname==="/api/admin/bot/data"&&req.method==="GET")'));
+  assert.ok(worker.includes('if(u.pathname==="/api/admin/bot/diagnostics"&&req.method==="GET")'));
+  assert.ok(worker.includes('if(u.pathname==="/api/admin/bot/products"&&req.method==="POST")'));
+  assert.ok(worker.includes("Authorization:\"Bearer \"+session.token"));
+  assert.ok(worker.includes("https://internal/api/admin/data"));
+  assert.ok(worker.includes("https://internal/api/admin/products"));
+  assert.ok(worker.includes("if(!sameOriginAdmin(req))return secure(j"));
+  assert.ok(worker.includes("const session=await activeSession(req,env)"));
+});
+
+test("owner panel exposes a guided add/edit product form and archives instead of hard deleting", () => {
+  assert.ok(worker.includes("id='botProductForm'"));
+  assert.ok(worker.includes("id='botSku'"));
+  assert.ok(worker.includes("id='botPhoto'"));
+  assert.ok(worker.includes("original_sku:editingBotSku"));
+  assert.ok(worker.includes("action:'delete'"));
+  assert.ok(worker.includes("Arsipkan"));
+});
+
+test("bot inline dashboard JavaScript parses with product-management handlers", () => {
+  const start=worker.indexOf("function page(){");
+  const end=worker.indexOf("export default",start);
+  const html=vm.runInNewContext(worker.slice(start,end)+"\npage();");
+  const scriptStart=html.indexOf("<script>");
+  const scriptEnd=html.indexOf("</script>",scriptStart);
+  assert.ok(scriptStart>=0&&scriptEnd>scriptStart);
+  new vm.Script(html.slice(scriptStart+8,scriptEnd),{filename:"site-admin-bot-console.js"});
+});
