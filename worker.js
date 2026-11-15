@@ -2821,24 +2821,48 @@ function buildReportExportsFromData(data) {
     inventory: { csv: inventoryCsv, filename: "Seiton_Stok_Produk_" + dateStamp + ".csv", caption: "📦 Katalog dan estimasi nilai stok berdasarkan harga jual" }
   };
 }
-async function buildReportExports(env) {
+function isValidReportDate(value) {
+  if (!value) return true;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(value + "T00:00:00.000Z");
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0,10) === value;
+}
+async function buildReportExports(env, range = {}) {
   const data = await loadAdminDashboardData(env);
+  const from = String(range.from || "");
+  const to = String(range.to || "");
+  if (from || to) {
+    data.orders = (data.orders || []).filter(order => {
+      const day = localDateKey(order.created_at);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return false;
+      return (!from || day >= from) && (!to || day <= to);
+    });
+  }
   return buildReportExportsFromData(data);
 }
 async function handleAdminDashboardExport(request, env) {
   if (!(await verifyDashboardAccess(request, env))) return json({ ok: false, error: "Akses dashboard tidak valid atau sudah kedaluwarsa." }, 401);
-  const type = new URL(request.url).searchParams.get("type") || "";
+  const url = new URL(request.url);
+  const type = url.searchParams.get("type") || "";
+  const from = url.searchParams.get("from") || "";
+  const to = url.searchParams.get("to") || "";
   if (!["orders", "finance", "daily", "inventory"].includes(type)) return json({ ok: false, error: "Jenis export tidak valid." }, 400);
+  if (!isValidReportDate(from) || !isValidReportDate(to) || (from && to && from > to)) {
+    return json({ ok: false, error: "Rentang tanggal laporan tidak valid. Gunakan tanggal kalender Asia/Jakarta." }, 400);
+  }
   try {
-    const report = (await buildReportExports(env))[type];
+    const report = (await buildReportExports(env,{from,to}))[type];
+    const rangeSuffix = type === "inventory" ? "_snapshot" : (from || to ? "_" + (from || "awal") + "_" + (to || "akhir") : "");
+    const filename = report.filename.replace(/\.csv$/i,"") + rangeSuffix + ".csv";
     return new Response(report.csv, { headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": 'attachment; filename="' + report.filename + '"',
+      "Content-Disposition": 'attachment; filename="' + filename + '"',
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff"
     } });
   } catch (error) {
-    return json({ ok: false, error: "Gagal membuat laporan: " + error.message }, 502);
+    console.error(JSON.stringify({level:"error",event:"admin_report_export_failed",type,from,to,error:String(error && error.message || error)}));
+    return json({ ok: false, error: "Gagal membuat laporan. Periksa kesiapan data dan coba kembali." }, 502);
   }
 }
 async function sendTelegramDocument(env, chatId, csv, filename, caption = "") {

@@ -64,3 +64,36 @@ Mutasi memeriksa Origin allowlist, sesi owner aktif, JSON body dengan batas ukur
 - Workflow `Worker audit checks` menjalankan `node --check site-admin/worker.js` dan seluruh regression tests pada Pull Request.
 - Browser UAT untuk desktop/mobile dan pengujian end-to-end tetap wajib sebelum merge/deploy.
 - Belum ada deployment produksi.
+
+## Unified Owner Control Center — P2 reports and analytics
+
+P2 implementation is on branch `feat/unified-owner-control-center-p2`, based on the merged P1 mainline.
+
+### Business reports available in the owner panel
+- Date range filters use calendar dates in `Asia/Jakarta`, inclusive at both ends.
+- Revenue is calculated only from confirmed paid order states; pending, rejected, and cancelled orders are separated.
+- Summary metrics include order count, paid order count, confirmed receipts, outstanding amount, average paid order value, rejected verifications, and cancellations.
+- Visual breakdowns show daily confirmed revenue, best-selling products by units, payment-method revenue, and latest order statuses.
+- Audit history already merges owner-panel metadata and Order Worker operational events; P2 adds client-side search and source filters.
+
+### Export facade
+- `GET /api/control/export?type=orders|finance|daily|inventory&from=YYYY-MM-DD&to=YYYY-MM-DD`
+- The type and date range are allowlisted/validated by both Owner Worker and Order Worker.
+- Transaction exports respect the inclusive `Asia/Jakarta` date range.
+- Inventory is a current catalogue snapshot, not a date-series report.
+- CSV is streamed from the Order Worker service binding with `private, no-store` headers; browser code never calls the Order Worker public hostname.
+- A `REPORT_EXPORT_SENT` audit event records only report type and selected date range. It never stores report contents, customer data, proof bytes, mailbox contents, or OTP values.
+
+### Analytics boundaries
+- This screen is transaction/business analytics from the Order Worker data, not website traffic analytics.
+- GA4 visitor/session/page-view metrics are explicitly marked unavailable until GA4 Data API access and read-scoped credentials are integrated and verified.
+- Inventory value shown in the exported snapshot is an indicative selling-price × stock calculation, not an accounting valuation.
+
+### P1 runtime wiring correction
+A post-merge source review found that the P1 event-handler block had been appended outside the page's inline script/IIFE. This branch moves those handlers into the owner application scope before the initial session check and adds a regression test. This is a source fix; production has not been deployed.
+
+### CI and release gates
+- `tests/site-admin-p2-contract.test.cjs` covers P1 handler placement, report UI, paid/pending classification, date validation, export streaming, audit metadata, and analytics boundaries.
+- Worker audit CI still runs all `tests/*.test.cjs` and `tests/*.test.mjs`, plus Worker syntax checks.
+- Browser UAT and end-to-end export/download checks remain required before merge/deploy.
+- No production Worker, Pages configuration, D1, QRIS flag, Telegram webhook, or Google Analytics setting was changed.
