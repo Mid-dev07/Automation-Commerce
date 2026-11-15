@@ -195,3 +195,12 @@ test("payment method migration seeds safe defaults and preserves old orders", ()
   assert.match(paymentMethodsSchema, /'COD','Bayar di Tempat \(COD\)',1/);
   assert.doesNotMatch(paymentMethodsSchema, /DROP TABLE|DELETE FROM orders|UPDATE orders/);
 });
+
+
+test("catalog mirror outbox claim preserves event_type for dispatcher routing", () => {
+  const claimStart = layer.indexOf("export async function claimSheetMirrorOutbox");
+  const claimEnd = layer.indexOf("\nexport async function completeSheetMirrorOutbox", claimStart);
+  assert.ok(claimStart >= 0 && claimEnd > claimStart, "outbox claim function must exist");
+  assert.match(layer.slice(claimStart, claimEnd), /RETURNING id,event_type,aggregate_id,payload_json,attempts/);
+  assert.match(worker, /event\.event_type === "CATALOG_MIRROR"/);
+});
