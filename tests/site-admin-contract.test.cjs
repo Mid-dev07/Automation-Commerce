@@ -81,10 +81,10 @@ test("owner admin audit and session controls are visible in the panel", () => {
 
 test("owner admin inline dashboard JavaScript parses", () => {
   const start=worker.indexOf("function page(){");
-  const end=worker.indexOf("export default",start);
+  const end=worker.indexOf("async function parseControlJson",start);
   assert.ok(start>=0&&end>start);
   const pageFn=worker.slice(start,end);
-  const html=vm.runInNewContext(pageFn+"\npage();");
+  const html=new vm.Script(pageFn+"\npage();",{filename:"owner-page.js"}).runInNewContext();
   const scriptStart=html.indexOf("<script>");
   const scriptEnd=html.indexOf("</script>",scriptStart);
   assert.ok(scriptStart>=0&&scriptEnd>scriptStart);
@@ -160,7 +160,7 @@ test("owner panel exposes a guided add/edit product form and archives instead of
 
 test("bot inline dashboard JavaScript parses with product-management handlers", () => {
   const start=worker.indexOf("function page(){");
-  const end=worker.indexOf("export default",start);
+  const end=worker.indexOf("async function parseControlJson",start);
   const html=vm.runInNewContext(worker.slice(start,end)+"\npage();");
   const scriptStart=html.indexOf("<script>");
   const scriptEnd=html.indexOf("</script>",scriptStart);
