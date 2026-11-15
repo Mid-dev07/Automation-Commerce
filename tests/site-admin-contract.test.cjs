@@ -81,7 +81,7 @@ test("owner admin audit and session controls are visible in the panel", () => {
 
 test("owner admin inline dashboard JavaScript parses", () => {
   const start=worker.indexOf("function page(){");
-  const end=worker.indexOf("export default",start);
+  const end=worker.indexOf("async function parseControlJson",start);
   assert.ok(start>=0&&end>start);
   const pageFn=worker.slice(start,end);
   const html=new vm.Script(pageFn+"\npage();",{filename:"owner-page.js"}).runInNewContext();
