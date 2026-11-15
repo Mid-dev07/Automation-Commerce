@@ -879,7 +879,14 @@ async function handleAdminProductWizardReply(env, chatId, actorId, input, prompt
   const index = Number(row.step_index);
   const field = steps[index];
   if (!field || field !== fieldFromPrompt) throw new Error("Tahap formulir ini sudah terlewati. Balas pesan formulir terbaru.");
-  const parsed = parseProductWizardValue(field,input,draft[field],row.mode);
+  let parsed;
+  try {
+    parsed = parseProductWizardValue(field,input,draft[field],row.mode);
+  } catch (error) {
+    await sendTelegram(env,chatId,"⚠️ " + error.message + "\\nCoba isi bagian ini kembali.");
+    await askAdminProductField(env,chatId,formId,field,draft[field],row.mode);
+    return;
+  }
   if (parsed.cancel) {
     await env.DB.prepare("DELETE FROM admin_product_drafts WHERE admin_id=? AND form_id=?")
       .bind(String(chatId),formId).run();
@@ -933,7 +940,20 @@ async function handleAdminProductWizardConfirm(env, message, chatId, actorId, ac
   }
   if (action !== "save") throw new Error("Aksi formulir tidak dikenal.");
   const product = JSON.parse(row.draft_json || "{}");
-  const result = await saveCatalogProduct(env,product,String(row.original_sku || ""));
+  let result;
+  try {
+    result = await saveCatalogProduct(env,product,String(row.original_sku || ""));
+  } catch (error) {
+    await updateTelegramMessage(env,message,{
+      text:"⚠️ Produk belum tersimpan: " + String(error.message || "Kesalahan validasi") +
+        "\\nData formulir masih disimpan. Batalkan lalu mulai ulang bila perlu.",
+      replyMarkup:{inline_keyboard:[
+        [{text:"✖️ Batal",callback_data:"adm:productform:cancel:"+formId}]
+      ]},
+      clearMedia:true
+    });
+    return;
+  }
   await recordAdminActivity(env,{
     actorId,
     action:result === "updated" ? "PRODUCT_UPDATED" : "PRODUCT_CREATED",
