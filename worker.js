@@ -2543,7 +2543,10 @@ async function handleAdminPaymentMethods(request, env) {
       const accountHolder = String(body.account_holder || "").trim().slice(0,100);
       const accountNumber = String(body.account_number || "").replace(/[\s-]/g,"");
       const note = String(body.note || "").trim().slice(0,200);
-      const enabled = body.enabled !== false;
+      const enabled = body.enabled === undefined ? true : body.enabled;
+      if (typeof enabled !== "boolean") {
+        return json({ok:false,error:"Status rekening tidak valid."},400);
+      }
       if (!/^[A-Za-z0-9_-]{8,80}$/.test(accountId)
         || !bankName || !accountHolder || !/^\d{5,32}$/.test(accountNumber)) {
         return json({ok:false,error:"Lengkapi nama bank, nama pemilik, dan nomor rekening yang valid (5–32 digit)."},400);
@@ -3108,7 +3111,14 @@ async function handleQrisPaymentShow(env, message, chatId, userId, orderId) {
     });
     return;
   }
-  const payment = await createOrReuseQrisPayment(env, {
+  if (CANCELLED_ORDER_STATUSES.includes(String(order.status || "").toUpperCase())) {
+    await updateTelegramMessage(env, message, {
+      text: "⛔ Pesanan ini sudah dibatalkan. QRIS tidak dapat ditampilkan kembali. Jika Anda terlanjur membayar, hubungi admin dan kirim bukti transaksi untuk rekonsiliasi.",
+      replyMarkup: customerMenuKeyboard(), clearMedia: true
+    });
+    return;
+  }
+    const payment = await createOrReuseQrisPayment(env, {
     orderId: order.order_id, total: Number(order.total)
   });
   if (payment.status === "PAID") {
