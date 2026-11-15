@@ -63,7 +63,7 @@ function splitEntity(raw){
 }
 
 function parameter(value,name){
-  const re=new RegExp("(?:^|;)\\s*"+name+"\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^;\\s]*))","i");
+  const re=new RegExp("(?:^|;)\s*"+name+"\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^;\s]*))","i");
   const match=String(value||"").match(re);
   return match?(match[1]??match[2]??match[3]??"").trim():"";
 }
@@ -93,7 +93,7 @@ function stripHtml(value){
     .replace(/&#39;|&apos;/gi,"'")
     .replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Number(n)||0))
     .replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCodePoint(parseInt(n,16)||0))
-    .replace(/[\\u200B-\\u200D\\u2060\\uFEFF]/g,"")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g,"")
     .replace(/[ \t]+/g," ")
     .replace(/\n[ \t]+/g,"\n")
     .trim();
@@ -154,13 +154,13 @@ export function parseEmail(raw){
   const uniqueSearchableParts=[];
   const seenSearchableParts=new Set();
   for(const part of searchableParts){
-    const key=part.normalize("NFKC").replace(/\\s+/g," ").trim().toLowerCase();
+    const key=part.normalize("NFKC").replace(/\s+/g," ").trim().toLowerCase();
     if(!key||seenSearchableParts.has(key))continue;
     seenSearchableParts.add(key);
     uniqueSearchableParts.push(part);
   }
   const text=plainParts[0]?.text||htmlText[0]||"";
-  const searchText=uniqueSearchableParts.join("\\n");
+  const searchText=uniqueSearchableParts.join("\n");
   return {
     from:decodeHeaderWord(headers.from||""),
     subject:decodeHeaderWord(headers.subject||"(Tanpa subjek)"),
