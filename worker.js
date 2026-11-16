@@ -369,7 +369,7 @@ async function handleTelegram(request, env, ctx) {
       await handlePaymentProofUpload(env, message, chatId, customerId);
       return;
     }
-    if (isAdmin(chatId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
+    if (isAdmin(customerId, env) && message.reply_to_message?.text?.startsWith("📝 FORM PRODUK SEITON")) {
       try { await handleAdminProductWizardReply(env, chatId, customerId, text, message.reply_to_message.text); }
       catch (error) {
         await sendTelegram(env, chatId, "⚠️ " + error.message + "\nSilakan balas pesan formulir terbaru. Ketik /batal untuk membatalkan.");
@@ -378,7 +378,7 @@ async function handleTelegram(request, env, ctx) {
     }
     const handoffCommand = parseMessagingAdminCommand(text);
     if (handoffCommand.kind !== "UNKNOWN") {
-      if (!isAdmin(chatId, env)) {
+      if (!isAdmin(customerId, env)) {
         await sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
         return;
       }
@@ -467,7 +467,7 @@ async function handleTelegram(request, env, ctx) {
       }
     }
     if (text === "/migrasi_d1") {
-      if (!isAdmin(chatId,env)) return sendTelegram(env,chatId,"⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId,env)) return sendTelegram(env,chatId,"⛔ Perintah ini khusus admin.");
       if (!env.DB || !env.ORDER_COORDINATOR) return sendTelegram(env,chatId,"⚠️ Binding D1/ORDER_COORDINATOR belum tersedia. Migrasi belum dapat dijalankan.");
       const state = await transactionReadiness(env);
       if (state.ready) return sendTelegram(env,chatId,"✅ Lapisan transaksi D1 sudah aktif. Tidak ada migrasi ulang yang diperlukan.");
@@ -485,7 +485,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text === "/cekstok") {
-      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const stock = await listDigitalStockD1(env.DB);
       const lines = ["📦 STOK PRODUK DIGITAL"];
       for (const category of ["muse_starter","muse_bisnis"]) {
@@ -497,7 +497,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/addstock")) {
-      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const match = text.match(/^\/addstock(?:@[a-z0-9_]+)?\s+(muse_starter|muse_bisnis)\s*\n([\s\S]+)$/i);
       if (!match) return sendTelegram(env,chatId,"Format: /addstock muse_starter\nemail@domain.biz.id|password|catatan");
       try {
@@ -518,7 +518,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/delstock")) {
-      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const match=text.match(/^\/delstock(?:@[a-z0-9_]+)?\s+(muse_starter|muse_bisnis)\s+(\S+)$/i);
       if(!match)return sendTelegram(env,chatId,"Format: /delstock muse_starter email@domain.biz.id");
       const category=match[1].toLowerCase();
@@ -529,7 +529,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/cekorder")) {
-      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const reference=text.split(/\s+/)[1];
       if(!reference)return sendTelegram(env,chatId,"Format: /cekorder <order_ref>");
       const item=await getDigitalOrderD1(env,reference);
@@ -541,7 +541,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (/^\/qris_test(?:@[a-z0-9_]+)?(?:\s|$)/i.test(text)) {
-      if (message.chat.type !== "private" || !isAdmin(customerId, env) || !isAdmin(chatId, env)) {
+      if (message.chat.type !== "private" || !isAdmin(customerId, env) || !isAdmin(customerId, env)) {
         await sendTelegram(env, chatId, "⛔ Pratinjau QRIS hanya dapat dijalankan admin melalui chat pribadi.");
         return;
       }
@@ -593,7 +593,7 @@ async function handleTelegram(request, env, ctx) {
     }
 
     if (text.startsWith("/approve")) {
-      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const reference=text.split(/\s+/)[1];
       if(!reference)return sendTelegram(env,chatId,"Format: /approve <order_ref>");
       try {
@@ -615,7 +615,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/ambilsetup")) {
-      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const setupId=text.split(/\s+/)[1];
       if(!setupId)return sendTelegram(env,chatId,"Format: /ambilsetup <setup_id>");
       const setup=await getMuseBusinessSetupD1(env,setupId);
@@ -634,7 +634,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/laporan")) {
-      if (!isAdmin(chatId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
+      if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const report = await buildAdminReport(env);
       await recordAdminActivity(env, { actorId: customerId, action: "REPORT_GENERATED", resourceType: "sales_report", summary: { report_type: "sales_summary" } });
       await sendTelegram(env, chatId, report);
@@ -670,7 +670,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/start") || text.startsWith("/help")) {
-      const admin = isAdmin(chatId, env);
+      const admin = isAdmin(userId, env);
       if (admin) {
         await sendSeitonWelcome(env, chatId, true);
         await recordAdminActivity(env, {
@@ -690,7 +690,7 @@ async function handleTelegram(request, env, ctx) {
       }
       return;
     }
-    if (!isAdmin(chatId, env)) {
+    if (!isAdmin(customerId, env)) {
       if (message.chat.type && message.chat.type !== "private") return;
       if (await messagingCoreReady(env)) {
         const event = telegramMessagingEvent(update, message, text);
@@ -1321,7 +1321,7 @@ async function handleTelegramCallback(env, query) {
   const chatId = String(message?.chat?.id || query.from?.id || "");
   const userId = String(query.from?.id || "");
   const data = String(query.data || "");
-  const admin = isAdmin(chatId, env);
+  const admin = isAdmin(customerId, env);
   await answerTelegramCallback(env, query.id);
 
   if (data.startsWith("hf:")) {
@@ -1519,7 +1519,7 @@ async function handleTelegramCallback(env, query) {
     const parts = data.split(":"); const sku = parts[1]; const qty = Number(parts[2]); const method = parts[3];
     const result = await createOrder(env, { sku: sku.toUpperCase(), quantity: qty, paymentMethod: method,
       channel: "telegram", customerId: userId, customerName: [query.from.first_name, query.from.last_name].filter(Boolean).join(" "),
-      idempotencyKey: String(query.id || "") });
+      idempotencyKey: ["telegram", userId, chatId, String(message?.message_id || query.id || ""), sku.toUpperCase(), String(qty), method].join(":") });
     if (String(method).toUpperCase() === "QRIS") {
       await deleteTelegramMessage(env, message);
       try {
