@@ -541,7 +541,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (/^\/qris_test(?:@[a-z0-9_]+)?(?:\s|$)/i.test(text)) {
-      if (message.chat.type !== "private" || !isAdmin(customerId, env) || !isAdmin(customerId, env)) {
+      if (message.chat.type !== "private" || !isAdmin(customerId, env)) {
         await sendTelegram(env, chatId, "⛔ Pratinjau QRIS hanya dapat dijalankan admin melalui chat pribadi.");
         return;
       }
@@ -670,7 +670,7 @@ async function handleTelegram(request, env, ctx) {
       return;
     }
     if (text.startsWith("/start") || text.startsWith("/help")) {
-      const admin = isAdmin(userId, env);
+      const admin = isAdmin(customerId, env);
       if (admin) {
         await sendSeitonWelcome(env, chatId, true);
         await recordAdminActivity(env, {
@@ -1321,7 +1321,7 @@ async function handleTelegramCallback(env, query) {
   const chatId = String(message?.chat?.id || query.from?.id || "");
   const userId = String(query.from?.id || "");
   const data = String(query.data || "");
-  const admin = isAdmin(customerId, env);
+  const admin = isAdmin(userId, env);
   await answerTelegramCallback(env, query.id);
 
   if (data.startsWith("hf:")) {
