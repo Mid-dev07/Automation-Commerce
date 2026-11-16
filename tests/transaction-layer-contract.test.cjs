@@ -56,7 +56,7 @@ test("Worker fails closed during migration and exposes admin-only bootstrap", ()
   assert.match(worker, /text === "\/migrasi_d1"/);
   assert.match(worker, /isAdmin\(customerId,env\)/);
   assert.match(worker, /const admin = isAdmin\(userId, env\)/);
-  assert.match(worker, /idempotencyKey: \["telegram", userId, chatId, String\(message\?\.message_id \|\| query\.id \|\| ""\), sku\.toUpperCase\(\), String\(qty\), method\]\.join\(": "\)/);
+  assert.match(worker, /idempotencyKey: \["telegram", userId, chatId, String\(message\?\.message_id \|\| query\.id \|\| ""\), sku\.toUpperCase\(\), String\(qty\), method\]\.join\(":"\)/);
   assert.match(worker, /transaction_store: tx\.ready \? "READY"/);
 });
 
