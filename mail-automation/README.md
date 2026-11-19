@@ -14,8 +14,8 @@ https://mail.seiton.biz.id/; mailbox addresses are created on seiton.my.id.
   receiver+<24-hex>@inbox.seiton.biz.id remain readable during the migration. Their
   original expiry is retained; no existing row or message is rewritten.
 - Maximum accepted messages per mailbox remains 100.
-- The cleanup cron remains every 10 minutes. It expires mailboxes and removes messages
-  belonging to expired mailboxes.
+- The cleanup cron remains every 10 minutes. It expires new TMail mailboxes and removes
+  their messages after expiry. Legacy plus-alias messages keep the previous 30-day retention.
 
 ## Runtime and bindings
 
