@@ -425,7 +425,7 @@ async function handleAliasRevoke(request, env, id) {
 
 async function handleMessagesGet(url, env) {
   const aliasId = clean(url.searchParams.get("mailboxId") || url.searchParams.get("aliasId"), 64);
-  if (!/^[0-9a-f-]{36}$/i.test(aliasId)) return responseJson({ ok: false, error: "Pilih alias yang valid." }, 400);
+  if (!/^[0-9a-f-]{36}$/i.test(aliasId)) return responseJson({ ok: false, error: "Pilih mailbox yang valid." }, 400);
   const alias = await env.MAIL_DB.prepare(
     "SELECT id,slug,status,expires_at FROM mail_aliases WHERE id=? LIMIT 1"
   ).bind(aliasId).first();
@@ -1105,9 +1105,9 @@ function renderPanel(nonce, configured) {
     "<div id=\"authStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div><div class=\"muted-note\">Panel hanya menerima email masuk. Ini bukan layanan IMAP/POP dan tidak mengirim email keluar.</div></section>" +
     "<section id=\"dashboard\" hidden><div class=\"topbar\"><div><h1>TMail inbox</h1><p>Buat mailbox acak, terima email dan kode verifikasi, lalu biarkan kedaluwarsa otomatis setelah 10 menit.</p></div><div class=\"top-actions\"><button id=\"refresh\" class=\"button secondary\" type=\"button\">Perbarui inbox</button><button id=\"logout\" class=\"button danger\" type=\"button\">Keluar</button></div></div>" +
     "<div id=\"dashboardStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div>" +
-    "<div class=\"stats\"><div class=\"stat\"><strong id=\"aliasCount\">0</strong> mailbox aktif</div><div class=\"stat\"><strong id=\"messageCount\">0</strong> pesan di alias terpilih</div></div>" +
+    "<div class=\"stats\"><div class=\"stat\"><strong id=\"aliasCount\">0</strong> mailbox aktif</div><div class=\"stat\"><strong id=\"messageCount\">0</strong> pesan di mailbox terpilih</div></div>" +
     "<div class=\"grid\"><section class=\"panel\"><h2>Buat mailbox baru</h2><form id=\"createAlias\" class=\"create-row\"><div><label for=\"aliasLabel\">Label (opsional)</label><input id=\"aliasLabel\" maxlength=\"80\" placeholder=\"Contoh: akun layanan A\"></div><div><label for=\"aliasTtl\">Masa aktif</label><select id=\"aliasTtl\"><option value=\"600\" selected>10 menit</option></select></div><div class=\"submit-cell\"><label>&nbsp;</label><button class=\"button\" type=\"submit\">Buat TMail</button></div></form><p class=\"muted-note\">Alamat unik akan disalin otomatis setelah dibuat. Setiap mailbox maksimal menerima 100 pesan.</p><div id=\"aliases\" class=\"alias-list\"></div></section>" +
-    "<section class=\"panel\"><h2>Pesan masuk</h2><p id=\"selectedAddress\" class=\"selected-address\">Pilih alias untuk melihat inbox.</p><div id=\"messages\" class=\"message-list\"><p class=\"empty\">Pilih alias di sebelah kiri.</p></div></section></div>" +
+    "<section class=\"panel\"><h2>Pesan masuk</h2><p id=\"selectedAddress\" class=\"selected-address\">Pilih mailbox untuk melihat inbox.</p><div id=\"messages\" class=\"message-list\"><p class=\"empty\">Pilih mailbox di sebelah kiri.</p></div></section></div>" +
     "<p class=\"footnote\">Email untuk mailbox yang tidak dikenal atau sudah kedaluwarsa akan ditolak. Isi email dihapus saat mailbox berakhir. Lampiran belum disimpan. Jangan gunakan alamat ini untuk pemulihan akun kritis atau menerima informasi finansial penting.</p></section>" +
     "</main><script nonce=\"" + nonce + "\">window.MAIL_SETUP_MODE=" + mode + ";</script><script nonce=\"" + nonce + "\">" + CLIENT_SCRIPT + "</script></body></html>";
 }
