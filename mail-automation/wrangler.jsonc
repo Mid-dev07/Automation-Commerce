@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "seiton-mail-automation",
+  "main": "worker.js",
+  "compatibility_date": "2026-11-14",
+  "observability": {
+    "enabled": true
+  },
+  "d1_databases": [
+    {
+      "binding": "MAIL_DB",
+      "database_name": "seiton-mail-automation-prod",
+      "database_id": "66615e0a-401b-4c84-9244-9d052c75722f"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/10 * * * *"]
+  }
+}
