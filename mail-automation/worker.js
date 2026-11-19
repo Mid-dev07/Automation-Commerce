@@ -427,10 +427,13 @@ async function handleMessagesGet(url, env) {
   const aliasId = clean(url.searchParams.get("mailboxId") || url.searchParams.get("aliasId"), 64);
   if (!/^[0-9a-f-]{36}$/i.test(aliasId)) return responseJson({ ok: false, error: "Pilih alias yang valid." }, 400);
   const alias = await env.MAIL_DB.prepare(
-    "SELECT id,status,expires_at FROM mail_aliases WHERE id=? LIMIT 1"
+    "SELECT id,slug,status,expires_at FROM mail_aliases WHERE id=? LIMIT 1"
   ).bind(aliasId).first();
   if (!alias) return responseJson({ ok: false, error: "Mailbox tidak ditemukan." }, 404);
-  if (alias.status !== "ACTIVE" || Number(alias.expires_at) <= Date.now()) {
+  // TMail mailboxes are unreadable after their 10-minute TTL. Legacy aliases retain
+  // their previous owner-inbox behavior until the existing 30-day cleanup removes them.
+  const isTMailMailbox = /^[a-f0-9]{32}$/.test(String(alias.slug || ""));
+  if (isTMailMailbox && (alias.status !== "ACTIVE" || Number(alias.expires_at) <= Date.now())) {
     return responseJson({ ok: false, error: "Mailbox sudah kedaluwarsa." }, 410);
   }
   const result = await env.MAIL_DB.prepare(
@@ -1187,7 +1190,7 @@ async function scheduledCleanup(env) {
   const retentionCutoff = now - 30 * 24 * 60 * 60 * 1000;
   await env.MAIL_DB.batch([
     env.MAIL_DB.prepare("UPDATE mail_aliases SET status='EXPIRED' WHERE status='ACTIVE' AND expires_at<=?").bind(now),
-    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE alias_id IN (SELECT id FROM mail_aliases WHERE expires_at<=?)").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE alias_id IN (SELECT id FROM mail_aliases WHERE length(slug)=32 AND expires_at<=?)").bind(now),
     env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE received_at<?").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_aliases WHERE expires_at<? AND status!='ACTIVE'").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_sessions WHERE expires_at<=?").bind(now),
