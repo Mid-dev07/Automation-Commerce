@@ -12,7 +12,7 @@ const MAX_MESSAGES_PER_ALIAS = 100;
 const SESSION_TTL_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
-const ALLOWED_TTLS = new Set([900, 3600, 86400, 604800, 2592000]);
+const ALLOWED_TTLS = new Set([600]); // T-Mail mailboxes expire after ten minutes.
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -55,6 +55,13 @@ function randomHex(length = 24) {
   const bytes = new Uint8Array(Math.ceil(length / 2));
   crypto.getRandomValues(bytes);
   return bytesToHex(bytes).slice(0, length);
+}
+
+function mailboxAddress(slug) {
+  const value = clean(slug, 64).toLowerCase();
+  if (/^[a-f0-9]{24}$/.test(value)) return BASE_LOCAL_PART + "+" + value + "@" + MAIL_DOMAIN;
+  if (/^[a-f0-9]{32}$/.test(value)) return value + "@" + MAIL_DOMAIN;
+  throw new Error("MAILBOX_SLUG_INVALID");
 }
 
 async function sha256Hex(value) {
@@ -153,12 +160,20 @@ async function passwordHash(password, saltBytes) {
 function parseAliasRecipient(value) {
   const normalized = clean(value, 320).toLowerCase();
   const at = normalized.lastIndexOf("@");
+  if (at <= 0) return null;
   const recipientDomain = normalized.slice(at + 1);
-  if (at <= 0 || (recipientDomain !== MAIL_DOMAIN && recipientDomain !== LEGACY_MAIL_DOMAIN)) return null;
+  if (recipientDomain !== MAIL_DOMAIN && recipientDomain !== LEGACY_MAIL_DOMAIN) return null;
+
   const localPart = normalized.slice(0, at);
-  const match = localPart.match(/^receiver\+([a-f0-9]{24})$/);
-  if (!match) return null;
-  return { slug: match[1], address: normalized };
+  const legacyMatch = localPart.match(/^receiver\+([a-f0-9]{24})$/);
+  const isTMailAddress = /^[a-f0-9]{32}$/.test(localPart);
+  if (!legacyMatch && !isTMailAddress) return null;
+
+  return {
+    slug: legacyMatch ? legacyMatch[1] : localPart,
+    address: normalized,
+    format: legacyMatch ? "legacy-alias" : "tmail"
+  };
 }
 
 function getCookie(request, name) {
@@ -361,20 +376,21 @@ async function handleAliasesGet(env) {
     "SELECT id,slug,label,status,created_at,expires_at,last_received_at,received_count " +
     "FROM mail_aliases ORDER BY created_at DESC LIMIT 100"
   ).all();
-  return responseJson({ ok: true, aliases: result.results || [] });
+  const mailboxes = result.results || [];
+  return responseJson({ ok: true, mailboxes, aliases: mailboxes });
 }
 
 async function handleAliasCreate(request, env) {
   if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
   let body;
   try { body = await readJson(request); }
-  catch { return responseJson({ ok: false, error: "Data alias tidak valid." }, 400); }
+  catch { return responseJson({ ok: false, error: "Data mailbox tidak valid." }, 400); }
   const label = clean(body.label, 80);
-  const ttlSeconds = Number(body.ttlSeconds);
+  const ttlSeconds = Number(body.ttlSeconds ?? 600);
   if (!ALLOWED_TTLS.has(ttlSeconds)) {
-    return responseJson({ ok: false, error: "Masa aktif alias tidak valid." }, 400);
+    return responseJson({ ok: false, error: "Masa aktif mailbox tidak valid." }, 400);
   }
-  const slug = randomHex(24);
+  const slug = randomHex(32);
   const id = crypto.randomUUID();
   const now = Date.now();
   const expiresAt = now + ttlSeconds * 1000;
@@ -385,7 +401,7 @@ async function handleAliasCreate(request, env) {
     ok: true,
     alias: {
       id,
-      email: BASE_LOCAL_PART + "+" + slug + "@" + MAIL_DOMAIN,
+      email: mailboxAddress(slug),
       label,
       status: "ACTIVE",
       created_at: now,
@@ -408,12 +424,15 @@ async function handleAliasRevoke(request, env, id) {
 }
 
 async function handleMessagesGet(url, env) {
-  const aliasId = clean(url.searchParams.get("aliasId"), 64);
+  const aliasId = clean(url.searchParams.get("mailboxId") || url.searchParams.get("aliasId"), 64);
   if (!/^[0-9a-f-]{36}$/i.test(aliasId)) return responseJson({ ok: false, error: "Pilih alias yang valid." }, 400);
   const alias = await env.MAIL_DB.prepare(
     "SELECT id,status,expires_at FROM mail_aliases WHERE id=? LIMIT 1"
   ).bind(aliasId).first();
-  if (!alias) return responseJson({ ok: false, error: "Alias tidak ditemukan." }, 404);
+  if (!alias) return responseJson({ ok: false, error: "Mailbox tidak ditemukan." }, 404);
+  if (alias.status !== "ACTIVE" || Number(alias.expires_at) <= Date.now()) {
+    return responseJson({ ok: false, error: "Mailbox sudah kedaluwarsa." }, 410);
+  }
   const result = await env.MAIL_DB.prepare(
     "SELECT id,message_id,received_at,payload_iv,payload_ciphertext " +
     "FROM mail_messages WHERE alias_id=? ORDER BY received_at DESC LIMIT 50"
@@ -481,11 +500,11 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
   }
   let body;
   try { body = await readJson(request); }
-  catch { return responseJson({ ok: false, error: "Data pembuatan alias tidak valid." }, 400); }
+  catch { return responseJson({ ok: false, error: "Data pembuatan mailbox tidak valid." }, 400); }
 
-  const ttlSeconds = Number(body.ttlSeconds);
+  const ttlSeconds = Number(body.ttlSeconds ?? 600);
   if (!ALLOWED_TTLS.has(ttlSeconds)) {
-    return responseJson({ ok: false, error: "Masa aktif alias tidak valid." }, 400);
+    return responseJson({ ok: false, error: "Masa aktif mailbox tidak valid." }, 400);
   }
   const rawClientRef = body.clientRef == null ? "" : String(body.clientRef);
   const clientRef = clean(rawClientRef, 100);
@@ -508,7 +527,7 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
         reused: true,
         alias: {
           id: existing.id,
-          email: BASE_LOCAL_PART + "+" + existing.slug + "@" + MAIL_DOMAIN,
+          email: mailboxAddress(existing.slug),
           label: existing.label,
           status: existing.status,
           created_at: existing.created_at,
@@ -524,13 +543,13 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
     "SELECT COUNT(*) AS total FROM mail_machine_aliases WHERE token_hash=? AND created_at>?"
   ).bind(tokenHash, now - 60 * 60 * 1000).first();
   if (Number(hourly?.total || 0) >= MACHINE_ALIAS_HOURLY_LIMIT) {
-    return responseJson({ ok: false, error: "Batas pembuatan alias mesin per jam tercapai." }, 429, {
+    return responseJson({ ok: false, error: "Batas pembuatan mailbox mesin per jam tercapai." }, 429, {
       "Retry-After": "3600"
     });
   }
 
   const label = clean(body.label || "VM Muse", 80);
-  const slug = randomHex(24);
+  const slug = randomHex(32);
   const id = crypto.randomUUID();
   const expiresAt = now + ttlSeconds * 1000;
   await env.MAIL_DB.batch([
@@ -547,7 +566,7 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
     reused: false,
     alias: {
       id,
-      email: BASE_LOCAL_PART + "+" + slug + "@" + MAIL_DOMAIN,
+      email: mailboxAddress(slug),
       label,
       status: "ACTIVE",
       created_at: now,
@@ -585,7 +604,7 @@ async function handleMachineAliasesGet(url, env, tokenHash) {
   const now = Date.now();
   const aliases = (result.results || []).map((row) => ({
     id: row.id,
-    email: BASE_LOCAL_PART + "+" + row.slug + "@" + MAIL_DOMAIN,
+    email: mailboxAddress(row.slug),
     label: clean(row.label, 80),
     status: row.status === "ACTIVE" && Number(row.expires_at) <= now ? "EXPIRED" : row.status,
     created_at: Number(row.created_at),
@@ -596,6 +615,7 @@ async function handleMachineAliasesGet(url, env, tokenHash) {
   const total = Number(count?.total || 0);
   return responseJson({
     ok: true,
+    mailboxes: aliases,
     aliases,
     pagination: { total, limit, offset, has_more: offset + aliases.length < total }
   });
@@ -605,7 +625,7 @@ async function handleMachineMessagesGet(url, env, tokenHash) {
   if (!await hasOwner(env)) {
     return responseJson({ ok: false, error: "Panel owner belum diinisialisasi." }, 503);
   }
-  const aliasId = clean(url.searchParams.get("aliasId"), 64);
+  const aliasId = clean(url.searchParams.get("mailboxId") || url.searchParams.get("aliasId"), 64);
   if (!/^[0-9a-f-]{36}$/i.test(aliasId)) {
     return responseJson({ ok: false, error: "aliasId tidak valid." }, 400);
   }
@@ -616,9 +636,9 @@ async function handleMachineMessagesGet(url, env, tokenHash) {
     "WHERE a.id=? AND m.token_hash=? LIMIT 1"
   ).bind(aliasId, tokenHash).first();
 
-  if (!alias) return responseJson({ ok: false, error: "Alias mesin tidak ditemukan." }, 404);
+  if (!alias) return responseJson({ ok: false, error: "Mailbox mesin tidak ditemukan." }, 404);
   if (alias.status !== "ACTIVE" || Number(alias.expires_at) <= Date.now()) {
-    return responseJson({ ok: false, error: "Alias sudah tidak aktif atau kedaluwarsa." }, 410);
+    return responseJson({ ok: false, error: "Mailbox sudah tidak aktif atau kedaluwarsa." }, 410);
   }
 
   const after = url.searchParams.has("after") ? Number(url.searchParams.get("after")) : 0;
@@ -652,7 +672,7 @@ async function handleMachineMessagesGet(url, env, tokenHash) {
     ok: true,
     alias: {
       id: alias.id,
-      email: BASE_LOCAL_PART + "+" + alias.slug + "@" + MAIL_DOMAIN,
+      email: mailboxAddress(alias.slug),
       expires_at: Number(alias.expires_at)
     },
     messages,
@@ -666,7 +686,7 @@ async function handleMachineMessageGet(url, env, tokenHash, messageId) {
     return responseJson({ ok: false, error: "Panel owner belum diinisialisasi." }, 503);
   }
 
-  const aliasId = clean(url.searchParams.get("aliasId"), 64);
+  const aliasId = clean(url.searchParams.get("mailboxId") || url.searchParams.get("aliasId"), 64);
   if (!/^[0-9a-f-]{36}$/i.test(aliasId)) {
     return responseJson({ ok: false, error: "aliasId tidak valid." }, 400);
   }
@@ -680,9 +700,9 @@ async function handleMachineMessageGet(url, env, tokenHash, messageId) {
     "WHERE a.id=? AND m.token_hash=? LIMIT 1"
   ).bind(aliasId, tokenHash).first();
 
-  if (!alias) return responseJson({ ok: false, error: "Alias mesin tidak ditemukan." }, 404);
+  if (!alias) return responseJson({ ok: false, error: "Mailbox mesin tidak ditemukan." }, 404);
   if (alias.status !== "ACTIVE" || Number(alias.expires_at) <= Date.now()) {
-    return responseJson({ ok: false, error: "Alias sudah tidak aktif atau kedaluwarsa." }, 410);
+    return responseJson({ ok: false, error: "Mailbox sudah tidak aktif atau kedaluwarsa." }, 410);
   }
 
   const row = await env.MAIL_DB.prepare(
@@ -714,7 +734,7 @@ async function handleMachineAliasRevoke(request, env, id, tokenHash) {
   const alias = await env.MAIL_DB.prepare(
     "SELECT alias_id FROM mail_machine_aliases WHERE alias_id=? AND token_hash=? LIMIT 1"
   ).bind(id, tokenHash).first();
-  if (!alias) return responseJson({ ok: false, error: "Alias mesin tidak ditemukan." }, 404);
+  if (!alias) return responseJson({ ok: false, error: "Mailbox mesin tidak ditemukan." }, 404);
 
   const now = Date.now();
   await env.MAIL_DB.batch([
@@ -755,8 +775,21 @@ async function handleMachineApi(request, env, url) {
   if (request.method === "GET" && url.pathname === "/api/v1/machine/health") {
     return handleMachineHealth(env);
   }
-  if (request.method === "GET" && url.pathname === "/api/v1/machine/aliases") {
+  if (request.method === "GET" && (url.pathname === "/api/v1/machine/mailboxes" || url.pathname === "/api/v1/machine/aliases")) {
     return handleMachineAliasesGet(url, env, auth.tokenHash);
+  }
+  if (request.method === "POST" && url.pathname === "/api/v1/machine/mailboxes") {
+    const response = await handleMachineAliasCreate(request, env, auth.tokenHash);
+    const payload = await response.json().catch(() => ({}));
+    if (payload.alias) {
+      payload.mailbox = payload.alias;
+      delete payload.alias;
+    }
+    return responseJson(payload, response.status);
+  }
+  if (request.method === "DELETE" && url.pathname.startsWith("/api/v1/machine/mailboxes/")) {
+    const id = url.pathname.slice("/api/v1/machine/mailboxes/".length);
+    return handleMachineAliasRevoke(request, env, id, auth.tokenHash);
   }
   if (request.method === "POST" && url.pathname === "/api/v1/machine/aliases") {
     return handleMachineAliasCreate(request, env, auth.tokenHash);
@@ -793,8 +826,20 @@ async function api(request, env, url) {
   const session = await requireSession(request, env);
   if (!session) return responseJson({ ok: false, error: "Sesi admin tidak valid atau sudah berakhir." }, 401);
 
-  if (request.method === "GET" && url.pathname === "/api/aliases") return handleAliasesGet(env);
+  if (request.method === "GET" && (url.pathname === "/api/mailboxes" || url.pathname === "/api/aliases")) return handleAliasesGet(env);
+  if (request.method === "POST" && url.pathname === "/api/mailboxes") {
+    const response = await handleAliasCreate(request, env);
+    const payload = await response.json().catch(() => ({}));
+    if (payload.alias) {
+      payload.mailbox = payload.alias;
+      delete payload.alias;
+    }
+    return responseJson(payload, response.status);
+  }
   if (request.method === "POST" && url.pathname === "/api/aliases") return handleAliasCreate(request, env);
+  if (request.method === "DELETE" && url.pathname.startsWith("/api/mailboxes/")) {
+    return handleAliasRevoke(request, env, url.pathname.slice("/api/mailboxes/".length));
+  }
   if (request.method === "DELETE" && url.pathname.startsWith("/api/aliases/")) {
     return handleAliasRevoke(request, env, url.pathname.slice("/api/aliases/".length));
   }
@@ -845,7 +890,9 @@ function formatDate(value) {
   return new Date(Number(value)).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" });
 }
 function emailFor(alias) {
-  return "receiver+" + alias.slug + "@seiton.my.id";
+  return alias.slug.length === 24
+    ? "receiver+" + alias.slug + "@seiton.my.id"
+    : alias.slug + "@seiton.my.id";
 }
 function showAuth(configured) {
   statusBox = byId("authStatus");
@@ -859,20 +906,20 @@ function showDashboard() {
   statusBox = byId("dashboardStatus");
   byId("auth").hidden = true;
   byId("dashboard").hidden = false;
-  setStatus("Panel terhubung. Alias dan pesan tersimpan di database privat.");
+  setStatus("Panel TMail terhubung. Mailbox dan pesan tersimpan di database privat.");
   loadAliases().catch((error) => setStatus(error.message, true));
 }
 function renderAliases() {
   const target = byId("aliases");
   target.replaceChildren();
   if (!aliasCache.length) {
-    target.append(element("p", "empty", "Belum ada alamat. Buat alias pertama."));
+    target.append(element("p", "empty", "Belum ada mailbox. Buat mailbox pertama."));
     return;
   }
   for (const alias of aliasCache) {
     const card = element("article", "alias-card");
     const heading = element("div", "alias-heading");
-    const title = element("strong", "", alias.label || "Alias tanpa label");
+    const title = element("strong", "", alias.label || "Mailbox tanpa label");
     const state = element("span", "state " + String(alias.status).toLowerCase(), alias.status);
     heading.append(title, state);
     const address = element("code", "address", emailFor(alias));
@@ -896,8 +943,8 @@ function renderAliases() {
   }
 }
 async function loadAliases() {
-  const data = await api("/api/aliases");
-  aliasCache = data.aliases || [];
+  const data = await api("/api/mailboxes");
+  aliasCache = data.mailboxes || data.aliases || [];
   renderAliases();
   byId("aliasCount").textContent = String(aliasCache.filter((item) => item.status === "ACTIVE" && Number(item.expires_at) > Date.now()).length);
   if (!selectedAliasId && aliasCache.length) {
@@ -910,14 +957,14 @@ async function loadAliases() {
 async function selectAlias(id) {
   selectedAliasId = id;
   const selected = aliasCache.find((item) => item.id === id);
-  byId("selectedAddress").textContent = selected ? emailFor(selected) : "Pilih alias";
+  byId("selectedAddress").textContent = selected ? emailFor(selected) : "Pilih mailbox";
   await loadMessages(id);
 }
 async function loadMessages(id) {
   const target = byId("messages");
   target.replaceChildren();
   if (!id) return;
-  const data = await api("/api/messages?aliasId=" + encodeURIComponent(id));
+  const data = await api("/api/messages?mailboxId=" + encodeURIComponent(id));
   const messages = data.messages || [];
   byId("messageCount").textContent = String(messages.length);
   if (!messages.length) {
@@ -959,16 +1006,16 @@ async function loadMessages(id) {
   }
 }
 async function revokeAlias(id) {
-  if (!window.confirm("Cabut alias ini dan hapus pesan yang tersimpan?")) return;
+  if (!window.confirm("Cabut mailbox ini dan hapus pesan yang tersimpan?")) return;
   try {
-    await api("/api/aliases/" + encodeURIComponent(id), { method: "DELETE" });
+    await api("/api/mailboxes/" + encodeURIComponent(id), { method: "DELETE" });
     if (selectedAliasId === id) {
       selectedAliasId = "";
-      byId("selectedAddress").textContent = "Pilih alias";
+      byId("selectedAddress").textContent = "Pilih mailbox";
       byId("messages").replaceChildren();
     }
     await loadAliases();
-    setStatus("Alias dicabut dan pesan dihapus.");
+    setStatus("Mailbox dicabut dan pesan dihapus.");
   } catch (error) { setStatus(error.message, true); }
 }
 byId("loginForm").addEventListener("submit", async (event) => {
@@ -996,7 +1043,7 @@ byId("setupForm").addEventListener("submit", async (event) => {
 byId("createAlias").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    const data = await api("/api/aliases", {
+    const data = await api("/api/mailboxes", {
       method: "POST",
       body: {
         label: byId("aliasLabel").value,
@@ -1005,9 +1052,9 @@ byId("createAlias").addEventListener("submit", async (event) => {
     });
     byId("aliasLabel").value = "";
     await loadAliases();
-    await copyText(data.alias.email);
-    await selectAlias(data.alias.id);
-    setStatus("Alamat baru dibuat dan disalin: " + data.alias.email);
+    await copyText(data.mailbox.email);
+    await selectAlias(data.mailbox.id);
+    setStatus("Mailbox TMail dibuat dan disalin: " + data.mailbox.email);
   } catch (error) { setStatus(error.message, true); }
 });
 byId("refresh").addEventListener("click", () => loadAliases().then(() => setStatus("Inbox diperbarui.")).catch((error) => setStatus(error.message, true)));
@@ -1046,17 +1093,17 @@ function renderPanel(nonce, configured) {
     " .alias-card,.message-card{background:var(--surface2);border:1px solid var(--line);border-radius:13px;padding:14px;min-width:0}.alias-heading,.message-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.alias-heading strong,.message-top strong{overflow-wrap:anywhere}.state{font-size:10px;padding:3px 8px;border-radius:20px;background:#1a463b;color:#8df0cb}.state.expired,.state.revoked{background:#3d3340;color:#e8b7c6}.address{display:block;color:#a7f3d0;font-size:12px;overflow-wrap:anywhere;margin:10px 0}.alias-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.empty{color:var(--muted);padding:14px;text-align:center;border:1px dashed var(--line);border-radius:12px}.selected-address{font-size:12px;overflow-wrap:anywhere;color:#a7f3d0}" +
     " .code-row{display:flex;align-items:center;gap:12px;margin:14px 0}.otp-code{font-size:22px;letter-spacing:3px;background:#08291f;border:1px solid #1c614a;color:#9cf2ce;border-radius:10px;padding:8px 12px}.body-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;background:#0a1423;border-radius:9px;padding:10px;font:12px/1.5 ui-monospace,monospace;color:#cbd5e1}.message-card .muted{margin:7px 0}.footnote{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.7}.stats{display:flex;gap:10px;margin:12px 0}.stat{background:#0b1526;border:1px solid var(--line);padding:8px 12px;border-radius:10px;color:var(--muted);font-size:12px}.stat strong{color:var(--text);font-size:16px;margin-right:5px}" +
     " @media(max-width:820px){main{padding:22px 14px 40px}.grid{grid-template-columns:1fr}.create-row{grid-template-columns:1fr 1fr}.create-row .submit-cell{grid-column:1/-1}.create-row .button{width:100%}.topbar{align-items:flex-start;flex-direction:column}}@media(max-width:420px){.create-row{grid-template-columns:1fr}.create-row .submit-cell{grid-column:auto}.panel{padding:16px}.top-actions{width:100%}.top-actions button{flex:1}}" +
-    "</style></head><body><main><header class=\"brand\"><div class=\"mark\">S</div><div><strong>Seiton Mail Automation</strong><small>Private inbox alias manager · " + MAIL_DOMAIN + "</small></div></header>" +
-    "<section id=\"auth\" class=\"panel auth\"><h1>Panel privat</h1><p>Kelola alamat alias dan kode verifikasi yang masuk.</p>" +
+    "</style></head><body><main><header class=\"brand\"><div class=\"mark\">S</div><div><strong>Seiton TMail</strong><small>Private temporary inbox · " + MAIL_DOMAIN + "</small></div></header>" +
+    "<section id=\"auth\" class=\"panel auth\"><h1>Panel TMail privat</h1><p>Kelola mailbox sementara dan kode verifikasi yang masuk.</p>" +
     "<form id=\"setupForm\" hidden><label for=\"bootstrapToken\">Bootstrap token sekali pakai</label><input id=\"bootstrapToken\" type=\"password\" autocomplete=\"off\" required><label for=\"setupPassword\">Buat password owner (min. 16 karakter)</label><input id=\"setupPassword\" type=\"password\" minlength=\"16\" maxlength=\"128\" autocomplete=\"new-password\" required><button class=\"button\" type=\"submit\">Inisialisasi panel</button></form>" +
     "<form id=\"loginForm\" hidden><label for=\"loginPassword\">Password owner</label><input id=\"loginPassword\" type=\"password\" autocomplete=\"current-password\" required><button class=\"button\" type=\"submit\">Masuk</button></form>" +
     "<div id=\"authStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div><div class=\"muted-note\">Panel hanya menerima email masuk. Ini bukan layanan IMAP/POP dan tidak mengirim email keluar.</div></section>" +
-    "<section id=\"dashboard\" hidden><div class=\"topbar\"><div><h1>Inbox automation</h1><p>Generate alias, terima kode, lalu cabut alamat kapan saja.</p></div><div class=\"top-actions\"><button id=\"refresh\" class=\"button secondary\" type=\"button\">Perbarui inbox</button><button id=\"logout\" class=\"button danger\" type=\"button\">Keluar</button></div></div>" +
+    "<section id=\"dashboard\" hidden><div class=\"topbar\"><div><h1>TMail inbox</h1><p>Buat mailbox acak, terima email dan kode verifikasi, lalu biarkan kedaluwarsa otomatis setelah 10 menit.</p></div><div class=\"top-actions\"><button id=\"refresh\" class=\"button secondary\" type=\"button\">Perbarui inbox</button><button id=\"logout\" class=\"button danger\" type=\"button\">Keluar</button></div></div>" +
     "<div id=\"dashboardStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div>" +
-    "<div class=\"stats\"><div class=\"stat\"><strong id=\"aliasCount\">0</strong> alias aktif</div><div class=\"stat\"><strong id=\"messageCount\">0</strong> pesan di alias terpilih</div></div>" +
-    "<div class=\"grid\"><section class=\"panel\"><h2>Buat alamat baru</h2><form id=\"createAlias\" class=\"create-row\"><div><label for=\"aliasLabel\">Label (opsional)</label><input id=\"aliasLabel\" maxlength=\"80\" placeholder=\"Contoh: akun layanan A\"></div><div><label for=\"aliasTtl\">Masa aktif</label><select id=\"aliasTtl\"><option value=\"900\">15 menit</option><option value=\"3600\">1 jam</option><option value=\"86400\" selected>1 hari</option><option value=\"604800\">7 hari</option><option value=\"2592000\">30 hari</option></select></div><div class=\"submit-cell\"><label>&nbsp;</label><button class=\"button\" type=\"submit\">Generate email</button></div></form><p class=\"muted-note\">Alamat unik akan disalin otomatis setelah dibuat. Setiap alias maksimal menerima 100 pesan.</p><div id=\"aliases\" class=\"alias-list\"></div></section>" +
+    "<div class=\"stats\"><div class=\"stat\"><strong id=\"aliasCount\">0</strong> mailbox aktif</div><div class=\"stat\"><strong id=\"messageCount\">0</strong> pesan di alias terpilih</div></div>" +
+    "<div class=\"grid\"><section class=\"panel\"><h2>Buat mailbox baru</h2><form id=\"createAlias\" class=\"create-row\"><div><label for=\"aliasLabel\">Label (opsional)</label><input id=\"aliasLabel\" maxlength=\"80\" placeholder=\"Contoh: akun layanan A\"></div><div><label for=\"aliasTtl\">Masa aktif</label><select id=\"aliasTtl\"><option value=\"600\" selected>10 menit</option></select></div><div class=\"submit-cell\"><label>&nbsp;</label><button class=\"button\" type=\"submit\">Buat TMail</button></div></form><p class=\"muted-note\">Alamat unik akan disalin otomatis setelah dibuat. Setiap mailbox maksimal menerima 100 pesan.</p><div id=\"aliases\" class=\"alias-list\"></div></section>" +
     "<section class=\"panel\"><h2>Pesan masuk</h2><p id=\"selectedAddress\" class=\"selected-address\">Pilih alias untuk melihat inbox.</p><div id=\"messages\" class=\"message-list\"><p class=\"empty\">Pilih alias di sebelah kiri.</p></div></section></div>" +
-    "<p class=\"footnote\">Email yang tidak ditujukan ke alias aktif akan ditolak. Lampiran tidak disimpan. Pesan disimpan maksimal 30 hari. Jangan gunakan alamat ini untuk pemulihan akun kritis atau menerima informasi finansial penting.</p></section>" +
+    "<p class=\"footnote\">Email untuk mailbox yang tidak dikenal atau sudah kedaluwarsa akan ditolak. Isi email dihapus saat mailbox berakhir. Lampiran belum disimpan. Jangan gunakan alamat ini untuk pemulihan akun kritis atau menerima informasi finansial penting.</p></section>" +
     "</main><script nonce=\"" + nonce + "\">window.MAIL_SETUP_MODE=" + mode + ";</script><script nonce=\"" + nonce + "\">" + CLIENT_SCRIPT + "</script></body></html>";
 }
 
@@ -1140,6 +1187,7 @@ async function scheduledCleanup(env) {
   const retentionCutoff = now - 30 * 24 * 60 * 60 * 1000;
   await env.MAIL_DB.batch([
     env.MAIL_DB.prepare("UPDATE mail_aliases SET status='EXPIRED' WHERE status='ACTIVE' AND expires_at<=?").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE alias_id IN (SELECT id FROM mail_aliases WHERE expires_at<=?)").bind(now),
     env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE received_at<?").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_aliases WHERE expires_at<? AND status!='ACTIVE'").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_sessions WHERE expires_at<=?").bind(now),
