@@ -671,13 +671,15 @@ async function handleMachineMessagesGet(url, env, tokenHash) {
   }));
   const last = page[page.length - 1];
 
+  const mailbox = {
+    id: alias.id,
+    email: mailboxAddress(alias.slug),
+    expires_at: Number(alias.expires_at)
+  };
   return responseJson({
     ok: true,
-    alias: {
-      id: alias.id,
-      email: mailboxAddress(alias.slug),
-      expires_at: Number(alias.expires_at)
-    },
+    mailbox,
+    alias: mailbox,
     messages,
     has_more: hasMore,
     next_cursor: last ? { after: Number(last.received_at), afterId: last.id } : null
