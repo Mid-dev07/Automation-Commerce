@@ -1202,6 +1202,7 @@ export {
   encryptMessagePayload,
   extractVerificationCode,
   parseAliasRecipient,
+  mailboxAddress,
   parseBearerToken,
   passwordHash,
   randomHex
