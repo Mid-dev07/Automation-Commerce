@@ -22,17 +22,21 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 function responseJson(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-      "Referrer-Policy": "no-referrer",
-      "X-Robots-Tag": "noindex, nofollow",
-      ...headers
-    }
+  const outputHeaders = new Headers({
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Robots-Tag": "noindex, nofollow"
   });
+  for (const [name, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) outputHeaders.append(name, String(item));
+    } else if (value !== undefined && value !== null) {
+      outputHeaders.set(name, String(value));
+    }
+  }
+  return new Response(JSON.stringify(data), { status, headers: outputHeaders });
 }
 
 function securityHeaders(extra = {}) {
@@ -1499,8 +1503,10 @@ byId("confirmTwoFactorForm").addEventListener("submit", async (event) => {
     byId("twoFactorEnrollment").hidden = true;
     byId("recoveryCodes").textContent = result.recovery_codes.join("\\n");
     byId("recoveryCodesPanel").hidden = false;
-    await loadSecuritySettings();
-    setStatus("2FA aktif. Sesi Owner dicabut untuk menerapkan verifikasi pada login berikutnya. Simpan recovery codes sekarang.");
+    byId("twoFactorStatus").textContent = "2FA aktif. Login berikutnya akan meminta kode autentikator.";
+    byId("enableTwoFactor").hidden = true;
+    byId("disableTwoFactorForm").hidden = false;
+    setStatus("2FA aktif. Sesi Owner sudah dicabut. Simpan recovery codes sekarang, lalu masuk kembali.");
     byId("logout").textContent = "Masuk ulang";
   } catch (error) { setStatus(error.message, true); }
 });
