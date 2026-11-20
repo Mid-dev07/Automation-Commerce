@@ -40,11 +40,18 @@ test("rejects prefixless TMail addresses on the legacy inbox subdomain", () => {
   assert.equal(parseAliasRecipient(tmailLocalPart + "@inbox.seiton.biz.id"), null);
 });
 
-test("rejects malformed, wrong-domain, and unsupported local parts", () => {
+test("accepts valid custom addresses and rejects malformed or wrong-domain local parts", () => {
+  const custom = "temakuro@seiton.my.id";
+  assert.deepEqual(parseAliasRecipient(custom), {
+    slug: "temakuro",
+    address: custom,
+    format: "custom-tmail"
+  });
   assert.equal(parseAliasRecipient("not-an-address"), null);
   assert.equal(parseAliasRecipient(tmailLocalPart + "@example.com"), null);
   assert.equal(parseAliasRecipient("receiver+" + tmailLocalPart + "@seiton.my.id"), null);
-  assert.equal(parseAliasRecipient("g".repeat(32) + "@seiton.my.id"), null);
+  assert.equal(parseAliasRecipient("two..dots@seiton.my.id"), null);
+  assert.equal(parseAliasRecipient("bad$name@seiton.my.id"), null);
 });
 
 test("formats new TMail and legacy mailbox records without changing old addresses", () => {
@@ -52,6 +59,8 @@ test("formats new TMail and legacy mailbox records without changing old addresse
   assert.equal(mailboxAddress(legacySlug), "receiver+" + legacySlug + "@seiton.my.id");
 });
 
-test("rejects invalid mailbox slugs before formatting an address", () => {
-  assert.throws(() => mailboxAddress("invalid"), /MAILBOX_SLUG_INVALID/);
+test("formats custom mailboxes and rejects invalid mailbox slugs", () => {
+  assert.equal(mailboxAddress("temakuro"), "temakuro@seiton.my.id");
+  assert.throws(() => mailboxAddress("ab"), /MAILBOX_SLUG_INVALID/);
+  assert.throws(() => mailboxAddress("bad$name"), /MAILBOX_SLUG_INVALID/);
 });

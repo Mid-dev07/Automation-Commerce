@@ -1,21 +1,28 @@
 # Seiton TMail — Mail Automation
 
-Private, inbound-only temporary mailbox service for Seiton. The public panel remains at
-https://mail.seiton.biz.id/; mailbox addresses are created on seiton.my.id.
+Public, inbound-only temporary mailbox service for Seiton. The public TMail experience
+is served at https://mail.seiton.biz.id/; the private Owner panel is at
+https://mail.seiton.biz.id/owner (and the legacy /login path remains available).
+Mailbox addresses are created on seiton.my.id.
 
 ## TMail mailbox model
 
-- New addresses use a cryptographically random 32-character hexadecimal local part:
-  <random-32-hex>@seiton.my.id.
-- New mailbox lifetime is fixed at 10 minutes. Clients cannot request a longer TTL.
+- Public **Generate** addresses use a cryptographically random 32-character hexadecimal
+  local part and expire after 10 minutes.
+- Public **Custom** addresses accept a validated 3–32 character local part on
+  seiton.my.id and expire after 365 days.
+- Every public mailbox is password protected. Generated mailboxes receive a random
+  access password shown once; custom mailboxes require a password chosen by the user.
+  Password hashes, not plaintext passwords, are stored.
 - The Worker accepts mail only for an active mailbox record and rejects unknown, expired,
   revoked, or over-limit addresses.
 - Existing receiver+<24-hex>@seiton.my.id addresses and
   receiver+<24-hex>@inbox.seiton.biz.id remain readable during the migration. Their
   original expiry is retained; no existing row or message is rewritten.
 - Maximum accepted messages per mailbox remains 100.
-- The cleanup cron remains every 10 minutes. It expires new TMail mailboxes and removes
-  their messages after expiry. Legacy plus-alias messages keep the previous 30-day retention.
+- The cleanup cron remains every 10 minutes. It expires 10-minute random mailboxes and
+  removes their messages after expiry. Custom mailbox messages retain the existing
+  30-day message-retention policy; custom addresses themselves remain valid for 365 days.
 
 ## Runtime and bindings
 
@@ -43,8 +50,10 @@ change. The legacy table names remain for backward compatibility.
 
 ## Access control
 
-- Owner access starts with the existing password. TOTP 2FA can be enrolled from the
-  authenticated panel using any RFC 6238-compatible authenticator (Aegis, Google
+- The public root page offers Generate and Custom mailbox creation, password-protected
+  inboxes, automatic OTP extraction, and a five-second inbox refresh.
+- Owner access is separate at /owner (legacy /login is retained) and starts with the
+  existing password. TOTP 2FA can be enrolled from the authenticated panel using any RFC 6238-compatible authenticator (Aegis, Google
   Authenticator, or Microsoft Authenticator).
 - The TOTP secret is encrypted with AES-GCM using a key derived from
   MAIL_SESSION_SECRET. The panel issues 10 one-time recovery codes; only their hashes
@@ -57,10 +66,16 @@ change. The legacy table names remain for backward compatibility.
   access checks. Agents never receive Owner cookies or Owner credentials.
 - Expired mailbox messages are no longer returned by the owner inbox API; scheduled
   cleanup removes them after expiration.
-- The upstream T-Mail example is used only as a reference for random-address / short-TTL
-  behavior. Its public address-only inbox endpoints are not copied.
+- Public inbox APIs require a mailbox-specific HttpOnly session cookie issued only
+  after mailbox creation or password verification. A guessed address alone cannot read mail.
 
 ## API compatibility
+
+New public TMail endpoints:
+- POST /api/public/mailboxes
+- POST /api/public/unlock
+- GET /api/public/inbox?slug=:localPart
+- POST /api/public/logout
 
 New owner-panel endpoints:
 
@@ -82,8 +97,8 @@ fields where useful, alongside the new mailboxes field.
 
 ## Email Routing cutover
 
-New prefixless TMail addresses require a catch-all Email Routing rule on the dedicated
-seiton.my.id zone that sends all inbound mail to seiton-mail-automation. Keep the
+New random and custom TMail addresses require a catch-all Email Routing rule on the
+dedicated seiton.my.id zone that sends all inbound mail to seiton-mail-automation. Keep the
 existing explicit receiver@seiton.my.id Worker rule in place during migration.
 Do not enable catch-all on the seiton.biz.id zone. The Worker itself is the final
 gatekeeper and rejects every recipient that does not resolve to an active mailbox.
@@ -131,3 +146,12 @@ secret vault. Create and revoke individual credentials in the Owner panel. The l
 `MAIL_VM_API_TOKEN` remains temporarily accepted during migration, so old integrations
 can be moved without an outage. Agents do not receive the Owner password, Owner cookie,
 setup token, or message-encryption key.
+
+
+## Public TMail experience
+
+The public page and mailbox interaction are documented in [PUBLIC-SERVICE.md](./PUBLIC-SERVICE.md).
+The Worker serves the landing page at `/`, mailbox pages at `/inbox/:localPart`, and
+the private Owner panel at `/owner`. The page exposes only the one domain with a
+verified inbound Email Routing path: `seiton.my.id`. Do not advertise or issue
+addresses on other domains until their MX/Email Routing configuration has been tested.

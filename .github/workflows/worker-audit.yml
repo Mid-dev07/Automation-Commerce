@@ -38,6 +38,8 @@ jobs:
         run: node --check mail-automation/agent-client.mjs
       - name: Check TMail TOTP module syntax
         run: node --check mail-automation/totp.mjs
+      - name: Check public TMail page syntax
+        run: node --check mail-automation/public-page.mjs
       - name: Check Mail Automation email parser syntax
         run: node --check mail-automation/email-parser.js
       - name: Check Mail Automation OTP extractor syntax
