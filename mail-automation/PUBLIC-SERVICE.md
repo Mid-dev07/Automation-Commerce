@@ -1,8 +1,8 @@
-# Public Seiton TMail Service
+# Public SeitonMail Service
 
 ## User experience
 
-- `/` is the public TMail landing page.
+- `/` is the public SeitonMail landing page.
 - `/inbox/:localPart` opens the password-protected mailbox page.
 - `/owner` is the private Owner dashboard. The legacy `/login` route remains available.
 - The public interface has **Generate** and **Custom** modes, address copying, a protected inbox, OTP extraction, and five-second inbox refresh.
@@ -84,6 +84,6 @@ Content-Type: application/json
 
 ## Registration compatibility
 
-Seiton TMail can accept email sent to a valid active address on `seiton.my.id`. Acceptance by a third-party app is controlled by that app. Some providers reject temporary-email domains, require phone or identity checks, apply risk scoring, or block sign-ups under their own policies. Multiple domain aliases or custom local parts cannot guarantee universal acceptance and must not be used to evade another service's anti-abuse restrictions.
+SeitonMail can accept email sent to a valid active address on `seiton.my.id`. Acceptance by a third-party app is controlled by that app. Some providers reject temporary-email domains, require phone or identity checks, apply risk scoring, or block sign-ups under their own policies. Multiple domain aliases or custom local parts cannot guarantee universal acceptance and must not be used to evade another service's anti-abuse restrictions.
 
-For important accounts that need long-term recovery, prefer a mailbox that the account owner controls permanently and use the app's supported recovery methods. Public TMail is designed for short-lived email receipt and ordinary testing, not sensitive or critical account recovery.
+For important accounts that need long-term recovery, prefer a mailbox that the account owner controls permanently and use the app's supported recovery methods. SeitonMail is designed for short-lived email receipt and ordinary testing, not sensitive or critical account recovery.
