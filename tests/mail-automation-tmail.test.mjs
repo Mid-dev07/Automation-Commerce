@@ -36,6 +36,10 @@ test("continues accepting the configured legacy inbox subdomain", () => {
   });
 });
 
+test("rejects prefixless TMail addresses on the legacy inbox subdomain", () => {
+  assert.equal(parseAliasRecipient(tmailLocalPart + "@inbox.seiton.biz.id"), null);
+});
+
 test("rejects malformed, wrong-domain, and unsupported local parts", () => {
   assert.equal(parseAliasRecipient("not-an-address"), null);
   assert.equal(parseAliasRecipient(tmailLocalPart + "@example.com"), null);

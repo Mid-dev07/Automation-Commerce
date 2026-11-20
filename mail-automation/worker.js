@@ -161,18 +161,26 @@ function parseAliasRecipient(value) {
   const normalized = clean(value, 320).toLowerCase();
   const at = normalized.lastIndexOf("@");
   if (at <= 0) return null;
-  const recipientDomain = normalized.slice(at + 1);
-  if (recipientDomain !== MAIL_DOMAIN && recipientDomain !== LEGACY_MAIL_DOMAIN) return null;
 
+  const recipientDomain = normalized.slice(at + 1);
   const localPart = normalized.slice(0, at);
   const legacyMatch = localPart.match(/^receiver\+([a-f0-9]{24})$/);
-  const isTMailAddress = /^[a-f0-9]{32}$/.test(localPart);
-  if (!legacyMatch && !isTMailAddress) return null;
 
+  if (legacyMatch) {
+    if (recipientDomain !== MAIL_DOMAIN && recipientDomain !== LEGACY_MAIL_DOMAIN) return null;
+    return {
+      slug: legacyMatch[1],
+      address: normalized,
+      format: "legacy-alias"
+    };
+  }
+
+  // Prefixless TMail addresses are issued only on the primary mail domain.
+  if (recipientDomain !== MAIL_DOMAIN || !/^[a-f0-9]{32}$/.test(localPart)) return null;
   return {
-    slug: legacyMatch ? legacyMatch[1] : localPart,
+    slug: localPart,
     address: normalized,
-    format: legacyMatch ? "legacy-alias" : "tmail"
+    format: "tmail"
   };
 }
 
