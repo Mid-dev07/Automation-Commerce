@@ -1532,6 +1532,7 @@ let selectedAliasId = "";
 let aliasCache = [];
 let loginNeedsTotp = false;
 let currentNewMachineToken = "";
+let dashboardTimer = null;
 
 function setStatus(message, bad) {
   statusBox.textContent = message || "";
@@ -1557,10 +1558,23 @@ function element(tag, className, text) {
 }
 async function copyText(value) {
   try {
-    await navigator.clipboard.writeText(value);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const field = document.createElement("textarea");
+      field.value = value;
+      field.setAttribute("readonly", "");
+      field.style.position = "fixed";
+      field.style.opacity = "0";
+      document.body.append(field);
+      field.select();
+      const copied = document.execCommand("copy");
+      field.remove();
+      if (!copied) throw new Error("Clipboard tidak tersedia.");
+    }
     setStatus("Berhasil disalin.");
   } catch {
-    setStatus("Clipboard tidak tersedia pada browser ini.", true);
+    setStatus("Tidak bisa menyalin otomatis. Pilih teks lalu salin manual.", true);
   }
 }
 function formatDate(value) {
@@ -1589,39 +1603,53 @@ function showDashboard() {
   statusBox = byId("dashboardStatus");
   byId("auth").hidden = true;
   byId("dashboard").hidden = false;
-  setStatus("Panel SeitonMail terhubung. Mailbox dan pesan tersimpan di database privat.");
+  setStatus("Panel siap. Daftar mailbox akan diperbarui otomatis.");
   loadAliases().catch((error) => setStatus(error.message, true));
   loadSecuritySettings().catch((error) => setStatus(error.message, true));
+  if (dashboardTimer) clearInterval(dashboardTimer);
+  dashboardTimer = setInterval(() => {
+    if (document.visibilityState !== "hidden") {
+      loadAliases().catch((error) => setStatus(error.message, true));
+    }
+  }, 10000);
 }
 function renderAliases() {
   const target = byId("aliases");
+  const query = (byId("mailboxSearch")?.value || "").trim().toLowerCase();
   target.replaceChildren();
+  const visible = aliasCache.filter((alias) =>
+    !query || emailFor(alias).toLowerCase().includes(query) ||
+    String(alias.label || "").toLowerCase().includes(query)
+  );
   if (!aliasCache.length) {
-    target.append(element("p", "empty", "Belum ada mailbox. Buat mailbox pertama."));
+    target.append(element("p", "empty", "Belum ada mailbox. Buat alamat pertama untuk mulai menerima email."));
     return;
   }
-  for (const alias of aliasCache) {
-    const card = element("article", "alias-card");
+  if (!visible.length) {
+    target.append(element("p", "empty", "Tidak ada mailbox yang cocok dengan pencarian."));
+    return;
+  }
+  for (const alias of visible) {
+    const card = element("article", "alias-card" + (selectedAliasId === alias.id ? " selected" : ""));
     const heading = element("div", "alias-heading");
     const title = element("strong", "", alias.label || "Mailbox tanpa label");
-    const state = element("span", "state " + String(alias.status).toLowerCase(), alias.status);
+    const state = element("span", "state active", "Aktif");
     heading.append(title, state);
     const address = element("code", "address", emailFor(alias));
-    const detail = element("p", "muted", "Berakhir: " + formatDate(alias.expires_at) + " • Email: " + alias.received_count);
+    const detail = element("p", "muted", "Berakhir " + formatDate(alias.expires_at) + " · " + alias.received_count + " email");
     const actions = element("div", "alias-actions");
-    const copy = element("button", "button small", "Salin alamat");
+    const copy = element("button", "button secondary small", "Salin alamat");
     copy.type = "button";
     copy.addEventListener("click", () => copyText(emailFor(alias)));
-    const open = element("button", "button secondary small", "Lihat inbox");
+    const open = element("button", "button small", selectedAliasId === alias.id ? "Inbox terbuka" : "Buka inbox");
     open.type = "button";
+    open.setAttribute("aria-pressed", String(selectedAliasId === alias.id));
     open.addEventListener("click", () => selectAlias(alias.id));
     actions.append(copy, open);
-    if (alias.status === "ACTIVE" && Number(alias.expires_at) > Date.now()) {
-      const revoke = element("button", "button danger small", "Cabut");
-      revoke.type = "button";
-      revoke.addEventListener("click", () => revokeAlias(alias.id));
-      actions.append(revoke);
-    }
+    const revoke = element("button", "button danger small", "Hapus mailbox");
+    revoke.type = "button";
+    revoke.addEventListener("click", () => revokeAlias(alias.id));
+    actions.append(revoke);
     card.append(heading, address, detail, actions);
     target.append(card);
   }
@@ -1633,6 +1661,9 @@ async function loadAliases() {
   );
   renderAliases();
   byId("aliasCount").textContent = String(aliasCache.length);
+  if (byId("lastDashboardRefresh")) {
+    byId("lastDashboardRefresh").textContent = "Diperbarui " + new Date().toLocaleTimeString("id-ID");
+  }
 
   if (selectedAliasId && !aliasCache.some((item) => item.id === selectedAliasId)) {
     selectedAliasId = "";
@@ -1683,8 +1714,11 @@ async function loadMessages(id) {
     } else {
       card.append(element("p", "muted", "Kode tidak terdeteksi otomatis."));
     }
-    const preview = element("pre", "body-preview", (item.body_text || "").slice(0, 1200));
-    card.append(preview);
+    const disclosure = element("details", "message-body");
+    const summary = element("summary", "", "Lihat isi email");
+    const preview = element("pre", "body-preview", (item.body_text || "").slice(0, 5000) || "Isi pesan tidak tersedia.");
+    disclosure.append(summary, preview);
+    card.append(disclosure);
     const remove = element("button", "button danger small", "Hapus pesan");
     remove.type = "button";
     remove.addEventListener("click", async () => {
@@ -1859,6 +1893,7 @@ byId("copyNewMachineToken").addEventListener("click", () => {
   if (currentNewMachineToken) copyText(currentNewMachineToken);
 });
 
+byId("mailboxSearch").addEventListener("input", renderAliases);
 byId("createAlias").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -1899,35 +1934,139 @@ byId("logout").addEventListener("click", async () => {
 
 function renderPanel(nonce, configured) {
   const mode = configured ? "true" : "false";
-  return "<!doctype html><html lang=\"id\"><head><meta charset=\"utf-8\">" +
-    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
-    "<meta name=\"robots\" content=\"noindex,nofollow\"><meta name=\"referrer\" content=\"no-referrer\">" +
-    "<title>SeitonMail</title><style nonce=\"" + nonce + "\">" +
-    " :root{color-scheme:dark;--bg:#080f1e;--surface:#111c2f;--surface2:#17243a;--line:#25354e;--text:#e7edf5;--muted:#9baabd;--accent:#10b981;--danger:#f87171}" +
-    " *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0%,#182b43 0,transparent 32%),var(--bg);color:var(--text);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}" +
-    " main{max-width:1180px;margin:0 auto;padding:34px 22px 60px}.brand{display:flex;align-items:center;gap:12px;margin-bottom:28px}.mark{width:42px;height:42px;border-radius:13px;background:var(--accent);color:#06271e;display:grid;place-items:center;font-weight:900;font-size:20px}.brand small{display:block;color:var(--muted)}" +
-    " h1{font-size:28px;margin:0 0 4px}h2{font-size:18px;margin:0 0 14px}.muted{color:var(--muted);font-size:13px}.panel{background:linear-gradient(180deg,var(--surface),#0e192b);border:1px solid var(--line);border-radius:18px;padding:22px;box-shadow:0 18px 48px #0003}" +
-    " .auth{max-width:440px;margin:50px auto}.auth p{color:var(--muted)}label{display:block;color:#c6d1df;font-size:13px;margin:12px 0 6px}input,select{width:100%;background:#0b1526;border:1px solid var(--line);border-radius:10px;padding:12px;color:var(--text);font:inherit}button{cursor:pointer;font:inherit}.button{border:0;border-radius:10px;background:var(--accent);color:#06271e;font-weight:750;padding:10px 14px}.button.secondary{background:#26374e;color:var(--text)}.button.danger{background:#552f3a;color:#ffd8df}.button.small{padding:7px 10px;font-size:12px}.auth .button{width:100%;margin-top:18px}.status{min-height:24px;color:#9ce4c7;font-size:13px;margin:10px 0}.status.error{color:#fca5a5}.muted-note{color:var(--muted);font-size:12px;margin-top:14px}" +
-    " .topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:22px}.topbar p{margin:0;color:var(--muted)}.top-actions{display:flex;gap:8px;flex-wrap:wrap}.grid{display:grid;grid-template-columns:minmax(280px,.8fr) minmax(0,1.5fr);gap:18px}.panel+.panel{margin-top:18px}.create-row{display:grid;grid-template-columns:1fr 180px auto;gap:10px;align-items:end}.create-row label{margin-top:0}.alias-list,.message-list{display:grid;gap:10px;margin-top:14px}" +
-    " .alias-card,.message-card{background:var(--surface2);border:1px solid var(--line);border-radius:13px;padding:14px;min-width:0}.alias-heading,.message-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.alias-heading strong,.message-top strong{overflow-wrap:anywhere}.state{font-size:10px;padding:3px 8px;border-radius:20px;background:#1a463b;color:#8df0cb}.state.expired,.state.revoked{background:#3d3340;color:#e8b7c6}.address{display:block;color:#a7f3d0;font-size:12px;overflow-wrap:anywhere;margin:10px 0}.alias-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.empty{color:var(--muted);padding:14px;text-align:center;border:1px dashed var(--line);border-radius:12px}.selected-address{font-size:12px;overflow-wrap:anywhere;color:#a7f3d0}" +
-    " .code-row{display:flex;align-items:center;gap:12px;margin:14px 0}.otp-code{font-size:22px;letter-spacing:3px;background:#08291f;border:1px solid #1c614a;color:#9cf2ce;border-radius:10px;padding:8px 12px}.body-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto;background:#0a1423;border-radius:9px;padding:10px;font:12px/1.5 ui-monospace,monospace;color:#cbd5e1}.message-card .muted{margin:7px 0}.footnote{color:var(--muted);font-size:12px;margin-top:22px;line-height:1.7}.stats{display:flex;gap:10px;margin:12px 0}.stat{background:#0b1526;border:1px solid var(--line);padding:8px 12px;border-radius:10px;color:var(--muted);font-size:12px}.stat strong{color:var(--text);font-size:16px;margin-right:5px}" +
-    " @media(max-width:820px){main{padding:22px 14px 40px}.grid{grid-template-columns:1fr}.create-row{grid-template-columns:1fr 1fr}.create-row .submit-cell{grid-column:1/-1}.create-row .button{width:100%}.topbar{align-items:flex-start;flex-direction:column}}@media(max-width:420px){.create-row{grid-template-columns:1fr}.create-row .submit-cell{grid-column:auto}.panel{padding:16px}.top-actions{width:100%}.top-actions button{flex:1}}" +
-    "</style></head><body><main><header class=\"brand\"><div class=\"mark\">S</div><div><strong>SeitonMail</strong><small>Private temporary inbox · " + MAIL_DOMAIN + "</small></div></header>" +
-    "<section id=\"auth\" class=\"panel auth\"><h1>Panel SeitonMail privat</h1><p>Kelola mailbox sementara dan kode verifikasi yang masuk.</p>" +
-    "<form id=\"setupForm\" hidden><label for=\"bootstrapToken\">Bootstrap token sekali pakai</label><input id=\"bootstrapToken\" type=\"password\" autocomplete=\"off\" required><label for=\"setupPassword\">Buat password owner (min. 16 karakter)</label><input id=\"setupPassword\" type=\"password\" minlength=\"16\" maxlength=\"128\" autocomplete=\"new-password\" required><button class=\"button\" type=\"submit\">Inisialisasi panel</button></form>" +
-    "<form id=\"loginForm\" hidden><div id=\"loginPasswordGroup\"><label for=\"loginPassword\">Password owner</label><input id=\"loginPassword\" type=\"password\" autocomplete=\"current-password\" required></div><div id=\"loginTotpGroup\" hidden><label for=\"loginTotpCode\">Kode autentikator atau recovery code</label><input id=\"loginTotpCode\" type=\"text\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"32\" placeholder=\"6 digit atau recovery code\"></div><button id=\"loginButton\" class=\"button\" type=\"submit\">Masuk</button></form>" +
-    "<div id=\"authStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div><div class=\"muted-note\">Panel hanya menerima email masuk. Ini bukan layanan IMAP/POP dan tidak mengirim email keluar.</div></section>" +
-    "<section id=\"dashboard\" hidden><div class=\"topbar\"><div><h1>SeitonMail inbox</h1><p>Buat mailbox acak, terima email dan kode verifikasi, dan pilih masa aktif dari 10 menit sampai 30 hari.</p></div><div class=\"top-actions\"><button id=\"refresh\" class=\"button secondary\" type=\"button\">Perbarui inbox</button><button id=\"logout\" class=\"button danger\" type=\"button\">Keluar</button></div></div>" +
-    "<div id=\"dashboardStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div>" +
-    "<div class=\"stats\"><div class=\"stat\"><strong id=\"aliasCount\">0</strong> mailbox aktif</div><div class=\"stat\"><strong id=\"messageCount\">0</strong> pesan di mailbox terpilih</div></div>" +
-    "<div class=\"grid\"><section class=\"panel\"><h2>Buat mailbox baru</h2><form id=\"createAlias\" class=\"create-row\"><div><label for=\"aliasLabel\">Label (opsional)</label><input id=\"aliasLabel\" maxlength=\"80\" placeholder=\"Contoh: akun layanan A\"></div><div><label for=\"aliasTtl\">Masa aktif</label><select id=\"aliasTtl\"><option value=\"600\">10 menit</option><option value=\"3600\">1 jam</option><option value=\"21600\">6 jam</option><option value=\"43200\">12 jam</option><option value=\"86400\" selected>1 hari</option><option value=\"259200\">3 hari</option><option value=\"604800\">7 hari</option><option value=\"1209600\">14 hari</option><option value=\"2592000\">30 hari</option></select></div><div class=\"submit-cell\"><label>&nbsp;</label><button class=\"button\" type=\"submit\">Buat SeitonMail</button></div></form><p class=\"muted-note\">Alamat unik akan disalin otomatis setelah dibuat. Setiap mailbox maksimal menerima 100 pesan.</p><div id=\"aliases\" class=\"alias-list\"></div></section>" +
-    "<section class=\"panel\"><h2>Pesan masuk</h2><p id=\"selectedAddress\" class=\"selected-address\">Pilih mailbox untuk melihat inbox.</p><div id=\"messages\" class=\"message-list\"><p class=\"empty\">Pilih mailbox di sebelah kiri.</p></div></section></div>" +
-    "<section class=\"panel\" style=\"margin-top:18px\"><h2>Keamanan Owner</h2><p id=\"twoFactorStatus\" class=\"muted\">Memeriksa status 2FA…</p><button id=\"enableTwoFactor\" class=\"button secondary\" type=\"button\">Aktifkan 2FA</button><div id=\"twoFactorEnrollment\" hidden><p class=\"muted\">Tambahkan akun berikut ke Google Authenticator, Aegis, atau Microsoft Authenticator. Masukkan kunci secara manual.</p><label>Kunci rahasia TOTP</label><code id=\"twoFactorSecret\" class=\"address\"></code><button id=\"copyTwoFactorSecret\" class=\"button secondary small\" type=\"button\">Salin kunci</button><label>URI otpauth (opsional)</label><code id=\"twoFactorUri\" class=\"address\"></code><button id=\"copyTwoFactorUri\" class=\"button secondary small\" type=\"button\">Salin URI</button><form id=\"confirmTwoFactorForm\"><label for=\"twoFactorCode\">Kode 6 digit dari aplikasi autentikator</label><input id=\"twoFactorCode\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"6\" required><button class=\"button\" type=\"submit\">Verifikasi dan aktifkan</button></form></div><div id=\"recoveryCodesPanel\" hidden><p><strong>Simpan recovery codes ini di tempat aman.</strong> Setiap kode hanya dapat dipakai sekali; kode tidak dapat ditampilkan lagi.</p><pre id=\"recoveryCodes\" class=\"body-preview\"></pre><button id=\"copyRecoveryCodes\" class=\"button secondary small\" type=\"button\">Salin recovery codes</button></div><form id=\"disableTwoFactorForm\" hidden><label for=\"disableTwoFactorPassword\">Password owner untuk menonaktifkan</label><input id=\"disableTwoFactorPassword\" type=\"password\" autocomplete=\"current-password\" required><label for=\"disableTwoFactorCode\">Kode TOTP atau recovery code</label><input id=\"disableTwoFactorCode\" type=\"text\" autocomplete=\"one-time-code\" required><button class=\"button danger\" type=\"submit\">Nonaktifkan 2FA</button></form></section>" +
-    "<section class=\"panel\" style=\"margin-top:18px\"><h2>Kredensial Agent</h2><p class=\"muted\">Buat token terpisah untuk setiap agent. Secret hanya ditampilkan satu kali.</p><form id=\"createMachineTokenForm\"><label for=\"machineTokenLabel\">Nama agent</label><input id=\"machineTokenLabel\" maxlength=\"60\" placeholder=\"Contoh: Cue CEO\" required><button class=\"button\" type=\"submit\">Buat token agent</button></form><div id=\"newMachineTokenPanel\" hidden><p><strong>Secret baru — salin sekarang dan simpan di secret vault agent.</strong></p><code id=\"newMachineTokenSecret\" class=\"address\"></code><button id=\"copyNewMachineToken\" class=\"button secondary small\" type=\"button\">Salin token</button></div><div id=\"machineTokenList\" class=\"alias-list\"></div></section>" +
-    "<p class=\"footnote\">Email untuk mailbox yang tidak dikenal atau sudah kedaluwarsa akan ditolak. Isi email dihapus saat mailbox berakhir. Lampiran belum disimpan. Jangan gunakan alamat ini untuk pemulihan akun kritis atau menerima informasi finansial penting.</p></section>" +
-    "</main><script nonce=\"" + nonce + "\">window.MAIL_SETUP_MODE=" + mode + ";</script><script nonce=\"" + nonce + "\">" + CLIENT_SCRIPT + "</script></body></html>";
+  const styles = `
+:root{color-scheme:light;--page:#f4f6f4;--surface:#fff;--soft:#f7f9f7;--line:#e1e7e1;--ink:#17231c;--muted:#6a776e;--accent:#087f5b;--accent-dark:#06684b;--danger:#b42332;--shadow:0 10px 30px rgba(28,50,35,.05)}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+main{width:min(100% - 36px,1180px);margin:0 auto;padding:28px 0 54px}
+[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.65;cursor:wait}
+:focus-visible{outline:3px solid rgba(8,127,91,.24);outline-offset:2px}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:34px}.mark{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:var(--accent);color:#fff;font-size:18px;font-weight:800}.brand strong{display:block;font-size:15px;letter-spacing:-.02em}.brand small{display:block;color:var(--muted);font-size:11px}
+h1{font-size:27px;line-height:1.18;letter-spacing:-.035em;margin:0;font-weight:730}h2{font-size:15px;margin:0;font-weight:700;letter-spacing:-.015em}.muted{color:var(--muted);font-size:12px;margin:5px 0 0}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:19px;box-shadow:var(--shadow)}
+.auth{max-width:410px;margin:48px auto 0}.auth-heading{margin-bottom:18px}.auth-heading p{color:var(--muted);font-size:13px;margin:7px 0 0}.auth label,.panel label{display:block;margin:13px 0 6px;font-size:12px;font-weight:650;color:#344239}
+input,select{width:100%;min-width:0;border:1px solid #d6ded7;border-radius:8px;padding:10px 11px;background:#fff;color:var(--ink);outline:none}
+input::placeholder{color:#9aa69d}input:focus,select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(8,127,91,.09)}
+.button{display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--accent);border-radius:8px;padding:9px 12px;background:var(--accent);color:#fff;font-size:12px;font-weight:680}
+.button:hover{background:var(--accent-dark);border-color:var(--accent-dark)}.button.secondary{background:#fff;color:#344239;border-color:#d6ded7}.button.secondary:hover{background:var(--soft)}.button.danger{background:#fff;color:var(--danger);border-color:#edc9ce}.button.danger:hover{background:#fff5f6}.button.small{padding:7px 9px;font-size:11px}
+.auth .button{width:100%;margin-top:17px;min-height:42px}.muted-note{margin:17px 0 0;color:var(--muted);font-size:11px;line-height:1.6}
+.status{min-height:19px;margin:9px 0;color:var(--muted);font-size:12px}.status.error{color:var(--danger)}
+.topbar{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:17px}.topbar p{margin:5px 0 0;color:var(--muted);font-size:13px}.top-actions{display:flex;gap:7px;flex-wrap:wrap}
+.stats{display:flex;gap:9px;flex-wrap:wrap;margin:16px 0}.stat{min-width:145px;padding:11px 13px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}.stat strong{display:inline-block;margin-right:5px;font-size:19px;font-weight:730;letter-spacing:-.03em}.stat span{color:var(--muted);font-size:11px}
+.grid{display:grid;grid-template-columns:minmax(320px,.92fr) minmax(0,1.35fr);gap:14px;align-items:start}
+.panel-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}.panel-heading p{margin:4px 0 0;color:var(--muted);font-size:11px}
+.create-row{display:grid;grid-template-columns:minmax(0,1fr) 140px auto;gap:8px;align-items:end}.create-row label{margin-top:0}.create-row button{height:39px;white-space:nowrap}
+.helper{color:var(--muted);font-size:11px;margin:9px 0 0}
+.search-wrap{margin:17px 0 10px}.search-wrap label{margin-top:0}.search-wrap input{padding:9px 11px}
+.alias-list,.message-list{display:grid;gap:9px;margin-top:12px}
+.alias-card,.message-card{min-width:0;padding:13px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.alias-card.selected{border-color:#91c9aa;background:#f7fbf8;box-shadow:inset 3px 0 0 var(--accent)}
+.alias-heading,.message-top{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}.alias-heading strong,.message-top strong{font-size:12px;overflow-wrap:anywhere}
+.state{flex:0 0 auto;border-radius:20px;padding:3px 8px;background:#e8f4ed;color:#14734e;font-size:10px;font-weight:700}
+.address{display:block;margin:8px 0;color:#116c4c;font-size:12px;overflow-wrap:anywhere}
+.alias-card .muted{font-size:11px}.alias-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}
+.empty{padding:24px 14px;text-align:center;border:1px dashed #ccd7cd;border-radius:10px;color:var(--muted);font-size:12px}.empty strong{display:block;margin-bottom:4px;color:var(--ink);font-size:13px}
+.selected-address{color:#116c4c;font-size:12px;overflow-wrap:anywhere;margin:7px 0 0}
+.code-row{display:flex;align-items:center;gap:9px;margin:12px 0 5px;flex-wrap:wrap}.otp-code{display:inline-block;font-size:21px;letter-spacing:3px;font-weight:750;background:#eaf5ee;border:1px solid #c9e4d2;color:#075e44;border-radius:8px;padding:6px 10px}
+.message-card .muted{margin:5px 0;font-size:11px}.message-body{margin-top:10px;padding-top:9px;border-top:1px solid #edf0ed}.message-body summary{cursor:pointer;color:var(--muted);font-size:11px;width:max-content}.body-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:230px;overflow:auto;background:#f6f8f6;border-radius:8px;padding:10px;margin:8px 0 0;font:11px/1.55 ui-monospace,monospace;color:#35443a}
+.footnote{color:var(--muted);font-size:11px;line-height:1.65;margin:22px 0 0}
+.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+.settings-card{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:15px}
+.settings-card summary{cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:13px;font-weight:700;list-style:none}
+.settings-card summary::-webkit-details-marker{display:none}.settings-card summary:after{content:"+";color:var(--muted);font-size:18px;font-weight:400}.settings-card[open] summary:after{content:"−"}
+.settings-content{padding-top:12px}.settings-content p{font-size:11px;line-height:1.55}.settings-content code,.settings-content pre{overflow-wrap:anywhere;white-space:pre-wrap}
+.settings-content .button{margin-top:8px}.settings-content form{margin-top:11px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}.settings-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:620px){main{width:calc(100% - 24px);padding:18px 0 38px}.brand{margin-bottom:26px}.topbar{align-items:flex-start;flex-direction:column}.top-actions{width:100%}.top-actions button{flex:1}.stats{margin:12px 0}.stat{flex:1;min-width:120px}.create-row{grid-template-columns:1fr 1fr}.create-row .submit-cell{grid-column:1/-1}.create-row .submit-cell button{width:100%}.settings-grid{grid-template-columns:1fr}.panel{padding:16px}}
+@media(max-width:390px){.create-row{grid-template-columns:1fr}.create-row .submit-cell{grid-column:auto}.panel-heading{display:block}.panel-heading p{margin-top:5px}}
+`;
+  const html = `<!doctype html><html lang="id"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#f4f6f4"><title>SeitonMail · Panel Owner</title>
+<style nonce="${nonce}">${styles}</style></head><body><main>
+<header class="brand"><span class="mark">S</span><span><strong>SeitonMail</strong><small>Panel pengelola</small></span></header>
+<section id="auth" class="panel auth">
+  <div class="auth-heading"><span class="eyebrow">AKSES PRIVAT</span><h1>Masuk ke panel</h1><p>Kelola alamat email dan pesan masuk dari satu tempat.</p></div>
+  <form id="setupForm" hidden>
+    <label for="bootstrapToken">Bootstrap token sekali pakai</label><input id="bootstrapToken" type="password" autocomplete="off" required>
+    <label for="setupPassword">Buat password Owner</label><input id="setupPassword" type="password" minlength="16" maxlength="128" autocomplete="new-password" required>
+    <p class="muted-note">Gunakan password minimal 16 karakter. Token inisialisasi hanya digunakan sekali.</p>
+    <button class="button" type="submit">Siapkan panel</button>
+  </form>
+  <form id="loginForm" hidden>
+    <div id="loginPasswordGroup"><label for="loginPassword">Password Owner</label><input id="loginPassword" type="password" autocomplete="current-password" required></div>
+    <div id="loginTotpGroup" hidden><label for="loginTotpCode">Kode autentikator atau recovery code</label><input id="loginTotpCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="32" placeholder="Kode 6 digit atau recovery code"></div>
+    <button id="loginButton" class="button" type="submit">Masuk</button>
+  </form>
+  <div id="authStatus" class="status" role="status" aria-live="polite"></div>
+  <p class="muted-note">Halaman ini hanya untuk pengelola. Agent terhubung menggunakan token terpisah, bukan akun Owner.</p>
+</section>
+<section id="dashboard" hidden>
+  <div class="topbar"><div><span class="eyebrow">PENGELOLAAN EMAIL</span><h1>Mailbox</h1><p>Buat alamat, salin untuk digunakan, lalu pantau pesan masuk.</p></div>
+    <div class="top-actions"><button id="refresh" class="button secondary" type="button">Perbarui inbox</button><button id="logout" class="button danger" type="button">Keluar</button></div>
+  </div>
+  <div id="dashboardStatus" class="status" role="status" aria-live="polite"></div>
+  <div class="stats"><div class="stat"><strong id="aliasCount">0</strong><span>mailbox aktif</span></div><div class="stat"><strong id="messageCount">0</strong><span>pesan di inbox terpilih</span></div><div class="stat"><span id="lastDashboardRefresh">Belum diperbarui</span></div></div>
+  <div class="grid">
+    <section class="panel">
+      <div class="panel-heading"><div><h2>Buat mailbox</h2><p>Alamat akan disalin otomatis setelah dibuat.</p></div></div>
+      <form id="createAlias" class="create-row">
+        <div><label for="aliasLabel">Nama atau label <span class="muted">(opsional)</span></label><input id="aliasLabel" maxlength="80" placeholder="Contoh: Verifikasi akun"></div>
+        <div><label for="aliasTtl">Masa aktif</label><select id="aliasTtl"><option value="600">10 menit</option><option value="3600">1 jam</option><option value="21600">6 jam</option><option value="43200">12 jam</option><option value="86400" selected>1 hari</option><option value="259200">3 hari</option><option value="604800">7 hari</option><option value="1209600">14 hari</option><option value="2592000">30 hari</option></select></div>
+        <div class="submit-cell"><label>&nbsp;</label><button class="button" type="submit">Buat alamat</button></div>
+      </form>
+      <p class="helper">Maksimal 100 email per mailbox. Pesan dihapus saat mailbox kedaluwarsa atau dicabut.</p>
+      <div class="search-wrap"><label for="mailboxSearch">Cari alamat atau label</label><input id="mailboxSearch" type="search" placeholder="Ketik untuk mencari…" autocomplete="off"></div>
+      <div id="aliases" class="alias-list"><p class="empty">Memuat mailbox…</p></div>
+    </section>
+    <section class="panel">
+      <div class="panel-heading"><div><h2>Pesan masuk</h2><p id="selectedAddress" class="selected-address">Pilih mailbox untuk melihat pesan.</p></div></div>
+      <div id="messages" class="message-list"><p class="empty">Pilih mailbox di sebelah kiri.</p></div>
+    </section>
+  </div>
+  <div class="settings-grid">
+    <details class="settings-card">
+      <summary>Keamanan Owner dan 2FA</summary>
+      <div class="settings-content">
+        <p id="twoFactorStatus" class="muted">Memeriksa status 2FA…</p>
+        <button id="enableTwoFactor" class="button secondary" type="button">Aktifkan 2FA</button>
+        <div id="twoFactorEnrollment" hidden>
+          <p class="muted">Tambahkan kunci ini di aplikasi autentikator, lalu konfirmasi dengan kode terbaru.</p>
+          <label>Kunci rahasia TOTP</label><code id="twoFactorSecret" class="address"></code><button id="copyTwoFactorSecret" class="button secondary small" type="button">Salin kunci</button>
+          <label>URI otpauth</label><code id="twoFactorUri" class="address"></code><button id="copyTwoFactorUri" class="button secondary small" type="button">Salin URI</button>
+          <form id="confirmTwoFactorForm"><label for="twoFactorCode">Kode 6 digit</label><input id="twoFactorCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required><button class="button" type="submit">Konfirmasi 2FA</button></form>
+        </div>
+        <div id="recoveryCodesPanel" hidden><p><strong>Simpan recovery codes di tempat aman.</strong> Setiap kode hanya dapat digunakan sekali.</p><pre id="recoveryCodes" class="body-preview"></pre><button id="copyRecoveryCodes" class="button secondary small" type="button">Salin recovery codes</button></div>
+        <form id="disableTwoFactorForm" hidden><label for="disableTwoFactorPassword">Password Owner</label><input id="disableTwoFactorPassword" type="password" autocomplete="current-password" required><label for="disableTwoFactorCode">Kode TOTP atau recovery code</label><input id="disableTwoFactorCode" type="text" autocomplete="one-time-code" required><button class="button danger" type="submit">Nonaktifkan 2FA</button></form>
+      </div>
+    </details>
+    <details class="settings-card">
+      <summary>Akses agent</summary>
+      <div class="settings-content">
+        <p class="muted">Buat token terpisah untuk setiap agent. Secret hanya ditampilkan satu kali.</p>
+        <form id="createMachineTokenForm"><label for="machineTokenLabel">Nama agent</label><input id="machineTokenLabel" maxlength="60" placeholder="Contoh: Cue CEO" required><button class="button" type="submit">Buat token agent</button></form>
+        <div id="newMachineTokenPanel" hidden><p><strong>Token baru · salin sekarang</strong></p><code id="newMachineTokenSecret" class="address"></code><button id="copyNewMachineToken" class="button secondary small" type="button">Salin token</button><p class="muted">Simpan di secret vault agent. Token tidak dapat ditampilkan kembali.</p></div>
+        <div id="machineTokenList" class="alias-list"></div>
+      </div>
+    </details>
+  </div>
+  <p class="footnote">SeitonMail menerima email masuk saja. Lampiran tidak disimpan. Gunakan alamat sementara untuk pengujian dan verifikasi yang sah, bukan untuk pemulihan akun penting atau informasi finansial.</p>
+</section>
+</main><script nonce="${nonce}">window.MAIL_SETUP_MODE=${mode};</script><script nonce="${nonce}">${CLIENT_SCRIPT}</script></body></html>`;
+  return new Response(html, {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY",
+      "Referrer-Policy": "no-referrer",
+      "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+      "X-Robots-Tag": "noindex, nofollow",
+      "Content-Security-Policy": "default-src 'none'; style-src 'nonce-" + nonce + "'; script-src 'nonce-" + nonce + "'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    }
+  });
 }
-
 async function handlePanel(request, env) {
   const nonce = randomHex(32);
   const html = renderPanel(nonce, await hasOwner(env));
