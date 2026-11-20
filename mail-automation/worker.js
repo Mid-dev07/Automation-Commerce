@@ -1586,6 +1586,7 @@ function emailFor(alias) {
     : alias.slug + "@seiton.my.id";
 }
 function showAuth(configured) {
+  if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
   statusBox = byId("authStatus");
   byId("auth").hidden = false;
   byId("dashboard").hidden = true;
@@ -1680,6 +1681,7 @@ async function loadAliases() {
 }
 async function selectAlias(id) {
   selectedAliasId = id;
+  renderAliases();
   const selected = aliasCache.find((item) => item.id === id);
   byId("selectedAddress").textContent = selected ? emailFor(selected) : "Pilih mailbox";
   await loadMessages(id);
@@ -1941,7 +1943,7 @@ main{width:min(100% - 36px,1180px);margin:0 auto;padding:28px 0 54px}
 [hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer}button:disabled{opacity:.65;cursor:wait}
 :focus-visible{outline:3px solid rgba(8,127,91,.24);outline-offset:2px}
 .brand{display:flex;align-items:center;gap:10px;margin-bottom:34px}.mark{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:var(--accent);color:#fff;font-size:18px;font-weight:800}.brand strong{display:block;font-size:15px;letter-spacing:-.02em}.brand small{display:block;color:var(--muted);font-size:11px}
-h1{font-size:27px;line-height:1.18;letter-spacing:-.035em;margin:0;font-weight:730}h2{font-size:15px;margin:0;font-weight:700;letter-spacing:-.015em}.muted{color:var(--muted);font-size:12px;margin:5px 0 0}
+.eyebrow{display:inline-block;margin-bottom:5px;color:var(--accent);font-size:10px;font-weight:750;letter-spacing:.08em}h1{font-size:27px;line-height:1.18;letter-spacing:-.035em;margin:0;font-weight:730}h2{font-size:15px;margin:0;font-weight:700;letter-spacing:-.015em}.muted{color:var(--muted);font-size:12px;margin:5px 0 0}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:19px;box-shadow:var(--shadow)}
 .auth{max-width:410px;margin:48px auto 0}.auth-heading{margin-bottom:18px}.auth-heading p{color:var(--muted);font-size:13px;margin:7px 0 0}.auth label,.panel label{display:block;margin:13px 0 6px;font-size:12px;font-weight:650;color:#344239}
 input,select{width:100%;min-width:0;border:1px solid #d6ded7;border-radius:8px;padding:10px 11px;background:#fff;color:var(--ink);outline:none}
