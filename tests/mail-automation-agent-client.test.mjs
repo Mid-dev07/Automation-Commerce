@@ -113,3 +113,29 @@ test("requires clientRef and valid mailbox IDs", () => {
   assert.throws(() => client.createMailbox({}), /clientRef/i);
   assert.throws(() => client.listMessages({ mailboxId: "bad" }), /mailboxId/i);
 });
+
+
+test("creates a mailbox with a configurable 30-day lifetime", async () => {
+  const { fetchImpl, calls } = fakeFetch(async ({ init }) => {
+    assert.equal(JSON.parse(init.body).ttlSeconds, 2592000);
+    return { payload: { ok: true, reused: false, mailbox: { id: mailboxId } }, status: 201 };
+  });
+  const client = new TMailClient({ token, fetchImpl });
+  const result = await client.createMailbox({
+    label: "long-task",
+    clientRef: "task-30d",
+    ttlSeconds: 2592000
+  });
+  assert.equal(result.mailbox.id, mailboxId);
+  assert.equal(calls.length, 1);
+});
+
+test("rejects unsupported TTL values before making an API request", async () => {
+  const { fetchImpl, calls } = fakeFetch(async () => ({ payload: { ok: true } }));
+  const client = new TMailClient({ token, fetchImpl });
+  assert.throws(
+    () => client.createMailbox({ clientRef: "invalid-ttl", ttlSeconds: 2592001 }),
+    /supported durations/i
+  );
+  assert.equal(calls.length, 0);
+});
