@@ -43,3 +43,11 @@ test("public SeitonMail page retains nonce-based security and avoids remote UI d
   assert.match(csp, /connect-src 'self'/);
   assert.doesNotMatch(html, /fonts\.googleapis\.com|fonts\.gstatic\.com|cdnjs\.cloudflare\.com/);
 });
+
+test("public copy feedback is routed to the visible inbox status while inbox is open", async () => {
+  const response = renderPublicPage("abc123de");
+  const html = await response.text();
+
+  assert.match(html, /const destination=\$\("inboxView"\).*?"inboxStatus":"status"/);
+  assert.match(html, /setStatus\("Berhasil disalin\.",false,destination\)/);
+});
