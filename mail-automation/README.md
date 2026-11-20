@@ -1,11 +1,11 @@
-# Seiton TMail — Mail Automation
+# SeitonMail — Mail Automation
 
-Public, inbound-only temporary mailbox service for Seiton. The public TMail experience
+Public, inbound-only temporary mailbox service for Seiton. The public SeitonMail experience
 is served at https://mail.seiton.biz.id/; the private Owner panel is at
 https://mail.seiton.biz.id/owner (and the legacy /login path remains available).
 Mailbox addresses are created on seiton.my.id.
 
-## TMail mailbox model
+## SeitonMail mailbox model
 
 - Public **Generate** addresses use a cryptographically random 32-character hexadecimal
   local part and expire after 10 minutes.
@@ -78,7 +78,7 @@ change. The legacy table names remain for backward compatibility.
 
 ## API compatibility
 
-New public TMail endpoints:
+New public SeitonMail endpoints:
 - POST /api/public/mailboxes
 - POST /api/public/unlock
 - GET /api/public/inbox?slug=:localPart
@@ -104,7 +104,7 @@ fields where useful, alongside the new mailboxes field.
 
 ## Email Routing cutover
 
-New random and custom TMail addresses require a catch-all Email Routing rule on the
+New random and custom SeitonMail addresses require a catch-all Email Routing rule on the
 dedicated seiton.my.id zone that sends all inbound mail to seiton-mail-automation. Keep the
 existing explicit receiver@seiton.my.id Worker rule in place during migration.
 Do not enable catch-all on the seiton.biz.id zone. The Worker itself is the final
@@ -144,18 +144,19 @@ credentials or actual sensitive inbox content in automated fixtures.
 
 ## Agent Machine API
 
-The supported agent-to-TMail contract, authentication rules, limits, request examples,
+The supported agent-to-SeitonMail contract, authentication rules, limits, request examples,
 and error handling are documented in [AGENT-API.md](./AGENT-API.md). The dependency-free
 JavaScript client is available in [agent-client.mjs](./agent-client.mjs).
 
 Each agent should use its own `TMAIL_API_TOKEN` Bearer credential stored in its private
-secret vault. Create and revoke individual credentials in the Owner panel. The legacy
+secret vault. The variable name is retained for compatibility; the product identity is
+SeitonMail. Create and revoke individual credentials in the Owner panel. The legacy
 `MAIL_VM_API_TOKEN` remains temporarily accepted during migration, so old integrations
 can be moved without an outage. Agents do not receive the Owner password, Owner cookie,
 setup token, or message-encryption key.
 
 
-## Public TMail experience
+## Public SeitonMail experience
 
 The public page and mailbox interaction are documented in [PUBLIC-SERVICE.md](./PUBLIC-SERVICE.md).
 The Worker serves the landing page at `/`, mailbox pages at `/inbox/:localPart`, and
