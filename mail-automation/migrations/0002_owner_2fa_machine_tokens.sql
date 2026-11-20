@@ -6,6 +6,7 @@ ALTER TABLE mail_admin ADD COLUMN totp_secret_ciphertext TEXT;
 ALTER TABLE mail_admin ADD COLUMN totp_pending_iv TEXT;
 ALTER TABLE mail_admin ADD COLUMN totp_pending_ciphertext TEXT;
 ALTER TABLE mail_admin ADD COLUMN totp_pending_expires_at INTEGER;
+ALTER TABLE mail_admin ADD COLUMN totp_pending_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE mail_admin ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT -1;
 
 CREATE TABLE IF NOT EXISTS mail_login_challenges (
