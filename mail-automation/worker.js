@@ -560,7 +560,8 @@ async function handleTwoFactorStatus(env) {
   });
 }
 
-async function handleTwoFactorEnroll(env) {
+async function handleTwoFactorEnroll(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
   const owner = await env.MAIL_DB.prepare(
     "SELECT totp_enabled FROM mail_admin WHERE id='owner' LIMIT 1"
   ).first();
@@ -685,7 +686,7 @@ async function handleMachineTokenCreate(request, env) {
   catch { return responseJson({ ok: false, error: "Data token tidak valid." }, 400); }
   const label = clean(body.label, 60);
   if (label.length < 2) return responseJson({ ok: false, error: "Nama agent minimal 2 karakter." }, 400);
-  const token = "tmt_" + randomHex(48);
+  const token = "tmt_" + randomHex(96);
   const tokenHash = await sha256Hex(token);
   const id = crypto.randomUUID();
   const now = Date.now();
@@ -1188,7 +1189,7 @@ async function api(request, env, url) {
   if (!session) return responseJson({ ok: false, error: "Sesi admin tidak valid atau sudah berakhir." }, 401);
 
   if (request.method === "GET" && url.pathname === "/api/2fa/status") return handleTwoFactorStatus(env);
-  if (request.method === "POST" && url.pathname === "/api/2fa/enroll") return handleTwoFactorEnroll(env);
+  if (request.method === "POST" && url.pathname === "/api/2fa/enroll") return handleTwoFactorEnroll(request, env);
   if (request.method === "POST" && url.pathname === "/api/2fa/confirm") return handleTwoFactorConfirm(request, env);
   if (request.method === "POST" && url.pathname === "/api/2fa/disable") return handleTwoFactorDisable(request, env);
   if (request.method === "GET" && url.pathname === "/api/machine-tokens") return handleMachineTokensList(env);
