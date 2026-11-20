@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mailboxAddress, parseAliasRecipient, randomHex } from "../mail-automation/worker.js";
+import {
+  mailboxAddress,
+  parseAliasRecipient,
+  randomHex,
+  isAllowedMailboxTtl,
+  isMailboxActive,
+  MAILBOX_TTL_OPTIONS_SECONDS
+} from "../mail-automation/worker.js";
 
 const tmailLocalPart = "a".repeat(32);
 const legacySlug = "b".repeat(24);
@@ -63,4 +70,25 @@ test("formats custom mailboxes and rejects invalid mailbox slugs", () => {
   assert.equal(mailboxAddress("temakuro"), "temakuro@seiton.my.id");
   assert.throws(() => mailboxAddress("ab"), /MAILBOX_SLUG_INVALID/);
   assert.throws(() => mailboxAddress("bad$name"), /MAILBOX_SLUG_INVALID/);
+});
+
+
+test("supports configured mailbox lifetime options through 30 days", () => {
+  assert.deepEqual(MAILBOX_TTL_OPTIONS_SECONDS, [
+    600, 3600, 21600, 43200, 86400, 259200, 604800, 1209600, 2592000
+  ]);
+  for (const ttl of MAILBOX_TTL_OPTIONS_SECONDS) assert.equal(isAllowedMailboxTtl(ttl), true);
+  assert.equal(isAllowedMailboxTtl("2592000"), true);
+  for (const ttl of [0, 300, 900, 2592001, -600, "30 days", null]) {
+    assert.equal(isAllowedMailboxTtl(ttl), false);
+  }
+});
+
+test("mailbox active state respects status and expiry timestamp", () => {
+  const now = 1_800_000_000_000;
+  assert.equal(isMailboxActive({ status: "ACTIVE", expires_at: now + 1000 }, now), true);
+  assert.equal(isMailboxActive({ status: "ACTIVE", expires_at: now }, now), false);
+  assert.equal(isMailboxActive({ status: "ACTIVE", expires_at: now - 1 }, now), false);
+  assert.equal(isMailboxActive({ status: "EXPIRED", expires_at: now + 1000 }, now), false);
+  assert.equal(isMailboxActive({ status: "REVOKED", expires_at: now + 1000 }, now), false);
 });
