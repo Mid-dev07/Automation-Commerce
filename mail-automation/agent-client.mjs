@@ -7,15 +7,17 @@ const MAILBOX_TTL_OPTIONS_SECONDS = new Set([
   600, 3600, 21600, 43200, 86400, 259200, 604800, 1209600, 2592000
 ]);
 
-export class TMailApiError extends Error {
+export class SeitonMailApiError extends Error {
   constructor(message, { status, payload, retryAfter } = {}) {
-    super(message || "TMail API request failed.");
-    this.name = "TMailApiError";
+    super(message || "SeitonMail API request failed.");
+    this.name = "SeitonMailApiError";
     this.status = Number(status || 0);
     this.payload = payload && typeof payload === "object" ? payload : {};
     this.retryAfter = retryAfter || null;
   }
 }
+
+export const TMailApiError = SeitonMailApiError;
 
 function requireUuid(value, fieldName) {
   const normalized = String(value || "").trim();
@@ -33,10 +35,10 @@ function requireClientRef(value) {
   return normalized;
 }
 
-export class TMailClient {
+export class SeitonMailClient {
   constructor({ token, baseUrl = DEFAULT_BASE_URL, fetchImpl = globalThis.fetch } = {}) {
     if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) {
-      throw new TypeError("A valid TMail machine Bearer token is required.");
+      throw new TypeError("A valid SeitonMail machine Bearer token is required.");
     }
     if (typeof fetchImpl !== "function") {
       throw new TypeError("A fetch implementation is required.");
@@ -49,7 +51,7 @@ export class TMailClient {
       throw new TypeError("baseUrl must be an absolute HTTPS URL.");
     }
     if (parsedBaseUrl.protocol !== "https:" || parsedBaseUrl.username || parsedBaseUrl.password) {
-      throw new TypeError("TMail baseUrl must use HTTPS and must not contain credentials.");
+      throw new TypeError("SeitonMail baseUrl must use HTTPS and must not contain credentials.");
     }
 
     this.token = token;
@@ -87,7 +89,7 @@ export class TMailClient {
     }
 
     if (!response.ok || payload?.ok === false) {
-      throw new TMailApiError(
+      throw new SeitonMailApiError(
         payload?.error || `TMail API returned HTTP ${response.status}.`,
         {
           status: response.status,
@@ -168,5 +170,7 @@ export class TMailClient {
     });
   }
 }
+
+export const TMailClient = SeitonMailClient;
 
 export { DEFAULT_BASE_URL };
