@@ -43,10 +43,18 @@ change. The legacy table names remain for backward compatibility.
 
 ## Access control
 
-- The owner panel continues to require the existing private owner login and secure,
-  HttpOnly session cookie.
-- Machine endpoints continue to require the MAIL_VM_API_TOKEN Bearer token, rate
-  limiting, per-token mailbox ownership, and per-token message access checks.
+- Owner access starts with the existing password. TOTP 2FA can be enrolled from the
+  authenticated panel using any RFC 6238-compatible authenticator (Aegis, Google
+  Authenticator, or Microsoft Authenticator).
+- The TOTP secret is encrypted with AES-GCM using a key derived from
+  MAIL_SESSION_SECRET. The panel issues 10 one-time recovery codes; only their hashes
+  are stored. Activating or disabling 2FA revokes existing Owner sessions.
+- Each agent can have an independent Machine API Bearer token, created and revoked
+  from the Owner panel. Plaintext tokens are shown once; only SHA-256 hashes are stored.
+- MAIL_VM_API_TOKEN remains as a legacy compatibility identity during migration.
+  Move agents to individual tokens before removing the legacy Worker secret.
+- Machine endpoints enforce per-token rate limits, mailbox ownership, and message
+  access checks. Agents never receive Owner cookies or Owner credentials.
 - Expired mailbox messages are no longer returned by the owner inbox API; scheduled
   cleanup removes them after expiration.
 - The upstream T-Mail example is used only as a reference for random-address / short-TTL
@@ -118,7 +126,8 @@ The supported agent-to-TMail contract, authentication rules, limits, request exa
 and error handling are documented in [AGENT-API.md](./AGENT-API.md). The dependency-free
 JavaScript client is available in [agent-client.mjs](./agent-client.mjs).
 
-Agents use a dedicated `MAIL_VM_API_TOKEN` Bearer credential stored in their private
-secret vault. They do not receive the owner password, owner cookie, setup token, or
-message-encryption key. The current Worker uses one machine credential; agents using
-the same credential share its mailbox ownership scope and rate limits.
+Each agent should use its own `TMAIL_API_TOKEN` Bearer credential stored in its private
+secret vault. Create and revoke individual credentials in the Owner panel. The legacy
+`MAIL_VM_API_TOKEN` remains temporarily accepted during migration, so old integrations
+can be moved without an outage. Agents do not receive the Owner password, Owner cookie,
+setup token, or message-encryption key.

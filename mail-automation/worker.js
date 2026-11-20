@@ -1,5 +1,6 @@
 import { parseEmail } from "./email-parser.js";
 import { extractVerificationCode } from "./otp-extractor.js";
+import { generateTotpSecret, verifyTotp } from "./totp.mjs";
 
 const PANEL_ORIGIN = "https://mail.seiton.biz.id";
 const PANEL_HOST = "mail.seiton.biz.id";
@@ -12,23 +13,30 @@ const MAX_MESSAGES_PER_ALIAS = 100;
 const SESSION_TTL_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const TOTP_ENROLLMENT_TTL_MS = 10 * 60 * 1000;
+const TOTP_RECOVERY_CODE_COUNT = 10;
 const ALLOWED_TTLS = new Set([600]); // T-Mail mailboxes expire after ten minutes.
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 function responseJson(data, status = 200, headers = {}) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-      "Referrer-Policy": "no-referrer",
-      "X-Robots-Tag": "noindex, nofollow",
-      ...headers
-    }
+  const outputHeaders = new Headers({
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Robots-Tag": "noindex, nofollow"
   });
+  for (const [name, value] of Object.entries(headers)) {
+    if (Array.isArray(value)) {
+      for (const item of value) outputHeaders.append(name, String(item));
+    } else if (value !== undefined && value !== null) {
+      outputHeaders.set(name, String(value));
+    }
+  }
+  return new Response(JSON.stringify(data), { status, headers: outputHeaders });
 }
 
 function securityHeaders(extra = {}) {
@@ -205,6 +213,15 @@ function clearedSessionCookie() {
   return "__Host-mail_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
 }
 
+function loginChallengeCookie(token) {
+  return "__Host-mail_login_challenge=" + token +
+    "; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=300";
+}
+
+function clearedLoginChallengeCookie() {
+  return "__Host-mail_login_challenge=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
+}
+
 function isSameOrigin(request) {
   return request.headers.get("Origin") === PANEL_ORIGIN;
 }
@@ -221,6 +238,79 @@ async function readJson(request, maxBytes = 8192) {
   } catch {
     throw new Error("INVALID_JSON");
   }
+}
+
+
+async function totpEncryptionKey(env) {
+  if (!env.MAIL_SESSION_SECRET || String(env.MAIL_SESSION_SECRET).length < 32) {
+    throw new Error("MAIL_SESSION_SECRET_INVALID");
+  }
+  const material = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(String(env.MAIL_SESSION_SECRET)),
+    "HKDF",
+    false,
+    ["deriveKey"]
+  );
+  return crypto.subtle.deriveKey({
+    name: "HKDF",
+    hash: "SHA-256",
+    salt: encoder.encode("seiton-tmail-owner-totp-v1"),
+    info: encoder.encode("owner-authenticator-secret")
+  }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+
+async function encryptTotpSecret(env, secret) {
+  const key = await totpEncryptionKey(env);
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, tagLength: 128 },
+    key,
+    encoder.encode(String(secret))
+  );
+  return { iv: bytesToBase64(iv), ciphertext: bytesToBase64(new Uint8Array(ciphertext)) };
+}
+
+async function decryptTotpSecret(env, ivValue, ciphertextValue) {
+  const key = await totpEncryptionKey(env);
+  const iv = base64ToBytes(ivValue);
+  if (iv.length !== 12) throw new Error("TOTP_SECRET_IV_INVALID");
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv, tagLength: 128 },
+    key,
+    base64ToBytes(ciphertextValue)
+  );
+  return decoder.decode(plaintext);
+}
+
+async function recoveryCodeHash(env, code) {
+  return sha256Hex(String(env.MAIL_SESSION_SECRET) + ":seiton-tmail-recovery:" + String(code).toLowerCase());
+}
+
+async function consumeRecoveryCode(env, code) {
+  const normalized = String(code ?? "").trim().toLowerCase();
+  if (!/^[a-f0-9]{24}$/.test(normalized)) return false;
+  const hash = await recoveryCodeHash(env, normalized);
+  const row = await env.MAIL_DB.prepare(
+    "DELETE FROM mail_2fa_recovery_codes WHERE code_hash=? RETURNING code_hash"
+  ).bind(hash).first();
+  return Boolean(row);
+}
+
+async function verifyOwnerTotp(env, owner, code) {
+  if (!owner?.totp_secret_iv || !owner?.totp_secret_ciphertext) return null;
+  const secret = await decryptTotpSecret(env, owner.totp_secret_iv, owner.totp_secret_ciphertext);
+  const step = await verifyTotp(secret, code, {
+    now: Date.now(),
+    lastAcceptedStep: Number(owner.totp_last_step ?? -1),
+    window: 1
+  });
+  if (step === null) return null;
+  const accepted = await env.MAIL_DB.prepare(
+    "UPDATE mail_admin SET totp_last_step=? WHERE id='owner' AND totp_enabled=1 AND totp_last_step<? RETURNING id"
+  ).bind(step, step).first();
+  return accepted ? step : null;
 }
 
 async function hasOwner(env) {
@@ -354,7 +444,7 @@ async function handleLogin(request, env) {
   catch { return responseJson({ ok: false, error: "Data login tidak valid." }, 400); }
   const password = typeof body.password === "string" ? body.password : "";
   const owner = await env.MAIL_DB.prepare(
-    "SELECT password_salt,password_hash FROM mail_admin WHERE id='owner' LIMIT 1"
+    "SELECT password_salt,password_hash,totp_enabled FROM mail_admin WHERE id='owner' LIMIT 1"
   ).first();
   if (!owner || password.length > 128) {
     await recordLoginFailure(env, lock.ipHash, now);
@@ -365,9 +455,84 @@ async function handleLogin(request, env) {
     const blockedUntil = await recordLoginFailure(env, lock.ipHash, now);
     return responseJson({ ok: false, error: blockedUntil ? "Terlalu banyak percobaan login. Coba 15 menit lagi." : "Password tidak valid." }, blockedUntil ? 429 : 401);
   }
+
+  if (Number(owner.totp_enabled) === 1) {
+    const challengeToken = randomHex(64);
+    const challengeHash = await sha256Hex(challengeToken);
+    await env.MAIL_DB.prepare(
+      "INSERT INTO mail_login_challenges(challenge_hash,ip_hash,created_at,expires_at,attempts) VALUES(?,?,?,?,0)"
+    ).bind(challengeHash, lock.ipHash, now, now + LOGIN_CHALLENGE_TTL_MS).run();
+    return responseJson(
+      { ok: true, requiresTwoFactor: true },
+      200,
+      { "Set-Cookie": loginChallengeCookie(challengeToken) }
+    );
+  }
+
   await env.MAIL_DB.prepare("DELETE FROM mail_login_attempts WHERE ip_hash=?").bind(lock.ipHash).run();
   const token = await createSession(env);
   return responseJson({ ok: true }, 200, { "Set-Cookie": sessionCookie(token) });
+}
+
+async function handleLoginTwoFactor(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  const challengeToken = getCookie(request, "__Host-mail_login_challenge");
+  if (!/^[a-f0-9]{64}$/.test(challengeToken)) {
+    return responseJson({ ok: false, error: "Sesi verifikasi 2FA tidak valid. Masuk kembali." }, 401, {
+      "Set-Cookie": clearedLoginChallengeCookie()
+    });
+  }
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Kode verifikasi tidak valid." }, 400); }
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  const challengeHash = await sha256Hex(challengeToken);
+  const challenge = await env.MAIL_DB.prepare(
+    "SELECT challenge_hash,ip_hash,expires_at,attempts FROM mail_login_challenges WHERE challenge_hash=? LIMIT 1"
+  ).bind(challengeHash).first();
+  const ipHash = await loginIpHash(request, env);
+  const now = Date.now();
+  if (!challenge || Number(challenge.expires_at) <= now || !constantTimeEqual(challenge.ip_hash, ipHash)) {
+    if (challenge) await env.MAIL_DB.prepare("DELETE FROM mail_login_challenges WHERE challenge_hash=?").bind(challengeHash).run();
+    return responseJson({ ok: false, error: "Sesi verifikasi 2FA sudah berakhir. Masuk kembali." }, 401, {
+      "Set-Cookie": clearedLoginChallengeCookie()
+    });
+  }
+  if (Number(challenge.attempts) >= 5) {
+    await env.MAIL_DB.prepare("DELETE FROM mail_login_challenges WHERE challenge_hash=?").bind(challengeHash).run();
+    return responseJson({ ok: false, error: "Terlalu banyak percobaan kode 2FA. Masuk kembali." }, 429, {
+      "Set-Cookie": clearedLoginChallengeCookie()
+    });
+  }
+
+  const owner = await env.MAIL_DB.prepare(
+    "SELECT totp_enabled,totp_secret_iv,totp_secret_ciphertext,totp_last_step FROM mail_admin WHERE id='owner' LIMIT 1"
+  ).first();
+  let valid = false;
+  if (owner && Number(owner.totp_enabled) === 1) {
+    valid = (await verifyOwnerTotp(env, owner, code)) !== null;
+    if (!valid) valid = await consumeRecoveryCode(env, code);
+  }
+  if (!valid) {
+    const attempts = Number(challenge.attempts) + 1;
+    if (attempts >= 5) {
+      await env.MAIL_DB.prepare("DELETE FROM mail_login_challenges WHERE challenge_hash=?").bind(challengeHash).run();
+    } else {
+      await env.MAIL_DB.prepare(
+        "UPDATE mail_login_challenges SET attempts=? WHERE challenge_hash=?"
+      ).bind(attempts, challengeHash).run();
+    }
+    return responseJson({ ok: false, error: attempts >= 5 ? "Kode salah lima kali. Silakan masuk kembali." : "Kode autentikator atau recovery code tidak valid." }, attempts >= 5 ? 429 : 401, {
+      ...(attempts >= 5 ? { "Set-Cookie": clearedLoginChallengeCookie() } : {})
+    });
+  }
+
+  await env.MAIL_DB.prepare("DELETE FROM mail_login_challenges WHERE challenge_hash=?").bind(challengeHash).run();
+  await env.MAIL_DB.prepare("DELETE FROM mail_login_attempts WHERE ip_hash=?").bind(ipHash).run();
+  const token = await createSession(env);
+  return responseJson({ ok: true }, 200, {
+    "Set-Cookie": [sessionCookie(token), clearedLoginChallengeCookie()]
+  });
 }
 
 async function handleLogout(request, env) {
@@ -376,7 +541,174 @@ async function handleLogout(request, env) {
   if (session) {
     await env.MAIL_DB.prepare("DELETE FROM mail_sessions WHERE session_hash=?").bind(session.tokenHash).run();
   }
-  return responseJson({ ok: true }, 200, { "Set-Cookie": clearedSessionCookie() });
+  return responseJson({ ok: true }, 200, { "Set-Cookie": [clearedSessionCookie(), clearedLoginChallengeCookie()] });
+}
+
+
+async function handleTwoFactorStatus(env) {
+  const owner = await env.MAIL_DB.prepare(
+    "SELECT totp_enabled,totp_pending_expires_at FROM mail_admin WHERE id='owner' LIMIT 1"
+  ).first();
+  const recovery = await env.MAIL_DB.prepare(
+    "SELECT COUNT(*) AS total FROM mail_2fa_recovery_codes"
+  ).first();
+  return responseJson({
+    ok: true,
+    enabled: Number(owner?.totp_enabled) === 1,
+    enrollment_pending: Number(owner?.totp_pending_expires_at || 0) > Date.now(),
+    recovery_codes_remaining: Number(recovery?.total || 0)
+  });
+}
+
+async function handleTwoFactorEnroll(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  const owner = await env.MAIL_DB.prepare(
+    "SELECT totp_enabled FROM mail_admin WHERE id='owner' LIMIT 1"
+  ).first();
+  if (!owner) return responseJson({ ok: false, error: "Owner belum diinisialisasi." }, 503);
+  if (Number(owner.totp_enabled) === 1) {
+    return responseJson({ ok: false, error: "2FA sudah aktif. Nonaktifkan terlebih dahulu jika ingin mengganti perangkat." }, 409);
+  }
+  const secret = generateTotpSecret();
+  const encrypted = await encryptTotpSecret(env, secret);
+  const expiresAt = Date.now() + TOTP_ENROLLMENT_TTL_MS;
+  await env.MAIL_DB.prepare(
+    "UPDATE mail_admin SET totp_pending_iv=?,totp_pending_ciphertext=?,totp_pending_expires_at=?,totp_pending_attempts=0 WHERE id='owner'"
+  ).bind(encrypted.iv, encrypted.ciphertext, expiresAt).run();
+  const label = encodeURIComponent("owner@mail.seiton.biz.id");
+  const issuer = encodeURIComponent("Seiton TMail");
+  const uri = "otpauth://totp/" + issuer + ":" + label + "?secret=" + secret +
+    "&issuer=" + issuer + "&algorithm=SHA1&digits=6&period=30";
+  return responseJson({ ok: true, secret, otpauth_uri: uri, expires_at: expiresAt });
+}
+
+async function handleTwoFactorConfirm(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Kode autentikator tidak valid." }, 400); }
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  const owner = await env.MAIL_DB.prepare(
+    "SELECT totp_pending_iv,totp_pending_ciphertext,totp_pending_expires_at,totp_pending_attempts FROM mail_admin WHERE id='owner' LIMIT 1"
+  ).first();
+  if (!owner?.totp_pending_iv || !owner?.totp_pending_ciphertext || Number(owner.totp_pending_expires_at) <= Date.now()) {
+    return responseJson({ ok: false, error: "Pendaftaran 2FA tidak ditemukan atau sudah kedaluwarsa. Mulai kembali." }, 410);
+  }
+  if (Number(owner.totp_pending_attempts || 0) >= 5) {
+    await env.MAIL_DB.prepare(
+      "UPDATE mail_admin SET totp_pending_iv=NULL,totp_pending_ciphertext=NULL,totp_pending_expires_at=NULL,totp_pending_attempts=0 WHERE id='owner'"
+    ).run();
+    return responseJson({ ok: false, error: "Terlalu banyak percobaan. Mulai pendaftaran 2FA kembali." }, 429);
+  }
+  const secret = await decryptTotpSecret(env, owner.totp_pending_iv, owner.totp_pending_ciphertext);
+  const step = await verifyTotp(secret, code, { now: Date.now(), lastAcceptedStep: -1, window: 1 });
+  if (step === null) {
+    const attempts = Number(owner.totp_pending_attempts || 0) + 1;
+    await env.MAIL_DB.prepare(
+      "UPDATE mail_admin SET totp_pending_attempts=?,totp_pending_iv=CASE WHEN ?>=5 THEN NULL ELSE totp_pending_iv END," +
+      "totp_pending_ciphertext=CASE WHEN ?>=5 THEN NULL ELSE totp_pending_ciphertext END," +
+      "totp_pending_expires_at=CASE WHEN ?>=5 THEN NULL ELSE totp_pending_expires_at END WHERE id='owner'"
+    ).bind(attempts, attempts, attempts, attempts).run();
+    return responseJson({ ok: false, error: attempts >= 5 ? "Kode salah lima kali. Mulai pendaftaran kembali." : "Kode autentikator tidak cocok." }, attempts >= 5 ? 429 : 401);
+  }
+
+  const recoveryCodes = Array.from({ length: TOTP_RECOVERY_CODE_COUNT }, () => randomHex(24));
+  const statements = recoveryCodes.map(async (codeValue) => {
+    const codeHash = await recoveryCodeHash(env, codeValue);
+    return env.MAIL_DB.prepare(
+      "INSERT INTO mail_2fa_recovery_codes(code_hash,created_at) VALUES(?,?)"
+    ).bind(codeHash, Date.now());
+  });
+  const recoveryStatements = await Promise.all(statements);
+  await env.MAIL_DB.batch([
+    env.MAIL_DB.prepare(
+      "UPDATE mail_admin SET totp_enabled=1,totp_secret_iv=totp_pending_iv,totp_secret_ciphertext=totp_pending_ciphertext," +
+      "totp_pending_iv=NULL,totp_pending_ciphertext=NULL,totp_pending_expires_at=NULL,totp_pending_attempts=0,totp_last_step=? WHERE id='owner'"
+    ).bind(step),
+    ...recoveryStatements,
+    env.MAIL_DB.prepare("DELETE FROM mail_sessions"),
+    env.MAIL_DB.prepare("DELETE FROM mail_login_challenges")
+  ]);
+  return responseJson(
+    { ok: true, enabled: true, recovery_codes: recoveryCodes, reauth_required: true },
+    200,
+    { "Set-Cookie": clearedSessionCookie() }
+  );
+}
+
+async function handleTwoFactorDisable(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Data verifikasi tidak valid." }, 400); }
+  const password = typeof body.password === "string" ? body.password : "";
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  const owner = await env.MAIL_DB.prepare(
+    "SELECT password_salt,password_hash,totp_enabled,totp_secret_iv,totp_secret_ciphertext,totp_last_step FROM mail_admin WHERE id='owner' LIMIT 1"
+  ).first();
+  if (!owner || Number(owner.totp_enabled) !== 1 || password.length > 128) {
+    return responseJson({ ok: false, error: "Verifikasi tidak valid." }, 401);
+  }
+  const computed = await passwordHash(password, base64ToBytes(owner.password_salt));
+  if (!constantTimeEqual(computed, owner.password_hash)) {
+    return responseJson({ ok: false, error: "Password atau kode autentikator tidak valid." }, 401);
+  }
+  let valid = (await verifyOwnerTotp(env, owner, code)) !== null;
+  if (!valid) valid = await consumeRecoveryCode(env, code);
+  if (!valid) return responseJson({ ok: false, error: "Password atau kode autentikator/recovery tidak valid." }, 401);
+  await env.MAIL_DB.batch([
+    env.MAIL_DB.prepare(
+      "UPDATE mail_admin SET totp_enabled=0,totp_secret_iv=NULL,totp_secret_ciphertext=NULL," +
+      "totp_pending_iv=NULL,totp_pending_ciphertext=NULL,totp_pending_expires_at=NULL,totp_pending_attempts=0,totp_last_step=-1 WHERE id='owner'"
+    ),
+    env.MAIL_DB.prepare("DELETE FROM mail_2fa_recovery_codes"),
+    env.MAIL_DB.prepare("DELETE FROM mail_sessions"),
+    env.MAIL_DB.prepare("DELETE FROM mail_login_challenges")
+  ]);
+  return responseJson(
+    { ok: true, disabled: true, reauth_required: true },
+    200,
+    { "Set-Cookie": clearedSessionCookie() }
+  );
+}
+
+async function handleMachineTokensList(env) {
+  const result = await env.MAIL_DB.prepare(
+    "SELECT id,label,token_prefix,status,created_at,last_used_at,revoked_at FROM mail_machine_tokens ORDER BY created_at DESC LIMIT 100"
+  ).all();
+  return responseJson({ ok: true, tokens: result.results || [] });
+}
+
+async function handleMachineTokenCreate(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Data token tidak valid." }, 400); }
+  const label = clean(body.label, 60);
+  if (label.length < 2) return responseJson({ ok: false, error: "Nama agent minimal 2 karakter." }, 400);
+  const token = "tmt_" + randomHex(96);
+  const tokenHash = await sha256Hex(token);
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  await env.MAIL_DB.prepare(
+    "INSERT INTO mail_machine_tokens(id,label,token_hash,token_prefix,status,created_at) VALUES(?,?,?,?,'ACTIVE',?)"
+  ).bind(id, label, tokenHash, token.slice(0, 12), now).run();
+  return responseJson({
+    ok: true,
+    token: { id, label, token_prefix: token.slice(0, 12), status: "ACTIVE", created_at: now },
+    secret: token,
+    warning: "Secret hanya ditampilkan sekali. Simpan di secret vault agent, bukan di prompt atau repository."
+  }, 201);
+}
+
+async function handleMachineTokenRevoke(request, env, id) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return responseJson({ ok: false, error: "ID token tidak valid." }, 400);
+  const row = await env.MAIL_DB.prepare(
+    "UPDATE mail_machine_tokens SET status='REVOKED',revoked_at=? WHERE id=? AND status='ACTIVE' RETURNING id"
+  ).bind(Date.now(), id).first();
+  if (!row) return responseJson({ ok: false, error: "Token aktif tidak ditemukan." }, 404);
+  return responseJson({ ok: true, revoked: true });
 }
 
 async function handleAliasesGet(env) {
@@ -476,15 +808,29 @@ function parseBearerToken(request) {
 }
 
 async function authenticateMachine(request, env) {
-  if (!env.MAIL_VM_API_TOKEN || !env.MAIL_DB) {
+  if (!env.MAIL_DB) {
     return { response: responseJson({ ok: false, error: "Machine API belum dikonfigurasi." }, 503) };
   }
   const supplied = parseBearerToken(request);
-  if (!supplied || !constantTimeEqual(supplied, env.MAIL_VM_API_TOKEN)) {
+  if (!supplied) {
     return { response: responseJson({ ok: false, error: "Token API tidak valid." }, 401) };
   }
 
-  const tokenHash = await sha256Hex(env.MAIL_VM_API_TOKEN);
+  const tokenHash = await sha256Hex(supplied);
+  const registered = await env.MAIL_DB.prepare(
+    "SELECT id FROM mail_machine_tokens WHERE token_hash=? AND status='ACTIVE' LIMIT 1"
+  ).bind(tokenHash).first();
+  const legacyAccepted = !registered && Boolean(env.MAIL_VM_API_TOKEN) &&
+    constantTimeEqual(supplied, env.MAIL_VM_API_TOKEN);
+  if (!registered && !legacyAccepted) {
+    return { response: responseJson({ ok: false, error: "Token API tidak valid atau sudah dicabut." }, 401) };
+  }
+  if (registered) {
+    await env.MAIL_DB.prepare(
+      "UPDATE mail_machine_tokens SET last_used_at=? WHERE id=?"
+    ).bind(Date.now(), registered.id).run();
+  }
+
   const now = Date.now();
   const cutoff = now - MACHINE_API_RATE_WINDOW_MS;
   const rate = await env.MAIL_DB.prepare(
@@ -523,12 +869,13 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
     return responseJson({ ok: false, error: "clientRef hanya boleh berisi huruf, angka, titik, garis bawah, titik dua, dan tanda hubung." }, 400);
   }
 
+  const storedClientRef = clientRef ? tokenHash.slice(0, 20) + ":" + clientRef : "";
   if (clientRef) {
     const existing = await env.MAIL_DB.prepare(
       "SELECT a.id,a.slug,a.label,a.status,a.created_at,a.expires_at,a.received_count " +
       "FROM mail_machine_aliases m JOIN mail_aliases a ON a.id=m.alias_id " +
-      "WHERE m.client_ref=? AND m.token_hash=? LIMIT 1"
-    ).bind(clientRef, tokenHash).first();
+      "WHERE (m.client_ref=? OR m.client_ref=?) AND m.token_hash=? LIMIT 1"
+    ).bind(storedClientRef, clientRef, tokenHash).first();
     if (existing) {
       if (existing.status !== "ACTIVE" || Number(existing.expires_at) <= Date.now()) {
         return responseJson({ ok: false, error: "clientRef sudah pernah dipakai dan aliasnya tidak lagi aktif." }, 409);
@@ -569,7 +916,7 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
     ).bind(id, slug, label, now, expiresAt),
     env.MAIL_DB.prepare(
       "INSERT INTO mail_machine_aliases(alias_id,client_ref,token_hash,created_at) VALUES(?,?,?,?)"
-    ).bind(id, clientRef || null, tokenHash, now)
+    ).bind(id, storedClientRef || null, tokenHash, now)
   ]);
 
   return responseJson({
@@ -829,15 +1176,27 @@ async function api(request, env, url) {
     return responseJson({
       ok: true,
       configured: await hasOwner(env),
-      authenticated: Boolean(await currentSession(request, env))
+      authenticated: Boolean(await currentSession(request, env)),
+      two_factor_enabled: Number((await env.MAIL_DB.prepare("SELECT totp_enabled FROM mail_admin WHERE id='owner' LIMIT 1").first())?.totp_enabled || 0) === 1
     });
   }
   if (request.method === "POST" && url.pathname === "/api/setup") return handleSetup(request, env);
   if (request.method === "POST" && url.pathname === "/api/login") return handleLogin(request, env);
+  if (request.method === "POST" && url.pathname === "/api/login/2fa") return handleLoginTwoFactor(request, env);
   if (request.method === "POST" && url.pathname === "/api/logout") return handleLogout(request, env);
 
   const session = await requireSession(request, env);
   if (!session) return responseJson({ ok: false, error: "Sesi admin tidak valid atau sudah berakhir." }, 401);
+
+  if (request.method === "GET" && url.pathname === "/api/2fa/status") return handleTwoFactorStatus(env);
+  if (request.method === "POST" && url.pathname === "/api/2fa/enroll") return handleTwoFactorEnroll(request, env);
+  if (request.method === "POST" && url.pathname === "/api/2fa/confirm") return handleTwoFactorConfirm(request, env);
+  if (request.method === "POST" && url.pathname === "/api/2fa/disable") return handleTwoFactorDisable(request, env);
+  if (request.method === "GET" && url.pathname === "/api/machine-tokens") return handleMachineTokensList(env);
+  if (request.method === "POST" && url.pathname === "/api/machine-tokens") return handleMachineTokenCreate(request, env);
+  if (request.method === "DELETE" && url.pathname.startsWith("/api/machine-tokens/")) {
+    return handleMachineTokenRevoke(request, env, url.pathname.slice("/api/machine-tokens/".length));
+  }
 
   if (request.method === "GET" && (url.pathname === "/api/mailboxes" || url.pathname === "/api/aliases")) return handleAliasesGet(env);
   if (request.method === "POST" && url.pathname === "/api/mailboxes") {
@@ -868,6 +1227,8 @@ const byId = (id) => document.getElementById(id);
 let statusBox = byId("authStatus");
 let selectedAliasId = "";
 let aliasCache = [];
+let loginNeedsTotp = false;
+let currentNewMachineToken = "";
 
 function setStatus(message, bad) {
   statusBox.textContent = message || "";
@@ -913,6 +1274,12 @@ function showAuth(configured) {
   byId("dashboard").hidden = true;
   byId("setupForm").hidden = configured;
   byId("loginForm").hidden = !configured;
+  loginNeedsTotp = false;
+  byId("loginPasswordGroup").hidden = false;
+  byId("loginPassword").required = true;
+  byId("loginTotpGroup").hidden = true;
+  byId("loginTotpCode").required = false;
+  byId("loginButton").textContent = "Masuk";
   setStatus(configured ? "Masuk untuk membuka panel privat." : "Setup awal: gunakan bootstrap token yang diberikan owner.");
 }
 function showDashboard() {
@@ -921,6 +1288,7 @@ function showDashboard() {
   byId("dashboard").hidden = false;
   setStatus("Panel TMail terhubung. Mailbox dan pesan tersimpan di database privat.");
   loadAliases().catch((error) => setStatus(error.message, true));
+  loadSecuritySettings().catch((error) => setStatus(error.message, true));
 }
 function renderAliases() {
   const target = byId("aliases");
@@ -1034,8 +1402,26 @@ async function revokeAlias(id) {
 byId("loginForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    await api("/api/login", { method: "POST", body: { password: byId("loginPassword").value } });
+    if (loginNeedsTotp) {
+      await api("/api/login/2fa", { method: "POST", body: { code: byId("loginTotpCode").value } });
+      byId("loginTotpCode").value = "";
+      loginNeedsTotp = false;
+      showDashboard();
+      return;
+    }
+    const result = await api("/api/login", { method: "POST", body: { password: byId("loginPassword").value } });
     byId("loginPassword").value = "";
+    if (result.requiresTwoFactor) {
+      loginNeedsTotp = true;
+      byId("loginPasswordGroup").hidden = true;
+      byId("loginPassword").required = false;
+      byId("loginTotpGroup").hidden = false;
+      byId("loginTotpCode").required = true;
+      byId("loginButton").textContent = "Verifikasi 2FA";
+      byId("loginTotpCode").focus();
+      setStatus("Password benar. Masukkan kode autentikator atau recovery code.");
+      return;
+    }
     showDashboard();
   } catch (error) { setStatus(error.message, true); }
 });
@@ -1053,6 +1439,114 @@ byId("setupForm").addEventListener("submit", async (event) => {
     showDashboard();
   } catch (error) { setStatus(error.message, true); }
 });
+
+async function loadSecuritySettings() {
+  const status = await api("/api/2fa/status");
+  byId("twoFactorStatus").textContent = status.enabled
+    ? "2FA aktif. Sisa recovery codes: " + status.recovery_codes_remaining
+    : "2FA belum aktif. Aktifkan untuk mewajibkan kode autentikator saat login Owner.";
+  byId("enableTwoFactor").hidden = status.enabled;
+  byId("disableTwoFactorForm").hidden = !status.enabled;
+  await loadMachineTokens();
+}
+async function loadMachineTokens() {
+  const data = await api("/api/machine-tokens");
+  const target = byId("machineTokenList");
+  target.replaceChildren();
+  if (!data.tokens.length) {
+    target.append(element("p", "empty", "Belum ada token agent. Token lama MAIL_VM_API_TOKEN tetap berlaku selama masih dikonfigurasi."));
+    return;
+  }
+  for (const token of data.tokens) {
+    const card = element("article", "alias-card");
+    const title = element("strong", "", token.label);
+    const prefix = element("code", "address", token.token_prefix + "…");
+    const meta = element("p", "muted",
+      token.status + " • dibuat " + formatDate(token.created_at) +
+      (token.last_used_at ? " • terakhir dipakai " + formatDate(token.last_used_at) : " • belum pernah dipakai"));
+    card.append(title, prefix, meta);
+    if (token.status === "ACTIVE") {
+      const revoke = element("button", "button danger small", "Cabut token");
+      revoke.type = "button";
+      revoke.addEventListener("click", async () => {
+        if (!window.confirm("Cabut token " + token.label + "? Agent ini akan langsung kehilangan akses; agent lain tidak terpengaruh.")) return;
+        try {
+          await api("/api/machine-tokens/" + encodeURIComponent(token.id), { method: "DELETE" });
+          await loadMachineTokens();
+          setStatus("Token agent berhasil dicabut.");
+        } catch (error) { setStatus(error.message, true); }
+      });
+      card.append(revoke);
+    }
+    target.append(card);
+  }
+}
+byId("enableTwoFactor").addEventListener("click", async () => {
+  try {
+    const data = await api("/api/2fa/enroll", { method: "POST", body: {} });
+    byId("twoFactorSecret").textContent = data.secret;
+    byId("twoFactorUri").textContent = data.otpauth_uri;
+    byId("twoFactorEnrollment").hidden = false;
+    byId("twoFactorCode").focus();
+    setStatus("Pendaftaran 2FA berlaku 10 menit. Masukkan kode autentikator untuk mengaktifkan.");
+  } catch (error) { setStatus(error.message, true); }
+});
+byId("copyTwoFactorSecret").addEventListener("click", () => copyText(byId("twoFactorSecret").textContent));
+byId("copyTwoFactorUri").addEventListener("click", () => copyText(byId("twoFactorUri").textContent));
+byId("confirmTwoFactorForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const result = await api("/api/2fa/confirm", {
+      method: "POST",
+      body: { code: byId("twoFactorCode").value }
+    });
+    byId("twoFactorCode").value = "";
+    byId("twoFactorEnrollment").hidden = true;
+    byId("recoveryCodes").textContent = result.recovery_codes.join("\\n");
+    byId("recoveryCodesPanel").hidden = false;
+    byId("twoFactorStatus").textContent = "2FA aktif. Login berikutnya akan meminta kode autentikator.";
+    byId("enableTwoFactor").hidden = true;
+    byId("disableTwoFactorForm").hidden = false;
+    setStatus("2FA aktif. Sesi Owner sudah dicabut. Simpan recovery codes sekarang, lalu masuk kembali.");
+    byId("logout").textContent = "Masuk ulang";
+  } catch (error) { setStatus(error.message, true); }
+});
+byId("copyRecoveryCodes").addEventListener("click", () => copyText(byId("recoveryCodes").textContent));
+byId("disableTwoFactorForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!window.confirm("Nonaktifkan 2FA untuk panel Owner?")) return;
+  try {
+    await api("/api/2fa/disable", {
+      method: "POST",
+      body: {
+        password: byId("disableTwoFactorPassword").value,
+        code: byId("disableTwoFactorCode").value
+      }
+    });
+    byId("disableTwoFactorForm").reset();
+    showAuth(true);
+    setStatus("2FA dinonaktifkan. Masuk kembali untuk membuat sesi baru.");
+  } catch (error) { setStatus(error.message, true); }
+});
+byId("createMachineTokenForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const result = await api("/api/machine-tokens", {
+      method: "POST",
+      body: { label: byId("machineTokenLabel").value }
+    });
+    currentNewMachineToken = result.secret;
+    byId("newMachineTokenSecret").textContent = currentNewMachineToken;
+    byId("newMachineTokenPanel").hidden = false;
+    byId("machineTokenLabel").value = "";
+    await loadMachineTokens();
+    setStatus("Token dibuat. Salin dan simpan ke secret vault agent sekarang; secret tidak akan ditampilkan lagi.");
+  } catch (error) { setStatus(error.message, true); }
+});
+byId("copyNewMachineToken").addEventListener("click", () => {
+  if (currentNewMachineToken) copyText(currentNewMachineToken);
+});
+
 byId("createAlias").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -1109,13 +1603,15 @@ function renderPanel(nonce, configured) {
     "</style></head><body><main><header class=\"brand\"><div class=\"mark\">S</div><div><strong>Seiton TMail</strong><small>Private temporary inbox · " + MAIL_DOMAIN + "</small></div></header>" +
     "<section id=\"auth\" class=\"panel auth\"><h1>Panel TMail privat</h1><p>Kelola mailbox sementara dan kode verifikasi yang masuk.</p>" +
     "<form id=\"setupForm\" hidden><label for=\"bootstrapToken\">Bootstrap token sekali pakai</label><input id=\"bootstrapToken\" type=\"password\" autocomplete=\"off\" required><label for=\"setupPassword\">Buat password owner (min. 16 karakter)</label><input id=\"setupPassword\" type=\"password\" minlength=\"16\" maxlength=\"128\" autocomplete=\"new-password\" required><button class=\"button\" type=\"submit\">Inisialisasi panel</button></form>" +
-    "<form id=\"loginForm\" hidden><label for=\"loginPassword\">Password owner</label><input id=\"loginPassword\" type=\"password\" autocomplete=\"current-password\" required><button class=\"button\" type=\"submit\">Masuk</button></form>" +
+    "<form id=\"loginForm\" hidden><div id=\"loginPasswordGroup\"><label for=\"loginPassword\">Password owner</label><input id=\"loginPassword\" type=\"password\" autocomplete=\"current-password\" required></div><div id=\"loginTotpGroup\" hidden><label for=\"loginTotpCode\">Kode autentikator atau recovery code</label><input id=\"loginTotpCode\" type=\"text\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"32\" placeholder=\"6 digit atau recovery code\"></div><button id=\"loginButton\" class=\"button\" type=\"submit\">Masuk</button></form>" +
     "<div id=\"authStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div><div class=\"muted-note\">Panel hanya menerima email masuk. Ini bukan layanan IMAP/POP dan tidak mengirim email keluar.</div></section>" +
     "<section id=\"dashboard\" hidden><div class=\"topbar\"><div><h1>TMail inbox</h1><p>Buat mailbox acak, terima email dan kode verifikasi, lalu biarkan kedaluwarsa otomatis setelah 10 menit.</p></div><div class=\"top-actions\"><button id=\"refresh\" class=\"button secondary\" type=\"button\">Perbarui inbox</button><button id=\"logout\" class=\"button danger\" type=\"button\">Keluar</button></div></div>" +
     "<div id=\"dashboardStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div>" +
     "<div class=\"stats\"><div class=\"stat\"><strong id=\"aliasCount\">0</strong> mailbox aktif</div><div class=\"stat\"><strong id=\"messageCount\">0</strong> pesan di mailbox terpilih</div></div>" +
     "<div class=\"grid\"><section class=\"panel\"><h2>Buat mailbox baru</h2><form id=\"createAlias\" class=\"create-row\"><div><label for=\"aliasLabel\">Label (opsional)</label><input id=\"aliasLabel\" maxlength=\"80\" placeholder=\"Contoh: akun layanan A\"></div><div><label for=\"aliasTtl\">Masa aktif</label><select id=\"aliasTtl\"><option value=\"600\" selected>10 menit</option></select></div><div class=\"submit-cell\"><label>&nbsp;</label><button class=\"button\" type=\"submit\">Buat TMail</button></div></form><p class=\"muted-note\">Alamat unik akan disalin otomatis setelah dibuat. Setiap mailbox maksimal menerima 100 pesan.</p><div id=\"aliases\" class=\"alias-list\"></div></section>" +
     "<section class=\"panel\"><h2>Pesan masuk</h2><p id=\"selectedAddress\" class=\"selected-address\">Pilih mailbox untuk melihat inbox.</p><div id=\"messages\" class=\"message-list\"><p class=\"empty\">Pilih mailbox di sebelah kiri.</p></div></section></div>" +
+    "<section class=\"panel\" style=\"margin-top:18px\"><h2>Keamanan Owner</h2><p id=\"twoFactorStatus\" class=\"muted\">Memeriksa status 2FA…</p><button id=\"enableTwoFactor\" class=\"button secondary\" type=\"button\">Aktifkan 2FA</button><div id=\"twoFactorEnrollment\" hidden><p class=\"muted\">Tambahkan akun berikut ke Google Authenticator, Aegis, atau Microsoft Authenticator. Masukkan kunci secara manual.</p><label>Kunci rahasia TOTP</label><code id=\"twoFactorSecret\" class=\"address\"></code><button id=\"copyTwoFactorSecret\" class=\"button secondary small\" type=\"button\">Salin kunci</button><label>URI otpauth (opsional)</label><code id=\"twoFactorUri\" class=\"address\"></code><button id=\"copyTwoFactorUri\" class=\"button secondary small\" type=\"button\">Salin URI</button><form id=\"confirmTwoFactorForm\"><label for=\"twoFactorCode\">Kode 6 digit dari aplikasi autentikator</label><input id=\"twoFactorCode\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"6\" required><button class=\"button\" type=\"submit\">Verifikasi dan aktifkan</button></form></div><div id=\"recoveryCodesPanel\" hidden><p><strong>Simpan recovery codes ini di tempat aman.</strong> Setiap kode hanya dapat dipakai sekali; kode tidak dapat ditampilkan lagi.</p><pre id=\"recoveryCodes\" class=\"body-preview\"></pre><button id=\"copyRecoveryCodes\" class=\"button secondary small\" type=\"button\">Salin recovery codes</button></div><form id=\"disableTwoFactorForm\" hidden><label for=\"disableTwoFactorPassword\">Password owner untuk menonaktifkan</label><input id=\"disableTwoFactorPassword\" type=\"password\" autocomplete=\"current-password\" required><label for=\"disableTwoFactorCode\">Kode TOTP atau recovery code</label><input id=\"disableTwoFactorCode\" type=\"text\" autocomplete=\"one-time-code\" required><button class=\"button danger\" type=\"submit\">Nonaktifkan 2FA</button></form></section>" +
+    "<section class=\"panel\" style=\"margin-top:18px\"><h2>Kredensial Agent</h2><p class=\"muted\">Buat token terpisah untuk setiap agent. Secret hanya ditampilkan satu kali.</p><form id=\"createMachineTokenForm\"><label for=\"machineTokenLabel\">Nama agent</label><input id=\"machineTokenLabel\" maxlength=\"60\" placeholder=\"Contoh: Cue CEO\" required><button class=\"button\" type=\"submit\">Buat token agent</button></form><div id=\"newMachineTokenPanel\" hidden><p><strong>Secret baru — salin sekarang dan simpan di secret vault agent.</strong></p><code id=\"newMachineTokenSecret\" class=\"address\"></code><button id=\"copyNewMachineToken\" class=\"button secondary small\" type=\"button\">Salin token</button></div><div id=\"machineTokenList\" class=\"alias-list\"></div></section>" +
     "<p class=\"footnote\">Email untuk mailbox yang tidak dikenal atau sudah kedaluwarsa akan ditolak. Isi email dihapus saat mailbox berakhir. Lampiran belum disimpan. Jangan gunakan alamat ini untuk pemulihan akun kritis atau menerima informasi finansial penting.</p></section>" +
     "</main><script nonce=\"" + nonce + "\">window.MAIL_SETUP_MODE=" + mode + ";</script><script nonce=\"" + nonce + "\">" + CLIENT_SCRIPT + "</script></body></html>";
 }
@@ -1204,6 +1700,8 @@ async function scheduledCleanup(env) {
     env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE received_at<?").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_aliases WHERE expires_at<? AND status!='ACTIVE'").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_sessions WHERE expires_at<=?").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_login_challenges WHERE expires_at<=?").bind(now),
+    env.MAIL_DB.prepare("UPDATE mail_admin SET totp_pending_iv=NULL,totp_pending_ciphertext=NULL,totp_pending_expires_at=NULL,totp_pending_attempts=0 WHERE totp_pending_expires_at IS NOT NULL AND totp_pending_expires_at<=?").bind(now),
     env.MAIL_DB.prepare("DELETE FROM mail_login_attempts WHERE window_started_at<?").bind(now - LOGIN_WINDOW_MS * 2),
     env.MAIL_DB.prepare("DELETE FROM mail_machine_aliases WHERE alias_id NOT IN (SELECT id FROM mail_aliases)"),
     env.MAIL_DB.prepare("DELETE FROM mail_machine_rate_limits WHERE window_started_at<?").bind(now - MACHINE_API_RATE_WINDOW_MS * 2)

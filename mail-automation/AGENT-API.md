@@ -8,12 +8,19 @@ the owner-panel login, owner password, browser session cookie, or dashboard endp
 - Base URL: `https://mail.seiton.biz.id`
 - API prefix: `/api/v1/machine`
 - Authentication: `Authorization: Bearer <token>`
-- Cloudflare Worker secret that backs the credential: `MAIL_VM_API_TOKEN`
 - Agent-side secret name recommended for configuration: `TMAIL_API_TOKEN`
+- Token management: Owner panel → **Kredensial Agent**
 
-The value of `MAIL_VM_API_TOKEN` must be copied into the agent's private secret store
-as `TMAIL_API_TOKEN`. Do not place it in source code, a prompt, GitHub, task output,
-logs, or a normal chat message. The value is intentionally not documented here.
+Create a separate token for each agent from the Owner panel. The token begins with
+`tmt_`; its complete value is shown only once. Copy it directly into that agent's
+private secret store as `TMAIL_API_TOKEN`. Do not place it in source code, a prompt,
+GitHub, task output, logs, or a normal chat message. The value is intentionally not
+documented here.
+
+The legacy Worker secret `MAIL_VM_API_TOKEN` is still accepted as a temporary
+compatibility identity so existing integrations do not stop immediately. Move agents
+to individual tokens, verify them, and then remove that legacy secret from the Worker
+configuration when no agent still uses it.
 
 The machine credential is separate from the owner login. An agent must never be given
 the owner password, `__Host-mail_session` cookie, `MAIL_SETUP_TOKEN`, or
@@ -29,11 +36,30 @@ Machine-created mailboxes are associated with a hash of the Bearer token. The to
 list, read, and revoke only the mailboxes associated with that token. It cannot access
 the owner panel's browser session or use owner-only endpoints.
 
-**Current credential model:** the Worker currently accepts one configured
-`MAIL_VM_API_TOKEN`. Any agent configured with that same value shares the same
-machine mailbox scope and rate limits. Treat it as one service identity; do not give
-the same credential to unrelated third parties. Separate per-agent credentials with
-independent revocation are not yet implemented.
+**Per-agent credential model:** every token created in the Owner panel has a unique
+token hash and an independent mailbox ownership namespace, rate-limit bucket, usage
+timestamp, and revocation state. Revoking one token does not revoke another agent's
+token. A token can list, read, and revoke only the mailboxes it created. Legacy
+`MAIL_VM_API_TOKEN` requests retain the old shared identity until that compatibility
+secret is removed.
+
+## Owner panel security
+
+- Owner login requires the existing password, followed by a six-digit TOTP code when
+  2FA is enabled.
+- TOTP uses SHA-1 HMAC, six digits, a 30-second period, and a ±1 time-step tolerance.
+- A TOTP time step is accepted only once. Keep the Owner device clock synchronized.
+- Login's second step is bound to the browser's challenge cookie and client IP and
+  expires after five minutes; five invalid codes invalidate the challenge.
+- Enrollment is valid for ten minutes and requires confirmation with a current code.
+- Ten one-time recovery codes are shown once after activation. Store them offline;
+  the database stores only their hashes. A recovery code is consumed when used.
+- Disabling 2FA requires the Owner password and a valid TOTP or unused recovery code.
+  Activating or disabling 2FA revokes all Owner sessions.
+
+Use an authenticator such as Aegis, Google Authenticator, or Microsoft Authenticator.
+No TOTP seed is sent by email. Do not store the seed or recovery codes in agent prompts,
+GitHub, logs, or general conversation memory.
 
 ## Mailbox policy and limits
 
@@ -56,7 +82,9 @@ the API returns HTTP 409 for that old reference; create a new task reference.
 
 ## Endpoints
 
-All endpoints below require the Bearer token.
+All endpoints below require the Bearer token. Owner-only token management endpoints
+are separate and require an authenticated Owner session; they are not part of the
+Machine API.
 
 | Method | Path | Purpose |
 |---|---|---|
