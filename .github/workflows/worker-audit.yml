@@ -34,6 +34,8 @@ jobs:
         run: node --check site-admin/worker.js
       - name: Check Mail Automation Worker syntax
         run: node --check mail-automation/worker.js
+      - name: Check TMail agent client syntax
+        run: node --check mail-automation/agent-client.mjs
       - name: Check Mail Automation email parser syntax
         run: node --check mail-automation/email-parser.js
       - name: Check Mail Automation OTP extractor syntax
