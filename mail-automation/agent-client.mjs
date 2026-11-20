@@ -1,0 +1,165 @@
+const DEFAULT_BASE_URL = "https://mail.seiton.biz.id";
+const MACHINE_API_PREFIX = "/api/v1/machine";
+const TOKEN_PATTERN = /^[A-Za-z0-9_-]{40,160}$/;
+const UUID_PATTERN = /^[0-9a-f-]{36}$/i;
+const CLIENT_REF_PATTERN = /^[A-Za-z0-9._:-]{1,100}$/;
+
+export class TMailApiError extends Error {
+  constructor(message, { status, payload, retryAfter } = {}) {
+    super(message || "TMail API request failed.");
+    this.name = "TMailApiError";
+    this.status = Number(status || 0);
+    this.payload = payload && typeof payload === "object" ? payload : {};
+    this.retryAfter = retryAfter || null;
+  }
+}
+
+function requireUuid(value, fieldName) {
+  const normalized = String(value || "").trim();
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new TypeError(`${fieldName} must be a valid mailbox/message UUID.`);
+  }
+  return normalized;
+}
+
+function requireClientRef(value) {
+  const normalized = String(value ?? "").trim();
+  if (!CLIENT_REF_PATTERN.test(normalized)) {
+    throw new TypeError("clientRef is required and must use 1-100 URL-safe characters.");
+  }
+  return normalized;
+}
+
+export class TMailClient {
+  constructor({ token, baseUrl = DEFAULT_BASE_URL, fetchImpl = globalThis.fetch } = {}) {
+    if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) {
+      throw new TypeError("A valid TMail machine Bearer token is required.");
+    }
+    if (typeof fetchImpl !== "function") {
+      throw new TypeError("A fetch implementation is required.");
+    }
+
+    let parsedBaseUrl;
+    try {
+      parsedBaseUrl = new URL(baseUrl);
+    } catch {
+      throw new TypeError("baseUrl must be an absolute HTTPS URL.");
+    }
+    if (parsedBaseUrl.protocol !== "https:" || parsedBaseUrl.username || parsedBaseUrl.password) {
+      throw new TypeError("TMail baseUrl must use HTTPS and must not contain credentials.");
+    }
+
+    this.token = token;
+    this.baseUrl = parsedBaseUrl.origin;
+    this.fetchImpl = fetchImpl;
+  }
+
+  async request(path, { method = "GET", query, body, signal } = {}) {
+    const url = new URL(path, this.baseUrl);
+    if (query && typeof query === "object") {
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined && value !== null && value !== "") {
+          url.searchParams.set(key, String(value));
+        }
+      }
+    }
+
+    const headers = {
+      Accept: "application/json",
+      Authorization: `Bearer ${this.token}`
+    };
+    const init = { method, headers };
+    if (signal !== undefined) init.signal = signal;
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(body);
+    }
+
+    const response = await this.fetchImpl(url, init);
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch {
+      payload = {};
+    }
+
+    if (!response.ok || payload?.ok === false) {
+      throw new TMailApiError(
+        payload?.error || `TMail API returned HTTP ${response.status}.`,
+        {
+          status: response.status,
+          payload,
+          retryAfter: response.headers.get("Retry-After")
+        }
+      );
+    }
+    return payload;
+  }
+
+  health({ signal } = {}) {
+    return this.request(`${MACHINE_API_PREFIX}/health`, { signal });
+  }
+
+  createMailbox({ label = "Seiton agent", clientRef, signal } = {}) {
+    const normalizedClientRef = requireClientRef(clientRef);
+    const normalizedLabel = String(label ?? "").trim().slice(0, 80);
+    return this.request(`${MACHINE_API_PREFIX}/mailboxes`, {
+      method: "POST",
+      body: {
+        label: normalizedLabel,
+        ttlSeconds: 600,
+        clientRef: normalizedClientRef
+      },
+      signal
+    });
+  }
+
+  listMailboxes({ limit = 25, offset = 0, signal } = {}) {
+    const safeLimit = Number(limit);
+    const safeOffset = Number(offset);
+    if (!Number.isInteger(safeLimit) || safeLimit < 1 || safeLimit > 50) {
+      throw new RangeError("limit must be an integer between 1 and 50.");
+    }
+    if (!Number.isInteger(safeOffset) || safeOffset < 0 || safeOffset > 10000) {
+      throw new RangeError("offset must be an integer between 0 and 10000.");
+    }
+    return this.request(`${MACHINE_API_PREFIX}/mailboxes`, {
+      query: { limit: safeLimit, offset: safeOffset },
+      signal
+    });
+  }
+
+  listMessages({ mailboxId, after = 0, afterId, signal } = {}) {
+    const id = requireUuid(mailboxId, "mailboxId");
+    const safeAfter = Number(after);
+    if (!Number.isSafeInteger(safeAfter) || safeAfter < 0) {
+      throw new RangeError("after must be a non-negative safe integer timestamp.");
+    }
+    if (afterId && !UUID_PATTERN.test(String(afterId))) {
+      throw new TypeError("afterId must be a valid message UUID.");
+    }
+    return this.request(`${MACHINE_API_PREFIX}/messages`, {
+      query: { mailboxId: id, after: safeAfter, afterId },
+      signal
+    });
+  }
+
+  getMessage({ mailboxId, messageId, signal } = {}) {
+    const mailbox = requireUuid(mailboxId, "mailboxId");
+    const message = requireUuid(messageId, "messageId");
+    return this.request(`${MACHINE_API_PREFIX}/messages/${message}`, {
+      query: { mailboxId: mailbox },
+      signal
+    });
+  }
+
+  revokeMailbox(mailboxId, { signal } = {}) {
+    const id = requireUuid(mailboxId, "mailboxId");
+    return this.request(`${MACHINE_API_PREFIX}/mailboxes/${id}`, {
+      method: "DELETE",
+      signal
+    });
+  }
+}
+
+export { DEFAULT_BASE_URL };
