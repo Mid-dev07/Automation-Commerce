@@ -1,6 +1,7 @@
 import { parseEmail } from "./email-parser.js";
 import { extractVerificationCode } from "./otp-extractor.js";
 import { generateTotpSecret, verifyTotp } from "./totp.mjs";
+import { renderPublicPage } from "./public-page.mjs";
 
 const PANEL_ORIGIN = "https://mail.seiton.biz.id";
 const PANEL_HOST = "mail.seiton.biz.id";
@@ -16,6 +17,13 @@ const LOGIN_MAX_ATTEMPTS = 5;
 const LOGIN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const TOTP_ENROLLMENT_TTL_MS = 10 * 60 * 1000;
 const TOTP_RECOVERY_CODE_COUNT = 10;
+const PUBLIC_TEMP_TTL_SECONDS = 600;
+const PUBLIC_CUSTOM_TTL_SECONDS = 365 * 24 * 60 * 60;
+const PUBLIC_SESSION_TTL_SECONDS = 12 * 60 * 60;
+const PUBLIC_CREATE_LIMIT = 10;
+const PUBLIC_CREATE_WINDOW_MS = 60 * 60 * 1000;
+const PUBLIC_LOGIN_MAX_ATTEMPTS = 5;
+const PUBLIC_LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const ALLOWED_TTLS = new Set([600]); // T-Mail mailboxes expire after ten minutes.
 
 const encoder = new TextEncoder();
@@ -65,10 +73,17 @@ function randomHex(length = 24) {
   return bytesToHex(bytes).slice(0, length);
 }
 
+function isCustomLocalPart(value) {
+  return /^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$/.test(value) &&
+    !value.includes("..") && !value.includes("__") && !value.includes("--") &&
+    !value.includes("._") && !value.includes("_.") && !value.includes(".-") &&
+    !value.includes("-.") && !value.includes("._-") && !value.includes("-_.");
+}
+
 function mailboxAddress(slug) {
   const value = clean(slug, 64).toLowerCase();
   if (/^[a-f0-9]{24}$/.test(value)) return BASE_LOCAL_PART + "+" + value + "@" + MAIL_DOMAIN;
-  if (/^[a-f0-9]{32}$/.test(value)) return value + "@" + MAIL_DOMAIN;
+  if (/^[a-f0-9]{32}$/.test(value) || isCustomLocalPart(value)) return value + "@" + MAIL_DOMAIN;
   throw new Error("MAILBOX_SLUG_INVALID");
 }
 
@@ -183,13 +198,16 @@ function parseAliasRecipient(value) {
     };
   }
 
-  // Prefixless TMail addresses are issued only on the primary mail domain.
-  if (recipientDomain !== MAIL_DOMAIN || !/^[a-f0-9]{32}$/.test(localPart)) return null;
-  return {
-    slug: localPart,
-    address: normalized,
-    format: "tmail"
-  };
+  // Prefixless random and custom TMail addresses are accepted only on the
+  // primary domain with a local part issued by the public mailbox service.
+  if (recipientDomain !== MAIL_DOMAIN) return null;
+  if (/^[a-f0-9]{32}$/.test(localPart)) {
+    return { slug: localPart, address: normalized, format: "tmail" };
+  }
+  if (isCustomLocalPart(localPart)) {
+    return { slug: localPart, address: normalized, format: "custom-tmail" };
+  }
+  return null;
 }
 
 function getCookie(request, name) {
@@ -311,6 +329,252 @@ async function verifyOwnerTotp(env, owner, code) {
     "UPDATE mail_admin SET totp_last_step=? WHERE id='owner' AND totp_enabled=1 AND totp_last_step<? RETURNING id"
   ).bind(step, step).first();
   return accepted ? step : null;
+}
+
+
+function publicSessionCookie(token, maxAge) {
+  return "__Host-tmail_inbox=" + token +
+    "; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=" + Math.max(1, Number(maxAge) || 1);
+}
+
+function clearedPublicSessionCookie() {
+  return "__Host-tmail_inbox=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
+}
+
+async function createPublicSession(env, aliasId, expiresAt) {
+  const token = randomHex(64);
+  const hash = await sha256Hex(token);
+  const now = Date.now();
+  const maxAge = Math.max(1, Math.floor(Math.min(
+    PUBLIC_SESSION_TTL_SECONDS * 1000,
+    Number(expiresAt) - now
+  ) / 1000));
+  await env.MAIL_DB.prepare(
+    "INSERT INTO mail_public_sessions(session_hash,alias_id,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?)"
+  ).bind(hash, aliasId, now, now + maxAge * 1000, now).run();
+  return { cookie: publicSessionCookie(token, maxAge), tokenHash: hash };
+}
+
+async function publicIpHash(request, env) {
+  return loginIpHash(request, env);
+}
+
+async function checkPublicCreationLimit(request, env, now) {
+  const ipHash = await publicIpHash(request, env);
+  const row = await env.MAIL_DB.prepare(
+    "INSERT INTO mail_public_creation_limits(ip_hash,window_started_at,request_count) VALUES(?,?,1) " +
+    "ON CONFLICT(ip_hash) DO UPDATE SET " +
+    "request_count=CASE WHEN mail_public_creation_limits.window_started_at<=? THEN 1 ELSE mail_public_creation_limits.request_count+1 END," +
+    "window_started_at=CASE WHEN mail_public_creation_limits.window_started_at<=? THEN excluded.window_started_at ELSE mail_public_creation_limits.window_started_at END " +
+    "RETURNING request_count,window_started_at"
+  ).bind(ipHash, now, now - PUBLIC_CREATE_WINDOW_MS, now - PUBLIC_CREATE_WINDOW_MS).first();
+  if (!row || Number(row.request_count) > PUBLIC_CREATE_LIMIT) {
+    return { allowed: false, retryAfter: Math.max(1, Math.ceil((Number(row?.window_started_at || now) + PUBLIC_CREATE_WINDOW_MS - now) / 1000)) };
+  }
+  return { allowed: true, ipHash };
+}
+
+async function handlePublicMailboxCreate(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  if (!await hasOwner(env)) return responseJson({ ok: false, error: "Layanan belum diinisialisasi." }, 503);
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Data pembuatan mailbox tidak valid." }, 400); }
+
+  const mode = body.mode === "custom" ? "custom" : body.mode === "generate" || !body.mode ? "generate" : "";
+  if (!mode) return responseJson({ ok: false, error: "Mode mailbox tidak valid." }, 400);
+  const now = Date.now();
+  const limit = await checkPublicCreationLimit(request, env, now);
+  if (!limit.allowed) {
+    return responseJson({ ok: false, error: "Batas pembuatan mailbox tercapai. Coba kembali setelah jendela 1 jam berakhir." }, 429, {
+      "Retry-After": String(limit.retryAfter)
+    });
+  }
+
+  let slug;
+  let password;
+  let ttlSeconds;
+  if (mode === "custom") {
+    slug = typeof body.localPart === "string" ? body.localPart.trim().toLowerCase() : "";
+    password = typeof body.password === "string" ? body.password : "";
+    const reserved = new Set(["api", "owner", "login", "inbox", "health", "robots", "www", "mail", "admin", "support", "receiver"]);
+    if (!isCustomLocalPart(slug) || reserved.has(slug)) {
+      return responseJson({ ok: false, error: "Nama alamat tidak valid atau termasuk nama yang dicadangkan." }, 400);
+    }
+    if (password.length < 12 || password.length > 128) {
+      return responseJson({ ok: false, error: "Password inbox harus 12–128 karakter." }, 400);
+    }
+    ttlSeconds = PUBLIC_CUSTOM_TTL_SECONDS;
+  } else {
+    slug = randomHex(32);
+    password = randomHex(32);
+    ttlSeconds = PUBLIC_TEMP_TTL_SECONDS;
+  }
+
+  const salt = new Uint8Array(16);
+  crypto.getRandomValues(salt);
+  const hash = await passwordHash(password, salt);
+  const aliasId = crypto.randomUUID();
+  const expiresAt = now + ttlSeconds * 1000;
+  const label = mode === "custom" ? "Public custom mailbox" : "Public temporary mailbox";
+  try {
+    await env.MAIL_DB.batch([
+      env.MAIL_DB.prepare(
+        "INSERT INTO mail_aliases(id,slug,label,status,created_at,expires_at,received_count) VALUES(?,?,?,'ACTIVE',?,?,0)"
+      ).bind(aliasId, slug, label, now, expiresAt),
+      env.MAIL_DB.prepare(
+        "INSERT INTO mail_public_mailboxes(alias_id,password_salt,password_hash,created_at) VALUES(?,?,?,?)"
+      ).bind(aliasId, bytesToBase64(salt), hash, now)
+    ]);
+  } catch (error) {
+    if (mode === "custom") return responseJson({ ok: false, error: "Nama email sudah digunakan. Pilih nama lain." }, 409);
+    throw error;
+  }
+
+  const session = await createPublicSession(env, aliasId, expiresAt);
+  return responseJson({
+    ok: true,
+    mailbox: {
+      id: aliasId,
+      slug,
+      email: mailboxAddress(slug),
+      status: "ACTIVE",
+      mode,
+      created_at: now,
+      expires_at: expiresAt
+    },
+    generated_password: mode === "generate" ? password : null,
+    password_required: true
+  }, 201, { "Set-Cookie": session.cookie });
+}
+
+async function checkPublicLoginAttempts(env, ipHash, aliasId, now) {
+  const row = await env.MAIL_DB.prepare(
+    "SELECT attempts,window_started_at,blocked_until FROM mail_public_login_attempts WHERE ip_hash=? AND alias_id=? LIMIT 1"
+  ).bind(ipHash, aliasId).first();
+  if (!row) return { blocked: false };
+  if (now - Number(row.window_started_at || 0) >= PUBLIC_LOGIN_WINDOW_MS) {
+    await env.MAIL_DB.prepare(
+      "DELETE FROM mail_public_login_attempts WHERE ip_hash=? AND alias_id=?"
+    ).bind(ipHash, aliasId).run();
+    return { blocked: false };
+  }
+  return {
+    blocked: Number(row.blocked_until || 0) > now,
+    retryAfter: Math.max(1, Math.ceil((Number(row.blocked_until || 0) - now) / 1000))
+  };
+}
+
+async function recordPublicLoginFailure(env, ipHash, aliasId, now) {
+  const row = await env.MAIL_DB.prepare(
+    "SELECT attempts,window_started_at FROM mail_public_login_attempts WHERE ip_hash=? AND alias_id=? LIMIT 1"
+  ).bind(ipHash, aliasId).first();
+  let attempts = 1;
+  let windowStarted = now;
+  if (row && now - Number(row.window_started_at || 0) < PUBLIC_LOGIN_WINDOW_MS) {
+    attempts = Number(row.attempts || 0) + 1;
+    windowStarted = Number(row.window_started_at);
+  }
+  const blockedUntil = attempts >= PUBLIC_LOGIN_MAX_ATTEMPTS ? now + PUBLIC_LOGIN_WINDOW_MS : 0;
+  await env.MAIL_DB.prepare(
+    "INSERT INTO mail_public_login_attempts(ip_hash,alias_id,attempts,window_started_at,blocked_until) VALUES(?,?,?,?,?) " +
+    "ON CONFLICT(ip_hash,alias_id) DO UPDATE SET attempts=excluded.attempts,window_started_at=excluded.window_started_at,blocked_until=excluded.blocked_until"
+  ).bind(ipHash, aliasId, attempts, windowStarted, blockedUntil).run();
+}
+
+async function handlePublicMailboxUnlock(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  let body;
+  try { body = await readJson(request); }
+  catch { return responseJson({ ok: false, error: "Data akses inbox tidak valid." }, 400); }
+  const slug = typeof body.slug === "string" ? body.slug.trim().toLowerCase() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+  if (!/^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$/.test(slug) &&
+      !/^[a-f0-9]{32}$/.test(slug) && !/^[a-f0-9]{24}$/.test(slug)) {
+    return responseJson({ ok: false, error: "Alamat mailbox tidak valid." }, 400);
+  }
+  const alias = await env.MAIL_DB.prepare(
+    "SELECT a.id,a.slug,a.status,a.expires_at,p.password_salt,p.password_hash " +
+    "FROM mail_aliases a JOIN mail_public_mailboxes p ON p.alias_id=a.id " +
+    "WHERE a.slug=? AND a.status='ACTIVE' AND a.expires_at>? LIMIT 1"
+  ).bind(slug, Date.now()).first();
+  if (!alias) return responseJson({ ok: false, error: "Mailbox tidak ditemukan atau sudah kedaluwarsa." }, 404);
+
+  const now = Date.now();
+  const ipHash = await publicIpHash(request, env);
+  const attempts = await checkPublicLoginAttempts(env, ipHash, alias.id, now);
+  if (attempts.blocked) return responseJson({ ok: false, error: "Terlalu banyak percobaan. Coba kembali nanti." }, 429, {
+    "Retry-After": String(attempts.retryAfter)
+  });
+
+  const computed = password.length <= 128
+    ? await passwordHash(password, base64ToBytes(alias.password_salt))
+    : "";
+  if (!constantTimeEqual(computed, alias.password_hash)) {
+    await recordPublicLoginFailure(env, ipHash, alias.id, now);
+    return responseJson({ ok: false, error: "Password inbox tidak cocok." }, 401);
+  }
+  await env.MAIL_DB.prepare(
+    "DELETE FROM mail_public_login_attempts WHERE ip_hash=? AND alias_id=?"
+  ).bind(ipHash, alias.id).run();
+  const session = await createPublicSession(env, alias.id, alias.expires_at);
+  return responseJson({ ok: true, email: mailboxAddress(alias.slug) }, 200, { "Set-Cookie": session.cookie });
+}
+
+async function requirePublicInboxSession(request, env, slug) {
+  const token = getCookie(request, "__Host-tmail_inbox");
+  if (!/^[a-f0-9]{64}$/.test(token)) return null;
+  const hash = await sha256Hex(token);
+  const alias = await env.MAIL_DB.prepare(
+    "SELECT a.id,a.slug,a.status,a.expires_at,s.session_hash " +
+    "FROM mail_public_sessions s JOIN mail_aliases a ON a.id=s.alias_id " +
+    "JOIN mail_public_mailboxes p ON p.alias_id=a.id " +
+    "WHERE s.session_hash=? AND a.slug=? AND a.status='ACTIVE' AND a.expires_at>? AND s.expires_at>? LIMIT 1"
+  ).bind(hash, slug, Date.now(), Date.now()).first();
+  if (!alias) return null;
+  await env.MAIL_DB.prepare(
+    "UPDATE mail_public_sessions SET last_seen_at=? WHERE session_hash=?"
+  ).bind(Date.now(), hash).run();
+  return alias;
+}
+
+async function handlePublicInboxGet(request, url, env) {
+  const slug = String(url.searchParams.get("slug") || "").trim().toLowerCase();
+  if ((!/^[a-f0-9]{32}$/.test(slug) && !isCustomLocalPart(slug)) || !isCustomLocalPart(slug) && !/^[a-f0-9]{32}$/.test(slug)) {
+    return responseJson({ ok: false, error: "Mailbox tidak valid." }, 400);
+  }
+  const alias = await requirePublicInboxSession(request, env, slug);
+  if (!alias) return responseJson({ ok: false, error: "Inbox terkunci atau sesi sudah berakhir." }, 401);
+
+  const result = await env.MAIL_DB.prepare(
+    "SELECT id,received_at,payload_iv,payload_ciphertext FROM mail_messages WHERE alias_id=? ORDER BY received_at DESC LIMIT 50"
+  ).bind(alias.id).all();
+  const messages = await Promise.all((result.results || []).map(async row => {
+    const payload = await decryptMessagePayload(env, alias.id, row.payload_iv, row.payload_ciphertext);
+    return {
+      id: row.id,
+      sender: clean(payload.sender, 254),
+      subject: clean(payload.subject, 300),
+      body_text: clean(payload.body_text, MAX_BODY_CHARS),
+      verification_code: payload.verification_code ? clean(payload.verification_code, 32) : null,
+      received_at: Number(row.received_at)
+    };
+  }));
+  return responseJson({
+    ok: true,
+    mailbox: { id: alias.id, slug: alias.slug, email: mailboxAddress(alias.slug), expires_at: Number(alias.expires_at) },
+    messages
+  });
+}
+
+async function handlePublicMailboxLogout(request, env) {
+  if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
+  const token = getCookie(request, "__Host-tmail_inbox");
+  if (/^[a-f0-9]{64}$/.test(token)) {
+    const hash = await sha256Hex(token);
+    await env.MAIL_DB.prepare("DELETE FROM mail_public_sessions WHERE session_hash=?").bind(hash).run();
+  }
+  return responseJson({ ok: true }, 200, { "Set-Cookie": clearedPublicSessionCookie() });
 }
 
 async function hasOwner(env) {
@@ -1172,6 +1436,11 @@ async function api(request, env, url) {
   if (url.pathname.startsWith("/api/v1/machine/")) {
     return handleMachineApi(request, env, url);
   }
+  if (request.method === "POST" && url.pathname === "/api/public/mailboxes") return handlePublicMailboxCreate(request, env);
+  if (request.method === "POST" && url.pathname === "/api/public/unlock") return handlePublicMailboxUnlock(request, env);
+  if (request.method === "GET" && url.pathname === "/api/public/inbox") return handlePublicInboxGet(request, url, env);
+  if (request.method === "POST" && url.pathname === "/api/public/logout") return handlePublicMailboxLogout(request, env);
+
   if (request.method === "GET" && url.pathname === "/api/session") {
     return responseJson({
       ok: true,
@@ -1700,6 +1969,9 @@ async function scheduledCleanup(env) {
     env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE received_at<?").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_aliases WHERE expires_at<? AND status!='ACTIVE'").bind(retentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_sessions WHERE expires_at<=?").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_public_sessions WHERE expires_at<=?").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_public_creation_limits WHERE window_started_at<?").bind(now - PUBLIC_CREATE_WINDOW_MS * 2),
+    env.MAIL_DB.prepare("DELETE FROM mail_public_login_attempts WHERE window_started_at<?").bind(now - PUBLIC_LOGIN_WINDOW_MS * 2),
     env.MAIL_DB.prepare("DELETE FROM mail_login_challenges WHERE expires_at<=?").bind(now),
     env.MAIL_DB.prepare("UPDATE mail_admin SET totp_pending_iv=NULL,totp_pending_ciphertext=NULL,totp_pending_expires_at=NULL,totp_pending_attempts=0 WHERE totp_pending_expires_at IS NOT NULL AND totp_pending_expires_at<=?").bind(now),
     env.MAIL_DB.prepare("DELETE FROM mail_login_attempts WHERE window_started_at<?").bind(now - LOGIN_WINDOW_MS * 2),
@@ -1748,7 +2020,11 @@ export default {
         return responseJson({ ok: false, error: "Permintaan tidak dapat diproses." }, 500);
       }
     }
-    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/login")) {
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname.startsWith("/inbox/"))) {
+      const nonce = randomHex(32);
+      return renderPublicPage(nonce);
+    }
+    if (request.method === "GET" && (url.pathname === "/owner" || url.pathname === "/login")) {
       try { return await handlePanel(request, env); }
       catch (error) {
         console.error(JSON.stringify({ level: "error", event: "mail_panel_error", name: error?.name || "Error" }));
