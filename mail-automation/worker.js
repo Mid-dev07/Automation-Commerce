@@ -74,7 +74,7 @@ function randomHex(length = 24) {
 }
 
 function isCustomLocalPart(value) {
-  return /^[a-z0-9](?:[a-z0-9._-]{1,30}[a-z0-9])?$/.test(value) &&
+  return /^[a-z0-9][a-z0-9._-]{1,30}[a-z0-9]$/.test(value) &&
     !value.includes("..") && !value.includes("__") && !value.includes("--") &&
     !value.includes("._") && !value.includes("_.") && !value.includes(".-") &&
     !value.includes("-.") && !value.includes("._-") && !value.includes("-_.");
@@ -332,13 +332,17 @@ async function verifyOwnerTotp(env, owner, code) {
 }
 
 
-function publicSessionCookie(token, maxAge) {
-  return "__Host-tmail_inbox=" + token +
+function publicSessionCookieName(aliasId) {
+  return "__Host-tmail_" + String(aliasId).replace(/[^a-f0-9-]/gi, "");
+}
+
+function publicSessionCookie(aliasId, token, maxAge) {
+  return publicSessionCookieName(aliasId) + "=" + token +
     "; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=" + Math.max(1, Number(maxAge) || 1);
 }
 
-function clearedPublicSessionCookie() {
-  return "__Host-tmail_inbox=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
+function clearedPublicSessionCookie(aliasId) {
+  return publicSessionCookieName(aliasId) + "=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0";
 }
 
 async function createPublicSession(env, aliasId, expiresAt) {
@@ -352,7 +356,7 @@ async function createPublicSession(env, aliasId, expiresAt) {
   await env.MAIL_DB.prepare(
     "INSERT INTO mail_public_sessions(session_hash,alias_id,created_at,expires_at,last_seen_at) VALUES(?,?,?,?,?)"
   ).bind(hash, aliasId, now, now + maxAge * 1000, now).run();
-  return { cookie: publicSessionCookie(token, maxAge), tokenHash: hash };
+  return { cookie: publicSessionCookie(aliasId, token, maxAge), tokenHash: hash };
 }
 
 async function publicIpHash(request, env) {
@@ -522,25 +526,29 @@ async function handlePublicMailboxUnlock(request, env) {
 }
 
 async function requirePublicInboxSession(request, env, slug) {
-  const token = getCookie(request, "__Host-tmail_inbox");
+  const aliasInfo = await env.MAIL_DB.prepare(
+    "SELECT a.id,a.slug,a.status,a.expires_at FROM mail_aliases a " +
+    "JOIN mail_public_mailboxes p ON p.alias_id=a.id " +
+    "WHERE a.slug=? AND a.status='ACTIVE' AND a.expires_at>? LIMIT 1"
+  ).bind(slug, Date.now()).first();
+  if (!aliasInfo) return null;
+  const token = getCookie(request, publicSessionCookieName(aliasInfo.id));
   if (!/^[a-f0-9]{64}$/.test(token)) return null;
   const hash = await sha256Hex(token);
-  const alias = await env.MAIL_DB.prepare(
-    "SELECT a.id,a.slug,a.status,a.expires_at,s.session_hash " +
-    "FROM mail_public_sessions s JOIN mail_aliases a ON a.id=s.alias_id " +
-    "JOIN mail_public_mailboxes p ON p.alias_id=a.id " +
-    "WHERE s.session_hash=? AND a.slug=? AND a.status='ACTIVE' AND a.expires_at>? AND s.expires_at>? LIMIT 1"
-  ).bind(hash, slug, Date.now(), Date.now()).first();
-  if (!alias) return null;
+  const session = await env.MAIL_DB.prepare(
+    "SELECT session_hash FROM mail_public_sessions " +
+    "WHERE session_hash=? AND alias_id=? AND expires_at>? LIMIT 1"
+  ).bind(hash, aliasInfo.id, Date.now()).first();
+  if (!session) return null;
   await env.MAIL_DB.prepare(
     "UPDATE mail_public_sessions SET last_seen_at=? WHERE session_hash=?"
   ).bind(Date.now(), hash).run();
-  return alias;
+  return aliasInfo;
 }
 
 async function handlePublicInboxGet(request, url, env) {
   const slug = String(url.searchParams.get("slug") || "").trim().toLowerCase();
-  if ((!/^[a-f0-9]{32}$/.test(slug) && !isCustomLocalPart(slug)) || !isCustomLocalPart(slug) && !/^[a-f0-9]{32}$/.test(slug)) {
+  if (!/^[a-f0-9]{32}$/.test(slug) && !isCustomLocalPart(slug)) {
     return responseJson({ ok: false, error: "Mailbox tidak valid." }, 400);
   }
   const alias = await requirePublicInboxSession(request, env, slug);
@@ -569,12 +577,20 @@ async function handlePublicInboxGet(request, url, env) {
 
 async function handlePublicMailboxLogout(request, env) {
   if (!isSameOrigin(request)) return responseJson({ ok: false, error: "Origin tidak valid." }, 403);
-  const token = getCookie(request, "__Host-tmail_inbox");
+  let body;
+  try { body = await readJson(request); }
+  catch { body = {}; }
+  const slug = typeof body.slug === "string" ? body.slug.trim().toLowerCase() : "";
+  const alias = await env.MAIL_DB.prepare(
+    "SELECT id FROM mail_aliases WHERE slug=? LIMIT 1"
+  ).bind(slug).first();
+  if (!alias) return responseJson({ ok: true });
+  const token = getCookie(request, publicSessionCookieName(alias.id));
   if (/^[a-f0-9]{64}$/.test(token)) {
     const hash = await sha256Hex(token);
-    await env.MAIL_DB.prepare("DELETE FROM mail_public_sessions WHERE session_hash=?").bind(hash).run();
+    await env.MAIL_DB.prepare("DELETE FROM mail_public_sessions WHERE session_hash=? AND alias_id=?").bind(hash, alias.id).run();
   }
-  return responseJson({ ok: true }, 200, { "Set-Cookie": clearedPublicSessionCookie() });
+  return responseJson({ ok: true }, 200, { "Set-Cookie": clearedPublicSessionCookie(alias.id) });
 }
 
 async function hasOwner(env) {
