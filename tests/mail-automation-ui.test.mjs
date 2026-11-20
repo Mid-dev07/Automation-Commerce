@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { renderPublicPage } from "../mail-automation/public-page.mjs";
 
 test("public SeitonMail page renders a practical Indonesian mailbox flow", async () => {
-  const response = renderPublicPage("abc123nonce");
+  const response = renderPublicPage("abc123de");
   const html = await response.text();
 
   assert.equal(response.status, 200);
@@ -19,7 +19,7 @@ test("public SeitonMail page renders a practical Indonesian mailbox flow", async
 });
 
 test("public SeitonMail page gives inbox OTP and privacy actions clear priority", async () => {
-  const response = renderPublicPage("abc123nonce");
+  const response = renderPublicPage("abc123de");
   const html = await response.text();
 
   assert.match(html, /id="copyInboxAddress"/);
@@ -32,14 +32,14 @@ test("public SeitonMail page gives inbox OTP and privacy actions clear priority"
 });
 
 test("public SeitonMail page retains nonce-based security and avoids remote UI dependencies", async () => {
-  const response = renderPublicPage("abc123nonce");
+  const response = renderPublicPage("abc123de");
   const html = await response.text();
   const csp = response.headers.get("Content-Security-Policy");
 
-  assert.match(html, /<style nonce="abc123nonce">/);
-  assert.match(html, /<script nonce="abc123nonce">/);
-  assert.match(csp, /style-src 'nonce-abc123nonce'/);
-  assert.match(csp, /script-src 'nonce-abc123nonce'/);
+  assert.match(html, /<style nonce="abc123de">/);
+  assert.match(html, /<script nonce="abc123de">/);
+  assert.match(csp, /style-src 'nonce-abc123de'/);
+  assert.match(csp, /script-src 'nonce-abc123de'/);
   assert.match(csp, /connect-src 'self'/);
   assert.doesNotMatch(html, /fonts\.googleapis\.com|fonts\.gstatic\.com|cdnjs\.cloudflare\.com/);
 });
