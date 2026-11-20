@@ -38,3 +38,6 @@ CREATE TABLE IF NOT EXISTS mail_machine_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_mail_machine_tokens_status
   ON mail_machine_tokens(status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_mail_machine_aliases_token_created
+  ON mail_machine_aliases(token_hash, created_at DESC);
