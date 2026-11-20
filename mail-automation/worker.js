@@ -1852,6 +1852,7 @@ byId("confirmTwoFactorForm").addEventListener("submit", async (event) => {
     byId("twoFactorEnrollment").hidden = true;
     byId("recoveryCodes").textContent = result.recovery_codes.join("\\n");
     byId("recoveryCodesPanel").hidden = false;
+    if (dashboardTimer) { clearInterval(dashboardTimer); dashboardTimer = null; }
     byId("twoFactorStatus").textContent = "2FA aktif. Login berikutnya akan meminta kode autentikator.";
     byId("enableTwoFactor").hidden = true;
     byId("disableTwoFactorForm").hidden = false;
