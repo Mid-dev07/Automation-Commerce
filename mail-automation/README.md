@@ -163,3 +163,10 @@ The Worker serves the landing page at `/`, mailbox pages at `/inbox/:localPart`,
 the private Owner panel at `/owner`. The page exposes only the one domain with a
 verified inbound Email Routing path: `seiton.my.id`. Do not advertise or issue
 addresses on other domains until their MX/Email Routing configuration has been tested.
+
+
+## AI Agent Quick Start
+
+The AI-agent-focused runbook, ready-to-use agent instructions, secret handling rules,
+and end-to-end mailbox/OTP workflow are in [AI-AGENT-INTEGRATION.md](./AI-AGENT-INTEGRATION.md).
+For the authoritative endpoint contract, see [AGENT-API.md](./AGENT-API.md).
