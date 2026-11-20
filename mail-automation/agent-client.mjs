@@ -90,7 +90,7 @@ export class SeitonMailClient {
 
     if (!response.ok || payload?.ok === false) {
       throw new SeitonMailApiError(
-        payload?.error || `TMail API returned HTTP ${response.status}.`,
+        payload?.error || `SeitonMail API returned HTTP ${response.status}.`,
         {
           status: response.status,
           payload,
