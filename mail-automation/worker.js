@@ -24,7 +24,26 @@ const PUBLIC_CREATE_LIMIT = 10;
 const PUBLIC_CREATE_WINDOW_MS = 60 * 60 * 1000;
 const PUBLIC_LOGIN_MAX_ATTEMPTS = 5;
 const PUBLIC_LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const ALLOWED_TTLS = new Set([600]); // T-Mail mailboxes expire after ten minutes.
+const MAILBOX_TTL_OPTIONS_SECONDS = Object.freeze([
+  600, 3600, 21600, 43200, 86400, 259200, 604800, 1209600, 2592000
+]);
+const ALLOWED_TTLS = new Set(MAILBOX_TTL_OPTIONS_SECONDS);
+const DEFAULT_MAILBOX_TTL_SECONDS = 600;
+const EXPIRED_MAILBOX_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+function isAllowedMailboxTtl(value) {
+  const ttlSeconds = Number(value);
+  return Number.isSafeInteger(ttlSeconds) && ALLOWED_TTLS.has(ttlSeconds);
+}
+
+function isMailboxActive(mailbox, now = Date.now()) {
+  return Boolean(
+    mailbox &&
+    mailbox.status === "ACTIVE" &&
+    Number.isFinite(Number(mailbox.expires_at)) &&
+    Number(mailbox.expires_at) > now
+  );
+}
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -994,8 +1013,9 @@ async function handleMachineTokenRevoke(request, env, id) {
 async function handleAliasesGet(env) {
   const result = await env.MAIL_DB.prepare(
     "SELECT id,slug,label,status,created_at,expires_at,last_received_at,received_count " +
-    "FROM mail_aliases ORDER BY created_at DESC LIMIT 100"
-  ).all();
+    "FROM mail_aliases WHERE status='ACTIVE' AND expires_at>? " +
+    "ORDER BY created_at DESC LIMIT 100"
+  ).bind(Date.now()).all();
   const mailboxes = result.results || [];
   return responseJson({ ok: true, mailboxes, aliases: mailboxes });
 }
@@ -1006,8 +1026,8 @@ async function handleAliasCreate(request, env) {
   try { body = await readJson(request); }
   catch { return responseJson({ ok: false, error: "Data mailbox tidak valid." }, 400); }
   const label = clean(body.label, 80);
-  const ttlSeconds = Number(body.ttlSeconds ?? 600);
-  if (!ALLOWED_TTLS.has(ttlSeconds)) {
+  const ttlSeconds = Number(body.ttlSeconds ?? DEFAULT_MAILBOX_TTL_SECONDS);
+  if (!isAllowedMailboxTtl(ttlSeconds)) {
     return responseJson({ ok: false, error: "Masa aktif mailbox tidak valid." }, 400);
   }
   const slug = randomHex(32);
@@ -1050,11 +1070,9 @@ async function handleMessagesGet(url, env) {
     "SELECT id,slug,status,expires_at FROM mail_aliases WHERE id=? LIMIT 1"
   ).bind(aliasId).first();
   if (!alias) return responseJson({ ok: false, error: "Mailbox tidak ditemukan." }, 404);
-  // TMail mailboxes are unreadable after their 10-minute TTL. Legacy aliases retain
-  // their previous owner-inbox behavior until the existing 30-day cleanup removes them.
-  const isTMailMailbox = /^[a-f0-9]{32}$/.test(String(alias.slug || ""));
-  if (isTMailMailbox && (alias.status !== "ACTIVE" || Number(alias.expires_at) <= Date.now())) {
-    return responseJson({ ok: false, error: "Mailbox sudah kedaluwarsa." }, 410);
+  // All mailbox types become unreadable as soon as their configured TTL ends.
+  if (!isMailboxActive(alias, Date.now())) {
+    return responseJson({ ok: false, error: "Mailbox sudah kedaluwarsa atau tidak aktif." }, 410);
   }
   const result = await env.MAIL_DB.prepare(
     "SELECT id,message_id,received_at,payload_iv,payload_ciphertext " +
@@ -1139,8 +1157,8 @@ async function handleMachineAliasCreate(request, env, tokenHash) {
   try { body = await readJson(request); }
   catch { return responseJson({ ok: false, error: "Data pembuatan mailbox tidak valid." }, 400); }
 
-  const ttlSeconds = Number(body.ttlSeconds ?? 600);
-  if (!ALLOWED_TTLS.has(ttlSeconds)) {
+  const ttlSeconds = Number(body.ttlSeconds ?? DEFAULT_MAILBOX_TTL_SECONDS);
+  if (!isAllowedMailboxTtl(ttlSeconds)) {
     return responseJson({ ok: false, error: "Masa aktif mailbox tidak valid." }, 400);
   }
   const rawClientRef = body.clientRef == null ? "" : String(body.clientRef);
@@ -1244,7 +1262,7 @@ async function handleMachineAliasesGet(url, env, tokenHash) {
     id: row.id,
     email: mailboxAddress(row.slug),
     label: clean(row.label, 80),
-    status: row.status === "ACTIVE" && Number(row.expires_at) <= now ? "EXPIRED" : row.status,
+    status: row.status === "REVOKED" ? "REVOKED" : isMailboxActive(row, now) ? "ACTIVE" : "EXPIRED",
     created_at: Number(row.created_at),
     expires_at: Number(row.expires_at),
     last_received_at: row.last_received_at == null ? null : Number(row.last_received_at),
@@ -1610,12 +1628,21 @@ function renderAliases() {
 }
 async function loadAliases() {
   const data = await api("/api/mailboxes");
-  aliasCache = data.mailboxes || data.aliases || [];
+  aliasCache = (data.mailboxes || data.aliases || []).filter((item) =>
+    item.status === "ACTIVE" && Number(item.expires_at) > Date.now()
+  );
   renderAliases();
-  byId("aliasCount").textContent = String(aliasCache.filter((item) => item.status === "ACTIVE" && Number(item.expires_at) > Date.now()).length);
+  byId("aliasCount").textContent = String(aliasCache.length);
+
+  if (selectedAliasId && !aliasCache.some((item) => item.id === selectedAliasId)) {
+    selectedAliasId = "";
+    byId("selectedAddress").textContent = "Pilih mailbox yang masih aktif.";
+    byId("messages").replaceChildren(element("p", "empty", "Mailbox yang dipilih sudah kedaluwarsa atau tidak aktif."));
+    byId("messageCount").textContent = "0";
+  }
+
   if (!selectedAliasId && aliasCache.length) {
-    const first = aliasCache.find((item) => item.status === "ACTIVE" && Number(item.expires_at) > Date.now());
-    if (first) await selectAlias(first.id);
+    await selectAlias(aliasCache[0].id);
   } else if (selectedAliasId) {
     await loadMessages(selectedAliasId);
   }
@@ -1890,10 +1917,10 @@ function renderPanel(nonce, configured) {
     "<form id=\"setupForm\" hidden><label for=\"bootstrapToken\">Bootstrap token sekali pakai</label><input id=\"bootstrapToken\" type=\"password\" autocomplete=\"off\" required><label for=\"setupPassword\">Buat password owner (min. 16 karakter)</label><input id=\"setupPassword\" type=\"password\" minlength=\"16\" maxlength=\"128\" autocomplete=\"new-password\" required><button class=\"button\" type=\"submit\">Inisialisasi panel</button></form>" +
     "<form id=\"loginForm\" hidden><div id=\"loginPasswordGroup\"><label for=\"loginPassword\">Password owner</label><input id=\"loginPassword\" type=\"password\" autocomplete=\"current-password\" required></div><div id=\"loginTotpGroup\" hidden><label for=\"loginTotpCode\">Kode autentikator atau recovery code</label><input id=\"loginTotpCode\" type=\"text\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"32\" placeholder=\"6 digit atau recovery code\"></div><button id=\"loginButton\" class=\"button\" type=\"submit\">Masuk</button></form>" +
     "<div id=\"authStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div><div class=\"muted-note\">Panel hanya menerima email masuk. Ini bukan layanan IMAP/POP dan tidak mengirim email keluar.</div></section>" +
-    "<section id=\"dashboard\" hidden><div class=\"topbar\"><div><h1>TMail inbox</h1><p>Buat mailbox acak, terima email dan kode verifikasi, lalu biarkan kedaluwarsa otomatis setelah 10 menit.</p></div><div class=\"top-actions\"><button id=\"refresh\" class=\"button secondary\" type=\"button\">Perbarui inbox</button><button id=\"logout\" class=\"button danger\" type=\"button\">Keluar</button></div></div>" +
+    "<section id=\"dashboard\" hidden><div class=\"topbar\"><div><h1>TMail inbox</h1><p>Buat mailbox acak, terima email dan kode verifikasi, dan pilih masa aktif dari 10 menit sampai 30 hari.</p></div><div class=\"top-actions\"><button id=\"refresh\" class=\"button secondary\" type=\"button\">Perbarui inbox</button><button id=\"logout\" class=\"button danger\" type=\"button\">Keluar</button></div></div>" +
     "<div id=\"dashboardStatus\" class=\"status\" role=\"status\" aria-live=\"polite\"></div>" +
     "<div class=\"stats\"><div class=\"stat\"><strong id=\"aliasCount\">0</strong> mailbox aktif</div><div class=\"stat\"><strong id=\"messageCount\">0</strong> pesan di mailbox terpilih</div></div>" +
-    "<div class=\"grid\"><section class=\"panel\"><h2>Buat mailbox baru</h2><form id=\"createAlias\" class=\"create-row\"><div><label for=\"aliasLabel\">Label (opsional)</label><input id=\"aliasLabel\" maxlength=\"80\" placeholder=\"Contoh: akun layanan A\"></div><div><label for=\"aliasTtl\">Masa aktif</label><select id=\"aliasTtl\"><option value=\"600\" selected>10 menit</option></select></div><div class=\"submit-cell\"><label>&nbsp;</label><button class=\"button\" type=\"submit\">Buat TMail</button></div></form><p class=\"muted-note\">Alamat unik akan disalin otomatis setelah dibuat. Setiap mailbox maksimal menerima 100 pesan.</p><div id=\"aliases\" class=\"alias-list\"></div></section>" +
+    "<div class=\"grid\"><section class=\"panel\"><h2>Buat mailbox baru</h2><form id=\"createAlias\" class=\"create-row\"><div><label for=\"aliasLabel\">Label (opsional)</label><input id=\"aliasLabel\" maxlength=\"80\" placeholder=\"Contoh: akun layanan A\"></div><div><label for=\"aliasTtl\">Masa aktif</label><select id=\"aliasTtl\"><option value=\"600\">10 menit</option><option value=\"3600\">1 jam</option><option value=\"21600\">6 jam</option><option value=\"43200\">12 jam</option><option value=\"86400\" selected>1 hari</option><option value=\"259200\">3 hari</option><option value=\"604800\">7 hari</option><option value=\"1209600\">14 hari</option><option value=\"2592000\">30 hari</option></select></div><div class=\"submit-cell\"><label>&nbsp;</label><button class=\"button\" type=\"submit\">Buat TMail</button></div></form><p class=\"muted-note\">Alamat unik akan disalin otomatis setelah dibuat. Setiap mailbox maksimal menerima 100 pesan.</p><div id=\"aliases\" class=\"alias-list\"></div></section>" +
     "<section class=\"panel\"><h2>Pesan masuk</h2><p id=\"selectedAddress\" class=\"selected-address\">Pilih mailbox untuk melihat inbox.</p><div id=\"messages\" class=\"message-list\"><p class=\"empty\">Pilih mailbox di sebelah kiri.</p></div></section></div>" +
     "<section class=\"panel\" style=\"margin-top:18px\"><h2>Keamanan Owner</h2><p id=\"twoFactorStatus\" class=\"muted\">Memeriksa status 2FA…</p><button id=\"enableTwoFactor\" class=\"button secondary\" type=\"button\">Aktifkan 2FA</button><div id=\"twoFactorEnrollment\" hidden><p class=\"muted\">Tambahkan akun berikut ke Google Authenticator, Aegis, atau Microsoft Authenticator. Masukkan kunci secara manual.</p><label>Kunci rahasia TOTP</label><code id=\"twoFactorSecret\" class=\"address\"></code><button id=\"copyTwoFactorSecret\" class=\"button secondary small\" type=\"button\">Salin kunci</button><label>URI otpauth (opsional)</label><code id=\"twoFactorUri\" class=\"address\"></code><button id=\"copyTwoFactorUri\" class=\"button secondary small\" type=\"button\">Salin URI</button><form id=\"confirmTwoFactorForm\"><label for=\"twoFactorCode\">Kode 6 digit dari aplikasi autentikator</label><input id=\"twoFactorCode\" inputmode=\"numeric\" autocomplete=\"one-time-code\" maxlength=\"6\" required><button class=\"button\" type=\"submit\">Verifikasi dan aktifkan</button></form></div><div id=\"recoveryCodesPanel\" hidden><p><strong>Simpan recovery codes ini di tempat aman.</strong> Setiap kode hanya dapat dipakai sekali; kode tidak dapat ditampilkan lagi.</p><pre id=\"recoveryCodes\" class=\"body-preview\"></pre><button id=\"copyRecoveryCodes\" class=\"button secondary small\" type=\"button\">Salin recovery codes</button></div><form id=\"disableTwoFactorForm\" hidden><label for=\"disableTwoFactorPassword\">Password owner untuk menonaktifkan</label><input id=\"disableTwoFactorPassword\" type=\"password\" autocomplete=\"current-password\" required><label for=\"disableTwoFactorCode\">Kode TOTP atau recovery code</label><input id=\"disableTwoFactorCode\" type=\"text\" autocomplete=\"one-time-code\" required><button class=\"button danger\" type=\"submit\">Nonaktifkan 2FA</button></form></section>" +
     "<section class=\"panel\" style=\"margin-top:18px\"><h2>Kredensial Agent</h2><p class=\"muted\">Buat token terpisah untuk setiap agent. Secret hanya ditampilkan satu kali.</p><form id=\"createMachineTokenForm\"><label for=\"machineTokenLabel\">Nama agent</label><input id=\"machineTokenLabel\" maxlength=\"60\" placeholder=\"Contoh: Cue CEO\" required><button class=\"button\" type=\"submit\">Buat token agent</button></form><div id=\"newMachineTokenPanel\" hidden><p><strong>Secret baru — salin sekarang dan simpan di secret vault agent.</strong></p><code id=\"newMachineTokenSecret\" class=\"address\"></code><button id=\"copyNewMachineToken\" class=\"button secondary small\" type=\"button\">Salin token</button></div><div id=\"machineTokenList\" class=\"alias-list\"></div></section>" +
@@ -1978,12 +2005,22 @@ async function handleInboundEmail(message, env) {
 
 async function scheduledCleanup(env) {
   const now = Date.now();
-  const retentionCutoff = now - 30 * 24 * 60 * 60 * 1000;
+  const messageRetentionCutoff = now - 30 * 24 * 60 * 60 * 1000;
+  const mailboxRetentionCutoff = now - EXPIRED_MAILBOX_RETENTION_MS;
+  const inactiveMailboxSql = "SELECT id FROM mail_aliases WHERE status!='ACTIVE' OR expires_at<=?";
+
   await env.MAIL_DB.batch([
     env.MAIL_DB.prepare("UPDATE mail_aliases SET status='EXPIRED' WHERE status='ACTIVE' AND expires_at<=?").bind(now),
-    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE alias_id IN (SELECT id FROM mail_aliases WHERE length(slug)=32 AND expires_at<=?)").bind(now),
-    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE received_at<?").bind(retentionCutoff),
-    env.MAIL_DB.prepare("DELETE FROM mail_aliases WHERE expires_at<? AND status!='ACTIVE'").bind(retentionCutoff),
+
+    // Remove message payloads and public inbox credentials as soon as a mailbox expires or is revoked.
+    // Keep mailbox metadata for a seven-day grace period for diagnostics and clientRef conflict handling.
+    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE alias_id IN (" + inactiveMailboxSql + ")").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_public_sessions WHERE alias_id IN (" + inactiveMailboxSql + ")").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_public_mailboxes WHERE alias_id IN (" + inactiveMailboxSql + ")").bind(now),
+    env.MAIL_DB.prepare("DELETE FROM mail_public_login_attempts WHERE alias_id IN (" + inactiveMailboxSql + ")").bind(now),
+
+    env.MAIL_DB.prepare("DELETE FROM mail_messages WHERE received_at<?").bind(messageRetentionCutoff),
+    env.MAIL_DB.prepare("DELETE FROM mail_aliases WHERE expires_at<? AND status!='ACTIVE'").bind(mailboxRetentionCutoff),
     env.MAIL_DB.prepare("DELETE FROM mail_sessions WHERE expires_at<=?").bind(now),
     env.MAIL_DB.prepare("DELETE FROM mail_public_sessions WHERE expires_at<=?").bind(now),
     env.MAIL_DB.prepare("DELETE FROM mail_public_creation_limits WHERE window_started_at<?").bind(now - PUBLIC_CREATE_WINDOW_MS * 2),
@@ -2004,7 +2041,10 @@ export {
   mailboxAddress,
   parseBearerToken,
   passwordHash,
-  randomHex
+  randomHex,
+  isAllowedMailboxTtl,
+  isMailboxActive,
+  MAILBOX_TTL_OPTIONS_SECONDS
 };
 
 export default {

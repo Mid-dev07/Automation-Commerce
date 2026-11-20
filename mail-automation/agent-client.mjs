@@ -3,6 +3,9 @@ const MACHINE_API_PREFIX = "/api/v1/machine";
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{40,160}$/;
 const UUID_PATTERN = /^[0-9a-f-]{36}$/i;
 const CLIENT_REF_PATTERN = /^[A-Za-z0-9._:-]{1,100}$/;
+const MAILBOX_TTL_OPTIONS_SECONDS = new Set([
+  600, 3600, 21600, 43200, 86400, 259200, 604800, 1209600, 2592000
+]);
 
 export class TMailApiError extends Error {
   constructor(message, { status, payload, retryAfter } = {}) {
@@ -100,14 +103,18 @@ export class TMailClient {
     return this.request(`${MACHINE_API_PREFIX}/health`, { signal });
   }
 
-  createMailbox({ label = "Seiton agent", clientRef, signal } = {}) {
+  createMailbox({ label = "Seiton agent", clientRef, ttlSeconds = 600, signal } = {}) {
     const normalizedClientRef = requireClientRef(clientRef);
     const normalizedLabel = String(label ?? "").trim().slice(0, 80);
+    const normalizedTtlSeconds = Number(ttlSeconds);
+    if (!Number.isSafeInteger(normalizedTtlSeconds) || !MAILBOX_TTL_OPTIONS_SECONDS.has(normalizedTtlSeconds)) {
+      throw new RangeError("ttlSeconds must be one of the supported durations from 10 minutes to 30 days.");
+    }
     return this.request(`${MACHINE_API_PREFIX}/mailboxes`, {
       method: "POST",
       body: {
         label: normalizedLabel,
-        ttlSeconds: 600,
+        ttlSeconds: normalizedTtlSeconds,
         clientRef: normalizedClientRef
       },
       signal
