@@ -20,9 +20,15 @@ Mailbox addresses are created on seiton.my.id.
   receiver+<24-hex>@inbox.seiton.biz.id remain readable during the migration. Their
   original expiry is retained; no existing row or message is rewritten.
 - Maximum accepted messages per mailbox remains 100.
-- The cleanup cron remains every 10 minutes. It expires 10-minute random mailboxes and
-  removes their messages after expiry. Custom mailbox messages retain the existing
-  30-day message-retention policy; custom addresses themselves remain valid for 365 days.
+- Owner-created and Machine API mailboxes support selectable lifetimes of 10 minutes,
+  1 hour, 6 hours, 12 hours, 1 day, 3 days, 7 days, 14 days, or 30 days. The Owner
+  panel defaults to 1 day; existing Machine API clients that omit `ttlSeconds` retain
+  the 10-minute default for compatibility.
+- Public Generate addresses remain 10 minutes and Public Custom addresses remain 365 days.
+- The Owner panel lists only active, unexpired mailboxes. Expired or revoked mailbox
+  messages and public inbox credentials are removed by the next cleanup run; mailbox
+  metadata is retained for a seven-day grace period, then purged. The cleanup cron
+  remains every 10 minutes. The general message-retention ceiling remains 30 days.
 
 ## Runtime and bindings
 
@@ -64,8 +70,9 @@ change. The legacy table names remain for backward compatibility.
   Move agents to individual tokens before removing the legacy Worker secret.
 - Machine endpoints enforce per-token rate limits, mailbox ownership, and message
   access checks. Agents never receive Owner cookies or Owner credentials.
-- Expired mailbox messages are no longer returned by the owner inbox API; scheduled
-  cleanup removes them after expiration.
+- Expired and revoked mailboxes no longer appear in the Owner panel or return messages
+  through the owner inbox API. Scheduled cleanup removes their message payloads and
+  public inbox credentials, then purges mailbox metadata after a seven-day grace period.
 - Public inbox APIs require a mailbox-specific HttpOnly session cookie issued only
   after mailbox creation or password verification. A guessed address alone cannot read mail.
 
