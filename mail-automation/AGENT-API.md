@@ -1,4 +1,4 @@
-# TMail Machine API — Agent Integration
+# SeitonMail Machine API — Agent Integration
 
 This is the supported machine-to-machine interface for Seiton agents. It does not use
 the owner-panel login, owner password, browser session cookie, or dashboard endpoints.
@@ -182,27 +182,27 @@ conversation summaries.
 Use `agent-client.mjs` from this directory:
 
 ```js
-import { TMailClient } from "./agent-client.mjs";
+import { SeitonMailClient } from "./agent-client.mjs";
 
-const tmail = new TMailClient({
+const seitonMail = new SeitonMailClient({
   token: env.TMAIL_API_TOKEN
 });
 
-const created = await tmail.createMailbox({
+const created = await seitonMail.createMailbox({
   label: "signup-task-4821",
   clientRef: "signup-task-4821",
   ttlSeconds: 86400 // 1 day; choose any supported duration up to 30 days
 });
 
 const mailbox = created.mailbox;
-const inbox = await tmail.listMessages({ mailboxId: mailbox.id });
+const inbox = await seitonMail.listMessages({ mailboxId: mailbox.id });
 const code = inbox.messages.find((message) => message.verification_code)
   ?.verification_code ?? null;
 ```
 
 The client validates inputs, sends only Bearer authentication, and throws
-`TMailApiError` with HTTP status and `retryAfter` for API failures. It never uses an
-owner session cookie.
+`SeitonMailApiError` with HTTP status and `retryAfter` for API failures. It never uses an
+owner session cookie. The previous exports `TMailClient` and `TMailApiError` remain available as backward-compatible aliases.
 
 ## Error handling
 

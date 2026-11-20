@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TMailApiError, TMailClient } from "../mail-automation/agent-client.mjs";
+import { SeitonMailApiError, SeitonMailClient, TMailApiError, TMailClient } from "../mail-automation/agent-client.mjs";
 
 const token = "t".repeat(48);
 const mailboxId = "11111111-1111-4111-8111-111111111111";
@@ -138,4 +138,15 @@ test("rejects unsupported TTL values before making an API request", async () => 
     /supported durations/i
   );
   assert.equal(calls.length, 0);
+});
+
+
+test("exposes SeitonMail brand names and retains legacy TMail aliases", () => {
+  assert.equal(TMailClient, SeitonMailClient);
+  assert.equal(TMailApiError, SeitonMailApiError);
+  const client = new SeitonMailClient({ token, fetchImpl: async () => new Response("{}") });
+  assert.ok(client instanceof TMailClient);
+  const error = new SeitonMailApiError("test");
+  assert.ok(error instanceof TMailApiError);
+  assert.equal(error.name, "SeitonMailApiError");
 });
