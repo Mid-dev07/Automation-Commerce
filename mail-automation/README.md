@@ -110,3 +110,15 @@ Run the repository Worker audit workflow. The dedicated tests cover:
 Perform a real inbound email test only after the seiton.my.id catch-all rule is
 configured and verify that expired mail is rejected. Do not use production owner
 credentials or actual sensitive inbox content in automated fixtures.
+
+
+## Agent Machine API
+
+The supported agent-to-TMail contract, authentication rules, limits, request examples,
+and error handling are documented in [AGENT-API.md](./AGENT-API.md). The dependency-free
+JavaScript client is available in [agent-client.mjs](./agent-client.mjs).
+
+Agents use a dedicated `MAIL_VM_API_TOKEN` Bearer credential stored in their private
+secret vault. They do not receive the owner password, owner cookie, setup token, or
+message-encryption key. The current Worker uses one machine credential; agents using
+the same credential share its mailbox ownership scope and rate limits.
