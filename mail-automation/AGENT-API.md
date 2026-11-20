@@ -65,10 +65,12 @@ GitHub, logs, or general conversation memory.
 
 - Each newly created mailbox receives a random 32-character hexadecimal local part
   at `@seiton.my.id`.
-- Lifetime is fixed at 600 seconds (10 minutes). The client cannot extend it.
+- Supported lifetimes are 10 minutes, 1 hour, 6 hours, 12 hours, 1 day, 3 days, 7 days, 14 days, and 30 days.
+- If `ttlSeconds` is omitted, the API keeps the backward-compatible default of 600 seconds (10 minutes).
+- The requested duration must exactly match one of the supported values; the maximum is 2,592,000 seconds (30 days).
 - A mailbox accepts at most 100 messages.
 - Message listing returns at most 50 messages per page.
-- Mailboxes become unreadable after expiration. The Worker cleanup runs every 10 minutes.
+- Mailboxes become unreadable immediately after expiration. The Worker cleanup runs every 10 minutes, removes messages and public inbox credentials for expired/revoked mailboxes, and purges mailbox metadata after a seven-day grace period.
 - Attachments are not stored or returned.
 - Email is inbound-only; this API does not send email.
 - Rate limit: 120 machine API requests per token per 60-second window.
@@ -109,12 +111,12 @@ Content-Type: application/json
 
 {
   "label": "signup-task-4821",
-  "ttlSeconds": 600,
+  "ttlSeconds": 86400,
   "clientRef": "signup-task-4821"
 }
 ```
 
-The API enforces 600 seconds regardless of caller input. A newly created response uses
+The API validates `ttlSeconds` against the supported duration list. A newly created response uses
 HTTP 201; a matching active `clientRef` may be returned with HTTP 200 and
 `reused: true`.
 
@@ -188,7 +190,8 @@ const tmail = new TMailClient({
 
 const created = await tmail.createMailbox({
   label: "signup-task-4821",
-  clientRef: "signup-task-4821"
+  clientRef: "signup-task-4821",
+  ttlSeconds: 86400 // 1 day; choose any supported duration up to 30 days
 });
 
 const mailbox = created.mailbox;
