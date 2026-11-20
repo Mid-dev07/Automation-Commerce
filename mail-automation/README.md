@@ -132,7 +132,7 @@ and the relevant zone.
 Run the repository Worker audit workflow. The dedicated tests cover:
 
 - random 32-hex mailbox IDs
-- TMail recipient parsing
+- SeitonMail recipient parsing
 - legacy plus-address compatibility
 - invalid-recipient rejection
 - address formatting and invalid slug rejection
