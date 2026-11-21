@@ -167,3 +167,55 @@ test("bot inline dashboard JavaScript parses with product-management handlers", 
   assert.ok(scriptStart>=0&&scriptEnd>scriptStart);
   new vm.Script(html.slice(scriptStart+8,scriptEnd),{filename:"site-admin-bot-console.js"});
 });
+
+test("public GET/OPTIONS /api/pricing enforces cache-control and strict CORS allowlist", async () => {
+  const mod = await import("../site-admin/worker.js");
+  const fakeEnv = {
+    SITE_DB: {
+      prepare() {
+        return {
+          async all() {
+            return { results: [] };
+          },
+          async first() {
+            return { value: "1", updated_at: "2026-11-21T00:00:00Z" };
+          }
+        };
+      }
+    }
+  };
+  const okGet = await mod.default.fetch(
+    new Request("https://admin.seiton.biz.id/api/pricing", { headers: { Origin: "https://seiton.biz.id" } }),
+    fakeEnv
+  );
+  assert.equal(okGet.status, 200);
+  assert.equal(okGet.headers.get("Cache-Control"), "public, max-age=60, stale-while-revalidate=300");
+  assert.equal(okGet.headers.get("Access-Control-Allow-Origin"), "https://seiton.biz.id");
+  assert.equal(okGet.headers.get("Vary"), "Origin");
+
+  const previewGet = await mod.default.fetch(
+    new Request("https://admin.seiton.biz.id/api/pricing", { headers: { Origin: "https://seiton-main-preview.pages.dev" } }),
+    fakeEnv
+  );
+  assert.equal(previewGet.headers.get("Access-Control-Allow-Origin"), "https://seiton-main-preview.pages.dev");
+
+  const evilGet = await mod.default.fetch(
+    new Request("https://admin.seiton.biz.id/api/pricing", { headers: { Origin: "https://evil.example" } }),
+    fakeEnv
+  );
+  assert.equal(evilGet.status, 200);
+  assert.equal(evilGet.headers.get("Access-Control-Allow-Origin"), null);
+
+  const okOpt = await mod.default.fetch(
+    new Request("https://admin.seiton.biz.id/api/pricing", { method: "OPTIONS", headers: { Origin: "https://www.seiton.biz.id" } }),
+    fakeEnv
+  );
+  assert.equal(okOpt.status, 204);
+  assert.equal(okOpt.headers.get("Access-Control-Allow-Origin"), "https://www.seiton.biz.id");
+
+  const evilOpt = await mod.default.fetch(
+    new Request("https://admin.seiton.biz.id/api/pricing", { method: "OPTIONS", headers: { Origin: "https://evil.example" } }),
+    fakeEnv
+  );
+  assert.equal(evilOpt.status, 403);
+});
