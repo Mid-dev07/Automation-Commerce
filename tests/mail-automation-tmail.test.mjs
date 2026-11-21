@@ -92,3 +92,22 @@ test("mailbox active state respects status and expiry timestamp", () => {
   assert.equal(isMailboxActive({ status: "EXPIRED", expires_at: now + 1000 }, now), false);
   assert.equal(isMailboxActive({ status: "REVOKED", expires_at: now + 1000 }, now), false);
 });
+
+test("mail-automation migrations 0001 through 0003 bootstrap all 14 tables cleanly", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(":memory:");
+  for (const file of [
+    "../mail-automation/migrations/0001_initial.sql",
+    "../mail-automation/migrations/0002_owner_2fa_machine_tokens.sql",
+    "../mail-automation/migrations/0003_public_tmail_inboxes.sql"
+  ]) {
+    db.exec(readFileSync(new URL(file, import.meta.url), "utf8"));
+  }
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
+  assert.equal(tables.length, 14);
+  assert.ok(tables.includes("mail_admin"));
+  assert.ok(tables.includes("mail_aliases"));
+  assert.ok(tables.includes("mail_messages"));
+  assert.ok(tables.includes("mail_public_mailboxes"));
+});
