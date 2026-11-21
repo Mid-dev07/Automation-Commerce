@@ -14,6 +14,11 @@
       "binding": "OTP_BACKEND",
       "service": "seiton-otp-portal",
       "environment": "production"
+    },
+    {
+      "binding": "MAIL_BACKEND",
+      "service": "seiton-mail-automation",
+      "environment": "production"
     }
   ],
   "d1_databases": [

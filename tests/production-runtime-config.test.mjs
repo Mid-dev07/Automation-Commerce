@@ -45,6 +45,9 @@ test("site admin config declares both production service bindings", () => {
   assert.ok(config.services?.some((binding) =>
     binding.binding === "OTP_BACKEND" && binding.service === "seiton-otp-portal"
   ));
+  assert.ok(config.services?.some((binding) =>
+    binding.binding === "MAIL_BACKEND" && binding.service === "seiton-mail-automation"
+  ));
   assert.ok(config.d1_databases?.some((binding) =>
     binding.binding === "SITE_DB" && binding.database_name === "seiton-site-content-prod"
   ));

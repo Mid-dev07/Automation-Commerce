@@ -299,6 +299,18 @@ if(u.pathname==="/api/admin/bot/products"&&req.method==="POST"){
     return secure(j({ok:false,error:"Perubahan katalog bot gagal diteruskan."},503));
   }
 }
+if(u.pathname==="/api/admin/mail/status"&&req.method==="GET"){
+  const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));
+  try{
+    if(!env.MAIL_BACKEND)return secure(j({ok:false,error:"Service binding Mail Automation belum tersedia."},503));
+    const upstream=await env.MAIL_BACKEND.fetch(new Request("https://mail-internal/health"));
+    const payload=await upstream.json().catch(()=>({}));
+    return secure(j({ok:true,service:"seiton-mail-automation",panel_url:"https://mail.seiton.biz.id",healthy:Boolean(upstream.ok&&payload&&payload.ok)}));
+  }catch(e){
+    console.error(JSON.stringify({event:"owner_admin_mail_status_failed",error:String(e&&e.message||e)}));
+    return secure(j({ok:false,error:"Layanan Mail Automation belum dapat dihubungi."},503));
+  }
+}
 if(u.pathname==="/api/admin/pricing"&&req.method==="GET"){if(!(await activeSession(req,env)))return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));return secure(j(await getPricing(env)));}
 if(u.pathname==="/api/admin/pricing"&&req.method==="PUT"){if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));const session=await activeSession(req,env);if(!session)return secure(j({ok:false,error:"Sesi tidak valid atau kedaluwarsa."},401));let b;try{b=await req.json();}catch{return secure(j({ok:false,error:"Data tidak valid."},400));}try{return secure(j(await savePricing(env,b,session.client_hash)));}catch(e){return secure(j({ok:false,error:e.message},400));}}
 if(u.pathname==="/"||u.pathname==="/index.html")return secure(new Response(page(),{headers:{"Content-Type":"text/html; charset=utf-8","Cache-Control":"no-store"}}));
