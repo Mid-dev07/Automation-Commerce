@@ -41,6 +41,37 @@ import {
   declineMessagingHandoff,
   queueMessagingHandoffReply
 } from "./messaging-core.mjs";
+import {
+  SHEETS_BASE, GOOGLE_TOKEN_URL, TELEGRAM_API, SEITON_LOGO_URL, TZ, HEADERS,
+  PAID_ORDER_STATUSES, CANCELLED_ORDER_STATUSES, PAYMENT_WORKFLOW_HEADERS,
+  parseCatalogProduct, base64url, base64urlBytes, rupiah, json, constantTimeEqual
+} from "./src/order-bot/utils.mjs";
+import { ADMIN_DASHBOARD_HTML } from "./src/order-bot/dashboard-html.mjs";
+import {
+  customerMenuText, adminMenuText, customerMenuKeyboard, adminMenuKeyboard,
+  adminOrdersKeyboard, adminProductsKeyboard, adminReportsKeyboard,
+  adminSupportKeyboard, adminCatalogKeyboard, customerCategoryForProduct,
+  customerCategoryTitle, customerCatalogProducts, customerProductCanBeOrdered,
+  orderConfirmation, helpText
+} from "./src/order-bot/keyboards.mjs";
+import {
+  sendTelegramPhoto, sendSeitonWelcome, sendTelegramPhotoBlob, telegramApiRequest,
+  deleteTelegramMessage, updateTelegramMessage, answerTelegramCallback,
+  sendTelegramDocument, sendTelegramDocumentById, sendTelegram
+} from "./src/order-bot/telegram-api.mjs";
+import {
+  ensurePaymentWorkflowHeaders, updateSheetRange, findOrderById,
+  appendSheetRows, appendOrder, readSheet, getGoogleAccessToken, importPrivateKey
+} from "./src/order-bot/sheets-client.mjs";
+import {
+  orderRowsToObjects, productRowsToObjects, localDateKey,
+  csvCell, csvText, buildReportExportsFromData, isValidReportDate, buildAdminReport
+} from "./src/order-bot/reports.mjs";
+import {
+  createPickupTicketToken, verifyPickupTicketToken, createPickupTicketUrl,
+  escapeHtml, handlePickupVerificationPage, pickupQrImageUrl,
+  pickupReceiptCaption, sendPickupReceipt
+} from "./src/order-bot/pickup.mjs";
 export { OrderCoordinator };
 /**
  * ============================================================================
@@ -66,17 +97,6 @@ export { OrderCoordinator };
  * and per-order state transitions; Google Sheets is a retryable reporting mirror.
  */
 
-const ADMIN_DASHBOARD_HTML = "<!doctype html>\n<html lang=\"id\">\n<head>\n<meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<meta name=\"robots\" content=\"noindex,nofollow\"><meta name=\"referrer\" content=\"no-referrer\">\n<title>Seiton.id · Admin Workspace</title>\n<script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.6.1/dist/chart.umd.min.js\" crossorigin=\"anonymous\"></script>\n<style>\n:root{color-scheme:light;--bg:#f4f6fa;--surface:#fff;--ink:#172033;--muted:#69758a;--line:#e7ebf1;--nav:#101a2b;--nav2:#1a2940;--accent:#e87935;--accent2:#f59b57;--green:#16845b;--greenbg:#e8f6ef;--amber:#a86409;--amberbg:#fff5df;--red:#b83242;--redbg:#fff0f1;--blue:#2864b4;--bluebg:#edf4ff;--shadow:0 12px 32px rgba(25,38,60,.07)}\n*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer}.hidden{display:none!important}\n.login-wrap{min-height:100vh;display:grid;place-items:center;padding:24px;background:radial-gradient(circle at 15% 15%,#263c5c 0,transparent 35%),linear-gradient(145deg,#101a2b,#1a2c46)}\n.login-card{width:min(420px,100%);background:#fff;border-radius:22px;padding:32px;box-shadow:0 24px 90px #0005}.brand-mark{display:flex;align-items:center;gap:12px;font-weight:800;font-size:19px}.brand-symbol{width:42px;height:42px;border-radius:13px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:20px}.login-card h1{font-size:24px;margin:28px 0 8px}.login-card p{color:var(--muted);line-height:1.6;margin:0 0 22px}.field{display:grid;gap:7px;margin-bottom:15px}.field label{font-size:12px;font-weight:700;color:#49566c}.field input,.field select,.field textarea,.toolbar input,.toolbar select{width:100%;border:1px solid #dce2eb;background:#fff;padding:11px 12px;border-radius:10px;color:var(--ink);outline:none}.field input:focus,.field select:focus,.field textarea:focus,.toolbar input:focus,.toolbar select:focus{border-color:#8faed7;box-shadow:0 0 0 3px #2864b41a}.btn{border:0;border-radius:10px;padding:10px 14px;font-weight:700;background:#edf1f6;color:#31405a}.btn:hover{filter:brightness(.97)}.btn-primary{background:var(--accent);color:#fff}.btn-dark{background:#1a2940;color:#fff}.btn-soft{background:var(--bluebg);color:var(--blue)}.btn-danger{background:var(--redbg);color:var(--red)}.btn-small{padding:7px 10px;font-size:12px}.btn-block{width:100%;padding:12px}.login-error{min-height:20px;color:var(--red);font-size:12px;margin-top:10px}\n.app{min-height:100vh;display:grid;grid-template-columns:250px minmax(0,1fr)}.sidebar{background:var(--nav);color:#e9eff8;padding:22px 16px;display:flex;flex-direction:column;min-height:100vh;position:sticky;top:0;height:100vh}.side-brand{display:flex;align-items:center;gap:11px;padding:5px 10px 25px;border-bottom:1px solid #ffffff19}.side-brand .brand-symbol{width:38px;height:38px}.side-brand strong{display:block;font-size:16px}.side-brand small{display:block;color:#9eacc0;font-size:10px;letter-spacing:.13em;margin-top:3px}.nav-label{padding:24px 10px 9px;color:#8797ae;font-size:10px;letter-spacing:.14em;font-weight:800}.side-nav{display:grid;gap:5px}.side-nav button{border:0;background:transparent;color:#b9c5d5;text-align:left;padding:11px 12px;border-radius:10px;display:flex;align-items:center;gap:12px;font-weight:600}.side-nav button:hover{background:#ffffff0d;color:#fff}.side-nav button.active{background:#253751;color:#fff;box-shadow:inset 3px 0 var(--accent)}.nav-icon{width:20px;text-align:center;font-size:16px}.side-bottom{margin-top:auto;border-top:1px solid #ffffff19;padding:16px 8px 0;color:#9eacc0;font-size:11px;line-height:1.6}.side-bottom a{color:#fff;text-decoration:none}\n.main{min-width:0}.topbar{height:76px;background:#ffffffeb;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 30px;position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}.topbar-left{display:flex;align-items:center;gap:12px}.menu-toggle{display:none}.eyebrow{font-size:10px;letter-spacing:.13em;color:var(--muted);font-weight:800}.topbar h1{font-size:20px;margin:2px 0 0}.top-actions{display:flex;align-items:center;gap:13px}.live-dot{display:inline-flex;align-items:center;gap:7px;color:var(--green);font-size:11px;font-weight:800}.live-dot:before{content:\"\";width:7px;height:7px;border-radius:50%;background:#20a36e;box-shadow:0 0 0 4px #20a36e20}.avatar{width:34px;height:34px;border-radius:50%;background:#fbe7d9;color:#a34b19;display:grid;place-items:center;font-weight:800}\n.content{padding:28px 30px 40px;max-width:1600px;margin:0 auto}.welcome{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:22px}.welcome h2{font-size:24px;letter-spacing:-.04em;margin:0 0 5px}.welcome p{margin:0;color:var(--muted)}.welcome-actions{display:flex;gap:8px;flex-wrap:wrap}\n.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;margin-bottom:18px}.metric{background:var(--surface);border:1px solid var(--line);border-radius:15px;padding:17px 18px;box-shadow:var(--shadow);min-width:0}.metric-top{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:12px;font-weight:700}.metric-icon{width:32px;height:32px;border-radius:10px;display:grid;place-items:center;background:#fff1e7;color:#ba5e22;font-size:16px}.metric-value{font-size:26px;font-weight:800;letter-spacing:-.04em;margin:13px 0 4px}.metric-note{font-size:11px;color:var(--muted)}\n.grid{display:grid;gap:16px}.grid-main{grid-template-columns:minmax(0,1.65fr) minmax(280px,1fr);margin-bottom:18px}.grid-equal{grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:18px}.panel{background:var(--surface);border:1px solid var(--line);border-radius:15px;padding:18px;box-shadow:var(--shadow);min-width:0}.panel-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px}.panel-head h3{margin:0;font-size:14px}.panel-sub{font-size:11px;color:var(--muted);margin-top:4px}.chart-box{height:270px;position:relative}.status-list{display:grid;gap:12px}.status-row{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center}.status-row .label{font-size:12px;color:var(--muted)}.status-row strong{font-size:12px}.status-track{grid-column:1/-1;height:7px;border-radius:20px;background:#eff2f6;overflow:hidden}.status-fill{height:100%;border-radius:20px;background:var(--accent)}\n.toolbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin:0 0 14px}.toolbar input{max-width:320px}.toolbar select{width:auto;min-width:150px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;min-width:760px}th,td{text-align:left;padding:12px 12px;border-bottom:1px solid #edf0f4;vertical-align:middle;font-size:12px}th{background:#f8fafc;color:#758197;font-size:10px;letter-spacing:.06em;text-transform:uppercase;position:sticky;top:0}tr:last-child td{border-bottom:0}tbody tr:hover{background:#fbfcfe}.right{text-align:right}.muted{color:var(--muted)}.mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,monospace}.status{display:inline-flex;padding:5px 8px;border-radius:99px;font-size:10px;font-weight:800;white-space:nowrap;background:#eef2f6;color:#586477}.status.paid{background:var(--greenbg);color:var(--green)}.status.pending{background:var(--amberbg);color:var(--amber)}.status.cancelled{background:var(--redbg);color:var(--red)}.status.info{background:var(--bluebg);color:var(--blue)}\n.product-cell{display:flex;align-items:center;gap:10px;min-width:190px}.product-cell img{width:38px;height:38px;border-radius:9px;object-fit:cover;background:#f2f4f7}.product-cell strong{display:block;font-size:12px}.product-cell small{color:var(--muted);font-size:10px}.pay-card{border:1px solid var(--line);border-radius:13px;padding:14px;display:grid;gap:10px;margin-bottom:10px}.pay-top{display:flex;justify-content:space-between;gap:12px}.pay-title{font-weight:800}.pay-meta{font-size:11px;color:var(--muted);line-height:1.65}.pay-actions{display:flex;gap:7px;flex-wrap:wrap}.empty{padding:32px 14px;text-align:center;color:var(--muted);font-size:12px}.empty strong{display:block;color:var(--ink);font-size:14px;margin-bottom:5px}\n.report-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px}.report-card{border:1px solid var(--line);border-radius:13px;padding:17px}.report-card .report-icon{font-size:22px}.report-card h4{margin:12px 0 5px}.report-card p{margin:0 0 14px;color:var(--muted);font-size:11px;line-height:1.5}\n.modal-backdrop{position:fixed;inset:0;background:#101a2b88;display:grid;place-items:center;padding:20px;z-index:40}.modal{background:white;border-radius:17px;padding:22px;width:min(580px,100%);max-height:92vh;overflow:auto;box-shadow:0 24px 90px #0004}.modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}.modal-head h3{margin:0}.modal-close{border:0;background:#f1f3f6;border-radius:8px;width:32px;height:32px;font-size:18px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}.span-2{grid-column:span 2}.form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:15px}.proof-preview{max-width:100%;max-height:65vh;object-fit:contain;border-radius:10px;background:#f6f8fb}.toast{position:fixed;bottom:22px;right:22px;background:#17263c;color:#fff;padding:12px 16px;border-radius:11px;box-shadow:var(--shadow);z-index:60;font-size:12px;max-width:min(420px,calc(100vw - 44px))}.toast.error{background:#8f2635}\n.footer-note{font-size:10px;color:var(--muted);margin-top:18px}\n@media(max-width:1100px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.report-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.grid-main{grid-template-columns:1fr}.chart-box{height:240px}}\n@media(max-width:760px){.app{grid-template-columns:1fr}.sidebar{position:fixed;left:-270px;top:0;width:250px;z-index:30;transition:left .2s}.sidebar.open{left:0}.menu-toggle{display:inline-grid;border:0;background:#f1f3f6;border-radius:9px;width:36px;height:36px;place-items:center}.topbar{padding:0 15px;height:66px}.content{padding:20px 14px 32px}.topbar h1{font-size:17px}.top-actions .live-dot{display:none}.welcome{align-items:flex-start;flex-direction:column}.welcome h2{font-size:21px}.metrics{gap:9px}.metric{padding:13px}.metric-value{font-size:21px}.grid-equal{grid-template-columns:1fr}.report-grid{grid-template-columns:1fr 1fr}.toolbar input{max-width:100%;flex:1 1 100%}.form-grid{grid-template-columns:1fr}.span-2{grid-column:auto}}\n@media(max-width:420px){.report-grid{grid-template-columns:1fr}.metrics{grid-template-columns:1fr 1fr}.metric-value{font-size:18px}.top-actions .btn{padding:8px 9px;font-size:11px}}\n</style>\n</head>\n<body>\n<section id=\"loginView\" class=\"login-wrap\">\n <form id=\"loginForm\" class=\"login-card\">\n  <div class=\"brand-mark\"><span class=\"brand-symbol\">S</span><span>Seiton.id<br><small style=\"color:#8b95a7;font-size:10px;letter-spacing:.12em\">ADMIN WORKSPACE</small></span></div>\n  <h1>Masuk ke panel admin</h1><p>Kelola pesanan, verifikasi pembayaran, katalog produk, dan laporan bisnis Seiton.id.</p>\n  <div class=\"field\"><label for=\"adminPassword\">Password admin</label><input id=\"adminPassword\" type=\"password\" autocomplete=\"current-password\" placeholder=\"Masukkan password admin\" required></div>\n  <button id=\"loginButton\" class=\"btn btn-primary btn-block\" type=\"submit\">Masuk ke Dashboard</button>\n  <div id=\"loginError\" class=\"login-error\" role=\"alert\"></div>\n  <p style=\"font-size:10px;margin:18px 0 0\">Akses terbatas untuk pengelola Seiton.id · <a href=\"https://seiton.biz.id\" style=\"color:#a34b19\">Kembali ke situs utama</a></p>\n </form>\n</section>\n<div id=\"appView\" class=\"app hidden\">\n <aside id=\"sidebar\" class=\"sidebar\">\n  <div class=\"side-brand\"><span class=\"brand-symbol\">S</span><div><strong>Seiton.id</strong><small>ADMIN WORKSPACE</small></div></div>\n  <div class=\"nav-label\">WORKSPACE</div>\n  <nav class=\"side-nav\">\n   <button data-page=\"overview\" class=\"active\"><span class=\"nav-icon\">▦</span> Ringkasan</button>\n   <button data-page=\"orders\"><span class=\"nav-icon\">▤</span> Pesanan</button>\n   <button data-page=\"payments\"><span class=\"nav-icon\">◉</span> Verifikasi Pembayaran <span id=\"pendingBadge\" class=\"status pending\" style=\"margin-left:auto\">0</span></button>\n   <button data-page=\"payment-methods\"><span class=\"nav-icon\">💳</span> Metode Pembayaran</button>\n   <button data-page=\"products\"><span class=\"nav-icon\">▣</span> Produk & Katalog</button>\n   <button data-page=\"reports\"><span class=\"nav-icon\">▥</span> Laporan</button>\n  </nav>\n  <div class=\"nav-label\">SITUS</div>\n  <nav class=\"side-nav\"><button id=\"openSite\"><span class=\"nav-icon\">↗</span> Website Seiton.id</button></nav>\n  <div class=\"side-bottom\">Transaksi utama tersimpan di Cloudflare D1.<br>Google Sheets adalah mirror laporan.<br><a href=\"https://seiton.biz.id\">seiton.biz.id ↗</a></div>\n </aside>\n <main class=\"main\">\n  <header class=\"topbar\">\n   <div class=\"topbar-left\"><button id=\"menuToggle\" class=\"menu-toggle\" aria-label=\"Buka menu\">☰</button><div><div class=\"eyebrow\">SEITON.ID / ADMIN</div><h1 id=\"pageTitle\">Ringkasan</h1></div></div>\n   <div class=\"top-actions\"><span class=\"live-dot\">LIVE DATA</span><span id=\"lastUpdated\" class=\"muted\" style=\"font-size:11px\">Menghubungkan…</span><span class=\"avatar\">A</span><button id=\"logoutButton\" class=\"btn btn-small\">Keluar</button></div>\n  </header>\n  <section class=\"content\">\n   <div id=\"page-overview\" class=\"page\">\n    <div class=\"welcome\"><div><h2>Selamat datang kembali 👋</h2><p>Berikut gambaran operasional toko saat ini.</p></div><div class=\"welcome-actions\"><select id=\"period\" class=\"btn\"><option value=\"7\">7 hari terakhir</option><option value=\"30\" selected>30 hari terakhir</option><option value=\"90\">90 hari terakhir</option><option value=\"365\">12 bulan</option><option value=\"all\">Semua data</option></select><button class=\"btn btn-dark\" id=\"refreshButton\">↻ Perbarui</button></div></div>\n    <div class=\"metrics\">\n     <article class=\"metric\"><div class=\"metric-top\">Omzet terverifikasi <span class=\"metric-icon\">↗</span></div><div id=\"metricRevenue\" class=\"metric-value\">—</div><div class=\"metric-note\">Pembayaran yang telah disetujui</div></article>\n     <article class=\"metric\"><div class=\"metric-top\">Total pesanan <span class=\"metric-icon\">▤</span></div><div id=\"metricOrders\" class=\"metric-value\">—</div><div class=\"metric-note\">Sesuai periode yang dipilih</div></article>\n     <article class=\"metric\"><div class=\"metric-top\">Menunggu verifikasi <span class=\"metric-icon\">◷</span></div><div id=\"metricVerification\" class=\"metric-value\">—</div><div class=\"metric-note\">Butuh pemeriksaan admin</div></article>\n     <article class=\"metric\"><div class=\"metric-top\">Produk aktif <span class=\"metric-icon\">▣</span></div><div id=\"metricProducts\" class=\"metric-value\">—</div><div class=\"metric-note\" id=\"metricStock\">—</div></article>\n    </div>\n    <div class=\"grid grid-main\">\n     <article class=\"panel\"><div class=\"panel-head\"><div><h3>Tren penerimaan</h3><div class=\"panel-sub\">Nilai transaksi yang sudah diverifikasi per hari</div></div><span class=\"status paid\">TERKONFIRMASI</span></div><div class=\"chart-box\"><canvas id=\"revenueChart\"></canvas></div></article>\n     <article class=\"panel\"><div class=\"panel-head\"><div><h3>Status pesanan</h3><div class=\"panel-sub\">Distribusi pesanan pada periode terpilih</div></div></div><div class=\"chart-box\"><canvas id=\"statusChart\"></canvas></div></article>\n    </div>\n    <div class=\"grid grid-equal\">\n     <article class=\"panel\"><div class=\"panel-head\"><div><h3>Produk terlaris</h3><div class=\"panel-sub\">Berdasarkan unit dari pesanan terbayar</div></div></div><div class=\"chart-box\"><canvas id=\"productChart\"></canvas></div></article>\n     <article class=\"panel\"><div class=\"panel-head\"><div><h3>Pesanan terbaru</h3><button class=\"btn btn-small btn-soft\" data-go=\"orders\">Lihat semua ↗</button></div></div><div id=\"recentOrders\"></div></article>\n    </div>\n   </div>\n   <div id=\"page-orders\" class=\"page hidden\">\n    <div class=\"welcome\"><div><h2>Manajemen pesanan</h2><p>Telusuri transaksi dan perbarui status operasional.</p></div><button class=\"btn btn-soft\" data-export=\"orders\">⬇ Ekspor pesanan</button></div>\n    <div class=\"panel\"><div class=\"toolbar\"><input id=\"orderSearch\" placeholder=\"Cari ID, nama pelanggan, atau produk…\"><select id=\"orderStatus\"><option value=\"\">Semua status</option><option>MENUNGGU_PEMBAYARAN</option><option>MENUNGGU_VERIFIKASI</option><option>DIBAYAR</option><option>DIPROSES</option><option>DIKIRIM</option><option>SELESAI</option><option>DIBATALKAN</option></select></div><div id=\"ordersTable\"></div></div>\n   </div>\n   <div id=\"page-payments\" class=\"page hidden\">\n    <div class=\"welcome\"><div><h2>Verifikasi pembayaran</h2><p>Periksa bukti transfer/QRIS sebelum menerbitkan resi pengambilan.</p></div><button class=\"btn btn-soft\" id=\"refreshPayments\">↻ Muat ulang</button></div>\n    <div class=\"metrics\" style=\"grid-template-columns:repeat(3,minmax(0,1fr))\">\n     <article class=\"metric\"><div class=\"metric-top\">Menunggu pemeriksaan</div><div id=\"payPending\" class=\"metric-value\">—</div></article>\n     <article class=\"metric\"><div class=\"metric-top\">Bukti terlampir</div><div id=\"payProof\" class=\"metric-value\">—</div></article>\n     <article class=\"metric\"><div class=\"metric-top\">Belum ada bukti</div><div id=\"payNoProof\" class=\"metric-value\">—</div></article>\n    </div>\n    <div id=\"paymentQueue\" class=\"panel\"></div>\n   </div>\n   <div id=\"page-payment-methods\" class=\"page hidden\">\n    <div class=\"welcome\"><div><h2>Metode pembayaran</h2><p>Atur metode yang tampil saat checkout dan rekening tujuan transfer. Perubahan berlaku untuk pesanan baru; pesanan berjalan tetap menggunakan metode semula.</p></div><button class=\"btn btn-soft\" id=\"refreshPaymentMethods\">↻ Muat ulang</button></div>\n    <div id=\"paymentMethodCards\" class=\"metrics\" style=\"grid-template-columns:repeat(auto-fit,minmax(220px,1fr))\"></div>\n    <div class=\"panel\">\n     <div class=\"welcome\"><div><h2>Rekening transfer bank</h2><p>Tambahkan beberapa rekening resmi. Rekening nonaktif tidak akan ditampilkan pada checkout baru.</p></div><button id=\"addBankAccount\" class=\"btn btn-primary\">＋ Tambah rekening</button></div>\n     <div id=\"paymentBankAccounts\"></div>\n    </div>\n    <div class=\"panel\" style=\"margin-top:16px\"><strong>Kontrol verifikasi</strong><p class=\"muted\">QRIS tetap membutuhkan pemeriksaan transaksi masuk pada GoPay Merchant. OCR hanya alat bantu pembacaan bukti, bukan konfirmasi settlement otomatis. Jangan menyetujui pembayaran tanpa memastikan nominal dan dana benar-benar masuk.</p></div>\n   </div>\n   <div id=\"page-products\" class=\"page hidden\">\n    <div class=\"welcome\"><div><h2>Produk & katalog</h2><p>Atur informasi, stok, harga, deskripsi, serta foto produk.</p></div><button id=\"addProductButton\" class=\"btn btn-primary\">＋ Tambah produk</button></div>\n    <div class=\"panel\"><div class=\"toolbar\"><input id=\"productSearch\" placeholder=\"Cari SKU atau nama produk…\"><select id=\"productFilter\"><option value=\"\">Semua produk</option><option value=\"active\">Aktif</option><option value=\"inactive\">Nonaktif</option><option value=\"low\">Stok rendah (≤ 5)</option></select></div><div id=\"productsTable\"></div></div>\n   </div>\n   <div id=\"page-reports\" class=\"page hidden\">\n    <div class=\"welcome\"><div><h2>Laporan bisnis</h2><p>Unduh laporan terbaru dari basis data transaksi D1.</p></div></div>\n    <div class=\"report-grid\">\n     <article class=\"report-card\"><div class=\"report-icon\">📋</div><h4>Data Pesanan</h4><p>Rincian order, pelanggan, produk, nilai transaksi, dan status.</p><button class=\"btn btn-soft btn-block\" data-export=\"orders\">Unduh CSV</button></article>\n     <article class=\"report-card\"><div class=\"report-icon\">💰</div><h4>Buku Keuangan</h4><p>Tagihan, pembayaran terverifikasi, dan saldo belum tertagih.</p><button class=\"btn btn-soft btn-block\" data-export=\"finance\">Unduh CSV</button></article>\n     <article class=\"report-card\"><div class=\"report-icon\">📅</div><h4>Ringkasan Harian</h4><p>Jumlah pesanan, transaksi dibayar, dan penerimaan per hari.</p><button class=\"btn btn-soft btn-block\" data-export=\"daily\">Unduh CSV</button></article>\n     <article class=\"report-card\"><div class=\"report-icon\">📦</div><h4>Stok & Katalog</h4><p>Harga jual, stok, nilai stok, status aktif, dan foto.</p><button class=\"btn btn-soft btn-block\" data-export=\"inventory\">Unduh CSV</button></article>\n    </div>\n    <div class=\"panel\" style=\"margin-top:15px\"><div class=\"panel-head\"><div><h3>Paket laporan lengkap</h3><div class=\"panel-sub\">Keempat laporan dikirim satu per satu sebagai file CSV.</div></div><button class=\"btn btn-primary\" data-export=\"all\">⬇ Unduh semua laporan</button></div><p class=\"footer-note\">Laba bersih tidak ditampilkan karena harga pokok/modal produk belum tercatat.</p></div>\n   </div>\n   <p class=\"footer-note\">Seiton.id Admin Workspace · Data diperbarui otomatis setiap 30 detik · Sumber transaksi: D1 · Mirror laporan: Google Sheets</p>\n  </section>\n </main>\n</div>\n<div id=\"modalBackdrop\" class=\"modal-backdrop hidden\"><div id=\"modal\" class=\"modal\" role=\"dialog\" aria-modal=\"true\"></div></div>\n<div id=\"toast\" class=\"toast hidden\" role=\"status\"></div>\n<script>\n(function(){\n const $=id=>document.getElementById(id);\n const money=n=>new Intl.NumberFormat('id-ID',{style:'currency',currency:'IDR',maximumFractionDigits:0}).format(Number(n)||0);\n const num=n=>new Intl.NumberFormat('id-ID').format(Number(n)||0);\n const esc=s=>String(s==null?'':s).replace(/[&<>\"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c];});\n const paid=['DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED'];\n const cancelled=['DIBATALKAN','CANCELLED','CANCELED'];\n const names={overview:'Ringkasan',orders:'Pesanan',payments:'Verifikasi Pembayaran','payment-methods':'Metode Pembayaran',products:'Produk & Katalog',reports:'Laporan'};\n let token=sessionStorage.getItem('seitonAdminAccess')||'';\n const hash=new URLSearchParams((location.hash||'').replace(/^#/,''));\n const deep=hash.get('access');\n if(deep){token=deep;sessionStorage.setItem('seitonAdminAccess',token);history.replaceState({},'',location.pathname+location.search);}\n let data=null,paymentConfig=null,charts={},toastTimer=null,refreshInFlight=false;\n async function api(path,options){\n  options=options||{};const headers=Object.assign({},options.headers||{});\n  if(token)headers.Authorization='Bearer '+token;\n  if(options.body && !(options.body instanceof FormData))headers['Content-Type']='application/json';\n  const res=await fetch(path,Object.assign({},options,{headers:headers,cache:'no-store'}));\n  if(res.status===401){logout(false);throw new Error('Sesi berakhir. Silakan login kembali.');}\n  const ct=res.headers.get('content-type')||'';\n  const body=ct.includes('application/json')?await res.json():res;\n  if(!res.ok)throw new Error(body.error||'Permintaan gagal ('+res.status+').');\n  return body;\n }\n function toast(message,error){$('toast').textContent=message;$('toast').classList.toggle('error',!!error);$('toast').classList.remove('hidden');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').classList.add('hidden'),3600);}\n function showLogin(){ $('loginView').classList.remove('hidden');$('appView').classList.add('hidden'); }\n function showApp(){ $('loginView').classList.add('hidden');$('appView').classList.remove('hidden'); }\n async function login(event){\n  event.preventDefault();const btn=$('loginButton');btn.disabled=true;btn.textContent='Memeriksa…';$('loginError').textContent='';\n  try{const r=await fetch('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:$('adminPassword').value})});const j=await r.json();if(!r.ok||!j.ok)throw new Error(j.error||'Login gagal.');token=j.token;sessionStorage.setItem('seitonAdminAccess',token);$('adminPassword').value='';showApp();await refresh();}\n  catch(e){$('loginError').textContent=e.message;}\n  finally{btn.disabled=false;btn.textContent='Masuk ke Dashboard';}\n }\n function logout(show){token='';sessionStorage.removeItem('seitonAdminAccess');Object.values(charts).forEach(c=>c.destroy());charts={};showLogin();if(show)toast('Anda telah keluar.');}\n function setPage(page){\n  if(!names[page])return;\n  document.querySelectorAll('.page').forEach(x=>x.classList.add('hidden'));\n  $('page-'+page).classList.remove('hidden');\n  document.querySelectorAll('.side-nav button[data-page]').forEach(x=>x.classList.toggle('active',x.dataset.page===page));\n  $('pageTitle').textContent=names[page];$('sidebar').classList.remove('open');\n  renderCurrent();\n  if(page==='payment-methods')refreshPaymentMethods();\n }\n function periodOrders(){\n  const list=data.orders||[],p=$('period').value;\n  if(p==='all')return list;\n  const cutoff=Date.now()-Number(p)*86400000;\n  return list.filter(o=>{const d=new Date(o.created_at).getTime();return Number.isFinite(d)&&d>=cutoff;});\n }\n function fmtDate(s){const d=new Date(s);return Number.isNaN(d.getTime())?'-':d.toLocaleString('id-ID',{timeZone:'Asia/Jakarta'});}\n function statusClass(s){s=String(s||'').toUpperCase();return paid.includes(s)?'paid':cancelled.includes(s)?'cancelled':s==='MENUNGGU_VERIFIKASI'?'info':'pending';}\n function badge(s){return '<span class=\"status '+statusClass(s)+'\">'+esc(s||'TANPA STATUS')+'</span>';}\n function killChart(id){if(charts[id]){charts[id].destroy();delete charts[id];}}\n function renderOverview(){\n  if(!data)return;const orders=periodOrders(),products=data.products||[],confirmed=orders.filter(o=>paid.includes(o.status));\n  const pending=orders.filter(o=>o.payment_confirmation_status==='MENUNGGU_VERIFIKASI');\n  const revenue=confirmed.reduce((a,o)=>a+o.total,0),active=products.filter(p=>p.active);\n  $('metricRevenue').textContent=money(revenue);$('metricOrders').textContent=num(orders.length);$('metricVerification').textContent=num(pending.length);$('metricProducts').textContent=num(active.length);$('metricStock').textContent=num(active.reduce((a,p)=>a+Math.max(0,p.stock||0),0))+' unit stok aktif';\n  $('pendingBadge').textContent=num((data.orders||[]).filter(o=>o.payment_confirmation_status==='MENUNGGU_VERIFIKASI').length);\n  if(typeof Chart!==\"function\"){\n   const recent=[...(data.orders||[])].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,6);\n   $('recentOrders').innerHTML=recent.length?tableOrders(recent,false):'<div class=\"empty\"><strong>Belum ada pesanan</strong>Pesanan baru akan muncul di sini.</div>';\n   return;\n  }\n  const dayKey=s=>{const d=new Date(s);return Number.isNaN(d.getTime())?'Tidak diketahui':new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Jakarta',year:'numeric',month:'2-digit',day:'2-digit'}).format(d);};\n  const daily={};confirmed.forEach(o=>{const k=dayKey(o.created_at);daily[k]=(daily[k]||0)+o.total;});\n  const labels=Object.keys(daily).sort();killChart('revenueChart');\n  charts.revenueChart=new Chart($('revenueChart'),{type:'line',data:{labels:labels,datasets:[{label:'Penerimaan',data:labels.map(k=>daily[k]),borderColor:'#e87935',backgroundColor:'#e8793520',fill:true,tension:.35,pointRadius:3}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>money(c.raw)}}},scales:{x:{grid:{display:false},ticks:{color:'#778298',maxTicksLimit:8}},y:{grid:{color:'#edf0f4'},ticks:{color:'#778298',callback:v=>new Intl.NumberFormat('id-ID',{notation:'compact'}).format(v)}}}}});\n  const map={};orders.forEach(o=>{const s=o.status||'TANPA STATUS';map[s]=(map[s]||0)+1;});killChart('statusChart');\n  charts.statusChart=new Chart($('statusChart'),{type:'doughnut',data:{labels:Object.keys(map),datasets:[{data:Object.values(map),backgroundColor:['#16845b','#e87935','#4d83c6','#d2a03e','#8995a7','#c45a66','#7e67b2'],borderWidth:3,borderColor:'#fff'}]},options:{responsive:true,maintainAspectRatio:false,cutout:'66%',plugins:{legend:{position:'bottom',labels:{usePointStyle:true,boxWidth:7,color:'#66748a',font:{size:10}}}}}});\n  const top={};confirmed.forEach(o=>{const n=String(o.product||'').split(' - ').slice(1).join(' - ')||o.product;top[n]=(top[n]||0)+o.quantity;});const best=Object.entries(top).sort((a,b)=>b[1]-a[1]).slice(0,6);killChart('productChart');\n  charts.productChart=new Chart($('productChart'),{type:'bar',data:{labels:best.map(x=>x[0]),datasets:[{label:'Unit terjual',data:best.map(x=>x[1]),backgroundColor:'#83b59b',borderRadius:6}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:'#edf0f4'},ticks:{color:'#778298'}},y:{grid:{display:false},ticks:{color:'#56647a'}}}}});\n  const recent=[...(data.orders||[])].sort((a,b)=>new Date(b.created_at)-new Date(a.created_at)).slice(0,6);\n  $('recentOrders').innerHTML=recent.length?tableOrders(recent,false):'<div class=\"empty\"><strong>Belum ada pesanan</strong>Pesanan baru akan muncul di sini.</div>';\n }\n function tableOrders(rows,actions){\n  if(!rows.length)return '<div class=\"empty\"><strong>Tidak ada hasil</strong>Coba ubah pencarian atau filter.</div>';\n  return '<div class=\"table-wrap\"><table><thead><tr><th>Pesanan</th><th>Pelanggan</th><th>Total</th><th>Status</th>'+(actions?'<th>Aksi</th>':'')+'</tr></thead><tbody>'+rows.map(o=>'<tr><td><strong class=\"mono\">'+esc(o.order_id)+'</strong><div class=\"muted\" style=\"font-size:10px;margin-top:4px\">'+esc(fmtDate(o.created_at))+'</div></td><td>'+esc(o.customer_name)+'<div class=\"muted\" style=\"font-size:10px;margin-top:4px\">'+esc(o.product)+'</div></td><td class=\"mono\">'+money(o.total)+'</td><td>'+badge(o.status)+'</td>'+(actions?'<td><button class=\"btn btn-small btn-soft\" data-order-status=\"'+esc(o.order_id)+'\">Ubah status</button></td>':'')+'</tr>').join('')+'</tbody></table></div>';\n }\n function renderOrders(){\n  if(!data)return;const q=($('orderSearch').value||'').toLowerCase(),status=$('orderStatus').value;\n  const rows=[...(data.orders||[])].filter(o=>(!status||o.status===status)&&[o.order_id,o.customer_name,o.product,o.customer_id].join(' ').toLowerCase().includes(q)).sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));\n  $('ordersTable').innerHTML=tableOrders(rows,true);\n }\n function renderPayments(){\n  if(!data)return;\n  const rows=(data.orders||[]).filter(o=>o.payment_confirmation_status==='MENUNGGU_VERIFIKASI').sort((a,b)=>new Date(b.payment_requested_at||b.created_at)-new Date(a.payment_requested_at||a.created_at));\n  $('payPending').textContent=num(rows.length);$('payProof').textContent=num(rows.filter(o=>o.payment_proof_file_id).length);$('payNoProof').textContent=num(rows.filter(o=>!o.payment_proof_file_id).length);\n  $('paymentQueue').innerHTML=rows.length?rows.map(o=>{\n   const qris=String(o.payment_method||'').toUpperCase()==='QRIS';\n   const mismatch=qris&&(String(o.qris_ocr_status||'').toUpperCase()==='MISMATCH'||String(o.qris_status||'').toUpperCase()==='OCR_MISMATCH'||(o.qris_ocr_amount!==null&&o.qris_ocr_amount!==undefined&&Number(o.qris_ocr_amount)!==Number(o.qris_expected_amount)));\n   const qrisMeta=qris?'<div class=\"pay-meta\">Tagihan QRIS: '+(o.qris_expected_amount==null?'Belum tersedia':money(o.qris_expected_amount))+' · OCR '+esc(o.qris_ocr_status||'NOT_RUN')+(o.qris_ocr_amount!==null&&o.qris_ocr_amount!==undefined?' · Terbaca '+money(o.qris_ocr_amount):'')+'</div>':'';\n   return '<article class=\"pay-card\"><div class=\"pay-top\"><div><div class=\"pay-title\">'+esc(o.customer_name)+' · '+esc(o.order_id)+'</div><div class=\"pay-meta\">'+esc(o.product)+' · '+num(o.quantity)+' pcs<br>'+esc(o.payment_method)+' · Diminta '+esc(fmtDate(o.payment_requested_at||o.created_at))+'</div>'+qrisMeta+'</div><div style=\"text-align:right\"><strong>'+money(o.total)+'</strong><div style=\"margin-top:7px\">'+(o.payment_proof_file_id?'<span class=\"status info\">BUKTI TERLAMPIR</span>':'<span class=\"status pending\">TANPA BUKTI</span>')+'</div></div></div><div class=\"pay-actions\">'+(o.payment_proof_file_id?'<button class=\"btn btn-small btn-soft\" data-proof=\"'+esc(o.order_id)+'\">Lihat bukti</button>':'')+(mismatch?'<span class=\"status cancelled\">BUKTI TIDAK COCOK · persetujuan dikunci</span>':'<button class=\"btn btn-small btn-primary\" data-pay-approve=\"'+esc(o.order_id)+'\">Setujui pembayaran</button>')+'<button class=\"btn btn-small btn-danger\" data-pay-reject=\"'+esc(o.order_id)+'\">Tolak / minta ulang</button></div></article>';\n  }).join(''):'<div class=\"empty\"><strong>Semua pembayaran sudah ditangani</strong>Belum ada permintaan verifikasi yang menunggu.</div>';\n }\n function renderProducts(){\n  if(!data)return;const q=($('productSearch').value||'').toLowerCase(),f=$('productFilter').value;\n  const rows=(data.products||[]).filter(p=>[p.sku,p.name,p.description].join(' ').toLowerCase().includes(q))\n   .filter(p=>!f||(f==='active'&&p.active)||(f==='inactive'&&!p.active)||(f==='low'&&p.active&&p.stock_valid&&p.stock!=null&&p.stock<=5));\n  $('productsTable').innerHTML=rows.length?'<div class=\"table-wrap\"><table><thead><tr><th>Produk</th><th>Harga</th><th>Stok</th><th>Status</th><th>Aksi</th></tr></thead><tbody>'+rows.map(p=>'<tr><td><div class=\"product-cell\">'+(p.photo_url?'<img src=\"'+esc(p.photo_url)+'\" alt=\"\">':'<div class=\"metric-icon\">▣</div>')+'<div><strong>'+esc(p.name)+'</strong><small>'+esc(p.sku)+'</small></div></div></td><td class=\"mono\">'+(p.price_valid===false?'<span class=\"status cancelled\">Harga invalid</span>':money(p.price))+'</td><td>'+(p.stock_valid===false?'<span class=\"status cancelled\">Stok invalid</span>':(p.stock==null?'Tidak dibatasi':num(p.stock)))+'</td><td>'+(p.active?'<span class=\"status paid\">AKTIF</span>':'<span class=\"status cancelled\">NONAKTIF / PERLU PERBAIKAN</span>')+'</td><td><button class=\"btn btn-small btn-soft\" data-product-edit=\"'+esc(p.sku)+'\">Atur</button> <button class=\"btn btn-small btn-danger\" data-product-delete=\"'+esc(p.sku)+'\">Hapus</button></td></tr>').join('')+'</tbody></table></div>':'<div class=\"empty\"><strong>Produk tidak ditemukan</strong>Tambahkan produk baru atau ubah filter.</div>';\n }\n function renderCurrent(){\n  const page=document.querySelector('.page:not(.hidden)')?.id.replace('page-','');\n  if(page==='overview')renderOverview();if(page==='orders')renderOrders();if(page==='payments')renderPayments();if(page==='payment-methods')renderPaymentMethods();if(page==='products')renderProducts();\n }\n async function refresh(){\n  if(refreshInFlight || !token)return;\n  refreshInFlight=true;\n  try{const r=await api('/api/admin/data');if(!r.ok)throw new Error(r.error||'Tidak dapat memuat data');data=r;$('lastUpdated').textContent='Diperbarui '+new Date(r.generated_at).toLocaleTimeString('id-ID');renderCurrent();$('pendingBadge').textContent=num((data.orders||[]).filter(o=>o.payment_confirmation_status==='MENUNGGU_VERIFIKASI').length);}\n  catch(e){toast(e.message,true);}\n  finally{refreshInFlight=false;}\n }\n async function refreshPaymentMethods(){\n  try{paymentConfig=await api('/api/admin/payment-methods');renderPaymentMethods();}\n  catch(e){$('paymentMethodCards').innerHTML='<div class=\"panel\">'+esc(e.message)+'</div>';toast(e.message,true);}\n }\n function renderPaymentMethods(){\n  if(!paymentConfig)return;\n  const methods=paymentConfig.methods||[],accounts=paymentConfig.bank_accounts||[];\n  $('paymentMethodCards').innerHTML=methods.map(method=>{\n   const state=method.available?'TERSEDIA':method.enabled?'AKTIF · PERLU KONFIGURASI':'NONAKTIF';\n   const reason=method.method_key==='QRIS'&&!method.runtime_ready?'QRIS internal belum dikonfigurasi pada Worker.':\n    method.method_key==='TRANSFER'&&!method.active_account_count?'Tambahkan setidaknya satu rekening aktif agar pelanggan dapat memilih transfer.':\n    method.available?'Akan ditampilkan pada checkout baru.':'Tidak ditampilkan pada checkout baru.';\n   return '<article class=\"metric\"><div class=\"metric-top\">'+esc(method.display_name)+'</div><div class=\"metric-value\" style=\"font-size:15px\">'+state+'</div><p class=\"muted\">'+esc(reason)+'</p><button class=\"btn '+(method.enabled?'btn-danger':'btn-primary')+'\" data-method-toggle=\"'+esc(method.method_key)+'\" data-enabled=\"'+(method.enabled?'false':'true')+'\">'+(method.enabled?'Nonaktifkan':'Aktifkan')+'</button></article>';\n  }).join('');\n  $('paymentBankAccounts').innerHTML=accounts.length?accounts.map(account=>\n   '<article class=\"pay-card\"><div class=\"pay-top\"><div><div class=\"pay-title\">'+esc(account.bank_name)+' · '+esc(account.account_holder)+'</div><div class=\"pay-meta\">No. rekening: <strong>'+esc(account.account_number)+'</strong>'+(account.note?'<br>'+esc(account.note):'')+'</div></div><div><span class=\"status '+(account.enabled?'paid':'cancelled')+'\">'+(account.enabled?'AKTIF':'NONAKTIF')+'</span></div></div><div class=\"pay-actions\"><button class=\"btn btn-small btn-soft\" data-bank-edit=\"'+esc(account.account_id)+'\">Ubah</button><button class=\"btn btn-small '+(account.enabled?'btn-danger':'btn-primary')+'\" data-bank-toggle=\"'+esc(account.account_id)+'\" data-enabled=\"'+(account.enabled?'false':'true')+'\">'+(account.enabled?'Nonaktifkan':'Aktifkan')+'</button></div></article>'\n  ).join(''):'<div class=\"empty\"><strong>Belum ada rekening transfer</strong>Tambahkan rekening bank resmi sebelum mengaktifkan pembayaran transfer.</div>';\n }\n async function togglePaymentMethod(method,enabled){\n  try{paymentConfig=await api('/api/admin/payment-methods',{method:'POST',body:JSON.stringify({action:'set_method',method_key:method,enabled:enabled})});renderPaymentMethods();toast('Pengaturan '+method+' berhasil diperbarui.');}\n  catch(e){toast(e.message,true);}\n }\n async function toggleBankAccount(accountId,enabled){\n  try{paymentConfig=await api('/api/admin/payment-methods',{method:'POST',body:JSON.stringify({action:'toggle_bank',account_id:accountId,enabled:enabled})});renderPaymentMethods();toast(enabled?'Rekening diaktifkan.':'Rekening dinonaktifkan untuk checkout baru.');}\n  catch(e){toast(e.message,true);}\n }\n function bankAccountForm(account){\n  account=account||{};\n  openModal(account.account_id?'Ubah rekening bank':'Tambah rekening bank','<form id=\"bankAccountForm\"><input type=\"hidden\" name=\"account_id\" value=\"'+esc(account.account_id||'')+'\"><div class=\"field\"><label>Nama bank / penyedia</label><input name=\"bank_name\" required maxlength=\"80\" placeholder=\"BCA, Mandiri, BRI, BNI…\" value=\"'+esc(account.bank_name||'')+'\"></div><div class=\"field\"><label>Nama pemilik rekening</label><input name=\"account_holder\" required maxlength=\"100\" value=\"'+esc(account.account_holder||'')+'\"></div><div class=\"field\"><label>Nomor rekening</label><input name=\"account_number\" inputmode=\"numeric\" pattern=\"[0-9 -]{5,40}\" required maxlength=\"40\" value=\"'+esc(account.account_number||'')+'\"></div><div class=\"field\"><label>Catatan (opsional)</label><input name=\"note\" maxlength=\"200\" placeholder=\"Contoh: rekening resmi pembayaran Seiton.id\" value=\"'+esc(account.note||'')+'\"></div><div class=\"field\"><label>Status rekening</label><select name=\"enabled\"><option value=\"true\" '+(account.enabled!==false?'selected':'')+'>Aktif</option><option value=\"false\" '+(account.enabled===false?'selected':'')+'>Nonaktif</option></select></div><div class=\"form-actions\"><button type=\"button\" id=\"cancelBankAccount\" class=\"btn\">Batal</button><button class=\"btn btn-primary\" type=\"submit\">Simpan rekening</button></div></form>');\n  $('cancelBankAccount').onclick=closeModal;\n  $('bankAccountForm').onsubmit=async event=>{\n   event.preventDefault();const form=new FormData(event.target),payload=Object.fromEntries(form.entries());\n   payload.enabled=payload.enabled==='true';\n   try{paymentConfig=await api('/api/admin/payment-methods',{method:'POST',body:JSON.stringify({action:'save_bank',...payload})});closeModal();renderPaymentMethods();toast('Rekening bank berhasil disimpan.');}\n   catch(e){toast(e.message,true);}\n  };\n }\n async function exportReport(type){\n  try{const r=await fetch('/api/admin/export?type='+encodeURIComponent(type),{headers:{Authorization:'Bearer '+token},cache:'no-store'});if(r.status===401){logout(false);throw new Error('Sesi login berakhir.');}if(!r.ok){const j=await r.json();throw new Error(j.error||'Export gagal.');}const blob=await r.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='Seiton_'+type+'.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('File laporan berhasil disiapkan.');}\n  catch(e){toast(e.message,true);}\n }\n function openModal(title,body){\n  $('modal').innerHTML='<div class=\"modal-head\"><h3>'+title+'</h3><button class=\"modal-close\" id=\"modalClose\">×</button></div>'+body;\n  $('modalBackdrop').classList.remove('hidden');$('modalClose').onclick=closeModal;\n }\n function closeModal(){$('modalBackdrop').classList.add('hidden');$('modal').innerHTML='';}\n function productForm(p){\n  p=p||{};const active=p.active!==false;\n  openModal(p.sku?'Atur Produk':'Tambah Produk','<form id=\"productForm\"><input type=\"hidden\" name=\"original_sku\" value=\"'+esc(p.sku||'')+'\"><div class=\"form-grid\">'+\n   '<div class=\"field\"><label>SKU</label><input name=\"sku\" required maxlength=\"40\" value=\"'+esc(p.sku||'')+'\" '+(p.sku?'readonly':'')+'></div>'+\n   '<div class=\"field\"><label>Nama Produk</label><input name=\"name\" required maxlength=\"100\" value=\"'+esc(p.name||'')+'\"></div>'+\n   '<div class=\"field\"><label>Harga (Rupiah)</label><input name=\"price\" type=\"number\" min=\"0\" required value=\"'+esc(p.price??'')+'\"></div>'+\n   '<div class=\"field\"><label>Stok</label><input name=\"stock\" type=\"number\" min=\"0\" value=\"'+esc(p.stock??0)+'\" required></div>'+\n   '<div class=\"field\"><label>Status</label><select name=\"active\"><option value=\"true\" '+(active?'selected':'')+'>Aktif</option><option value=\"false\" '+(!active?'selected':'')+'>Nonaktif</option></select></div>'+\n   '<div class=\"field\"><label>URL Foto HTTPS</label><input name=\"photo_url\" type=\"url\" placeholder=\"https://…\" value=\"'+esc(p.photo_url||'')+'\"></div>'+\n   '<div class=\"field span-2\"><label>Deskripsi</label><textarea name=\"description\" rows=\"3\" maxlength=\"500\">'+esc(p.description||'')+'</textarea></div></div>'+\n   '<div class=\"form-actions\"><button type=\"button\" id=\"cancelProduct\" class=\"btn\">Batal</button><button class=\"btn btn-primary\" type=\"submit\">Simpan produk</button></div></form>');\n  $('cancelProduct').onclick=closeModal;\n  $('productForm').onsubmit=async e=>{e.preventDefault();const form=new FormData(e.target),obj=Object.fromEntries(form.entries());obj.price=Number(obj.price);obj.stock=Number(obj.stock);obj.active=obj.active==='true';try{await api('/api/admin/products',{method:'POST',body:JSON.stringify({action:'save',product:obj})});closeModal();toast('Produk berhasil disimpan.');await refresh();}catch(err){toast(err.message,true);}};\n }\n async function deleteProduct(sku){\n  if(!confirm('Hapus produk '+sku+' secara permanen? Riwayat pesanan tidak ikut terhapus.'))return;\n  try{await api('/api/admin/products',{method:'POST',body:JSON.stringify({action:'delete',sku:sku})});toast('Produk berhasil dihapus.');await refresh();}catch(e){toast(e.message,true);}\n }\n async function changeStatus(orderId){\n  const order=(data.orders||[]).find(o=>o.order_id===orderId);if(!order)return;\n  const options=['MENUNGGU_PEMBAYARAN','MENUNGGU_VERIFIKASI','DIBAYAR','DIPROSES','DIKIRIM','SELESAI','DIBATALKAN'];\n  openModal('Perbarui status pesanan','<div class=\"field\"><label>'+esc(order.order_id)+' · '+esc(order.customer_name)+'</label><select id=\"newStatus\">'+options.map(s=>'<option '+(s===order.status?'selected':'')+'>'+s+'</option>').join('')+'</select></div><div class=\"form-actions\"><button id=\"cancelStatus\" class=\"btn\">Batal</button><button id=\"saveStatus\" class=\"btn btn-primary\">Simpan status</button></div>');\n  $('cancelStatus').onclick=closeModal;$('saveStatus').onclick=async()=>{try{await api('/api/admin/order-status',{method:'POST',body:JSON.stringify({order_id:orderId,status:$('newStatus').value})});closeModal();toast('Status pesanan diperbarui.');await refresh();}catch(e){toast(e.message,true);}};\n }\n async function paymentAction(orderId,action){\n  const verb=action==='approve'?'menyetujui':'menolak';\n  if(!confirm('Yakin '+verb+' pembayaran pesanan '+orderId+'? Pastikan cocok dengan mutasi rekening/QRIS.'))return;\n  try{const r=await api('/api/admin/payment',{method:'POST',body:JSON.stringify({order_id:orderId,action:action})});toast(r.already_approved?'Pembayaran: Sudah disetujui sebelumnya; tidak ada persetujuan ulang.':action==='approve'?(r.receipt_sent===false?'Pembayaran disetujui; pengiriman resi gagal. Pelanggan dapat meminta resi ulang.':'Pembayaran disetujui dan resi dikirim ke pelanggan.'):'Permintaan pembayaran ditolak.');await refresh();}\n  catch(e){toast(e.message,true);}\n }\n async function showProof(orderId){\n  try{const r=await fetch('/api/admin/proof?order_id='+encodeURIComponent(orderId),{headers:{Authorization:'Bearer '+token},cache:'no-store'});if(r.status===401){logout(false);throw new Error('Sesi login berakhir.');}if(!r.ok)throw new Error('Gagal mengambil file bukti ('+r.status+').');const blob=await r.blob(),url=URL.createObjectURL(blob),type=blob.type||'';\n   if(type.startsWith('image/'))openModal('Bukti pembayaran · '+orderId,'<img class=\"proof-preview\" src=\"'+url+'\" alt=\"Bukti pembayaran\">');\n   else openModal('Bukti pembayaran · '+orderId,'<p>File bukti berhasil diambil.</p><a class=\"btn btn-primary\" href=\"'+url+'\" target=\"_blank\" rel=\"noopener\">Buka / unduh dokumen</a>');\n  }catch(e){toast(e.message,true);}\n }\n document.addEventListener('click',e=>{\n  const page=e.target.closest('[data-page]');if(page){setPage(page.dataset.page);return;}\n  const methodToggle=e.target.closest('[data-method-toggle]');if(methodToggle){togglePaymentMethod(methodToggle.dataset.methodToggle,methodToggle.dataset.enabled==='true');return;}\n  const bankEdit=e.target.closest('[data-bank-edit]');if(bankEdit){const account=(paymentConfig?.bank_accounts||[]).find(x=>x.account_id===bankEdit.dataset.bankEdit);if(account)bankAccountForm(account);return;}\n  const bankToggle=e.target.closest('[data-bank-toggle]');if(bankToggle){toggleBankAccount(bankToggle.dataset.bankToggle,bankToggle.dataset.enabled==='true');return;}\n  const go=e.target.closest('[data-go]');if(go){setPage(go.dataset.go);return;}\n  const ex=e.target.closest('[data-export]');if(ex){exportReport(ex.dataset.export);return;}\n  const edit=e.target.closest('[data-product-edit]');if(edit){const p=(data.products||[]).find(x=>x.sku===edit.dataset.productEdit);if(p)productForm(p);return;}\n  const del=e.target.closest('[data-product-delete]');if(del){deleteProduct(del.dataset.productDelete);return;}\n  const approve=e.target.closest('[data-pay-approve]');if(approve){paymentAction(approve.dataset.payApprove,'approve');return;}\n  const reject=e.target.closest('[data-pay-reject]');if(reject){paymentAction(reject.dataset.payReject,'reject');return;}\n  const proof=e.target.closest('[data-proof]');if(proof){showProof(proof.dataset.proof);return;}\n  const status=e.target.closest('[data-order-status]');if(status){changeStatus(status.dataset.orderStatus);return;}\n });\n $('loginForm').addEventListener('submit',login);$('logoutButton').addEventListener('click',()=>logout(true));\n $('openSite').addEventListener('click',()=>location.href='https://seiton.biz.id');\n $('addBankAccount').addEventListener('click',()=>bankAccountForm(null));\n $('refreshPaymentMethods').addEventListener('click',refreshPaymentMethods);\n $('menuToggle').addEventListener('click',()=>$('sidebar').classList.toggle('open'));\n $('refreshButton').addEventListener('click',refresh);$('refreshPayments').addEventListener('click',refresh);\n $('period').addEventListener('change',renderOverview);$('orderSearch').addEventListener('input',renderOrders);$('orderStatus').addEventListener('change',renderOrders);$('productSearch').addEventListener('input',renderProducts);$('productFilter').addEventListener('change',renderProducts);\n $('addProductButton').addEventListener('click',()=>productForm(null));\n $('modalBackdrop').addEventListener('click',e=>{if(e.target===$('modalBackdrop'))closeModal();});\n if(token){showApp();refresh();}else showLogin();\n setInterval(()=>{if(token)refresh();},30000);\n})();\n</script>\n</body></html>";
-const SHEETS_BASE = "https://sheets.googleapis.com/v4/spreadsheets";
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const TELEGRAM_API = "https://api.telegram.org";
-const SEITON_LOGO_URL = "https://seiton.biz.id/logo-horizontal.png";
-const TZ = "Asia/Jakarta";
-const HEADERS = [
-  "order_id", "created_at", "channel", "customer_id", "customer_name",
-  "product", "quantity", "unit_price", "subtotal", "shipping", "total",
-  "payment_method", "status"
-];
 
 
 async function readCatalogRows(env, range = "Katalog_Produk!A2:G") {
@@ -746,124 +766,6 @@ async function handleTelegram(request, env, ctx) {
 }
 
 
-function customerMenuText() {
-  return [
-    "🛍️ SEITON.ID",
-    "Selamat datang! Pilih menu untuk mulai berbelanja.",
-    "Katalog, pesanan, dan bantuan tersedia melalui tombol."
-  ].join("\n");
-}
-function adminMenuText() {
-  return "🛠️ SEITON.ID — PANEL ADMIN\nPilih area kerja. Menu dikelompokkan agar lebih ringkas.";
-}
-function customerMenuKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "🛍️ Katalog Produk", callback_data: "nav:catalog" },
-      { text: "📦 Pesanan Saya", callback_data: "nav:orders" }
-    ],
-    [
-      { text: "🧭 Cara Belanja", callback_data: "nav:guide" },
-      { text: "💬 Bantuan", callback_data: "nav:help" }
-    ]
-  ] };
-}
-function adminMenuKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "🧾 Pesanan", callback_data: "adm:orders" },
-      { text: "🛍️ Produk", callback_data: "adm:products" }
-    ],
-    [
-      { text: "📊 Laporan & Dashboard", callback_data: "adm:reports" },
-      { text: "💬 Bantuan Pelanggan", callback_data: "adm:support" }
-    ],
-    [
-      { text: "💳 Verifikasi Pembayaran", callback_data: "adm:paymentchecks" },
-      { text: "🎟️ Pengambilan", callback_data: "adm:pickup" }
-    ],
-    [{ text: "🛒 Tampilan Pelanggan", callback_data: "nav:home" }]
-  ] };
-}
-function adminOrdersKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "📋 Pesanan Terbaru", callback_data: "adm:recent" },
-      { text: "🔄 Ubah Status", callback_data: "adm:statuslist" }
-    ],
-    [
-      { text: "💳 Verifikasi Bayar", callback_data: "adm:paymentchecks" },
-      { text: "🎟️ Antrean Ambil", callback_data: "adm:pickup" }
-    ],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
-}
-function adminProductsKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "🗂️ Kelola Katalog", callback_data: "adm:catalog" },
-      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" }
-    ],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
-}
-function adminReportsKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "📊 Ringkasan Penjualan", callback_data: "adm:report" },
-      { text: "📈 Dashboard", callback_data: "adm:dashboard" }
-    ],
-    [{ text: "📥 Unduh Laporan", callback_data: "adm:exports" }],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
-}
-function adminSupportKeyboard() {
-  return { inline_keyboard: [
-    [{ text: "🆘 Antrean Bantuan Pelanggan", callback_data: "adm:handoff" }],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
-}
-function adminCatalogKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" },
-      { text: "⬅️ Menu Admin", callback_data: "adm:products" }
-    ]
-  ] };
-}
-const CUSTOMER_CATALOG_PAGE_SIZE = 5;
-const CUSTOMER_CATEGORY_META = {
-  digital: { title: "AI & Akun Digital", button: "🤖 AI & Digital" },
-  email: { title: "Email & OTP", button: "✉️ Email & OTP" },
-  website: { title: "Website & UMKM", button: "🌐 Website & UMKM" },
-  automation: { title: "Bot & Otomasi", button: "⚙️ Bot & Otomasi" },
-  other: { title: "Produk Lainnya", button: "📦 Produk Lainnya" }
-};
-const CUSTOMER_CATEGORY_ORDER = ["digital", "email", "website", "automation", "other"];
-function customerCategoryForProduct(row) {
-  const sku = String(row?.[0] || "").trim().toUpperCase();
-  const text = [row?.[1], row?.[6]].map(value => String(value || "").toLowerCase()).join(" ");
-  if (/^MUSE-|\bmuse\b|\bai\b|gemini|chatgpt|claude|grok|capcut|eleven.?labs/.test(sku + " " + text)) return "digital";
-  if (/^OTP-|\botp\b|email|e-mail|mailbox|domain/.test(sku + " " + text)) return "email";
-  if (/^SEI-|website|katalog|umkm/.test(sku + " " + text)) return "website";
-  if (/^S-|bot|automation|automated|otomasi|integrasi/.test(sku + " " + text)) return "automation";
-  return "other";
-}
-function customerCategoryTitle(key) {
-  return CUSTOMER_CATEGORY_META[key]?.title || "Semua Produk";
-}
-function customerCatalogProducts(rows) {
-  return (rows || []).filter(row => {
-    if (!row?.[0]) return false;
-    const product = parseCatalogProduct(row);
-    return product.priceValid && product.stockValid;
-  });
-}
-function customerProductCanBeOrdered(row) {
-  const product = parseCatalogProduct(row);
-  return product.active && product.priceValid && product.stockValid &&
-    (product.stock === null || product.stock > 0);
-}
 
 async function ensureCatalogHeaders(env) {
   const headers = await readSheet(env, "Katalog_Produk!A1:G1");
@@ -1184,137 +1086,6 @@ async function deleteCatalogProduct(env, sku) {
   });
   if (!response.ok) throw new Error("Gagal menghapus produk (" + response.status + "): " + (await response.text()).slice(0,400));
   return { sku: normalizedSku, row: index + 2 };
-}
-async function sendTelegramPhoto(env, chatId, photo, caption, replyMarkup = null) {
-  const payload = { chat_id: chatId, photo, caption: String(caption).slice(0,1024), disable_notification: true };
-  if (replyMarkup) payload.reply_markup = replyMarkup;
-  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendPhoto", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw new Error("Telegram sendPhoto gagal (" + response.status + "): " + (await response.text()).slice(0,300));
-}
-
-async function sendSeitonWelcome(env, chatId, isAdminUser = false) {
-  const text = isAdminUser ? adminMenuText() : customerMenuText();
-  const keyboard = isAdminUser ? adminMenuKeyboard() : customerMenuKeyboard();
-  try {
-    await sendTelegramPhoto(env, chatId, SEITON_LOGO_URL, text, keyboard);
-  } catch (error) {
-    console.warn(JSON.stringify({level:"warn",event:"telegram_brand_image_fallback",message:String(error?.message||"IMAGE_SEND_FAILED").slice(0,100)}));
-    await sendTelegram(env, chatId, text, keyboard);
-  }
-}
-
-async function sendTelegramPhotoBlob(env, chatId, blob, caption, replyMarkup = null) {
-  if (!env.TELEGRAM_TOKEN) throw new Error("TELEGRAM_TOKEN belum diatur");
-  const form = new FormData();
-  form.append("chat_id", String(chatId));
-  form.append("photo", blob, "seiton-qris.png");
-  form.append("caption", String(caption || "").slice(0,1024));
-  if (replyMarkup) form.append("reply_markup", JSON.stringify(replyMarkup));
-  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendPhoto", {
-    method: "POST",
-    body: form
-  });
-  let result = {};
-  try { result = await response.json(); } catch {}
-  if (!response.ok || result.ok === false) {
-    throw new Error("Telegram QRIS image gagal dikirim (" + response.status + ")");
-  }
-  return result;
-}
-
-async function telegramApiRequest(env, method, payload) {
-  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/" + method, {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
-  });
-  let result = {};
-  try { result = await response.json(); } catch {}
-  if (!response.ok || result.ok === false) {
-    const description = String(result.description || "Telegram API error");
-    if (description.toLowerCase().includes("message is not modified")) return result;
-    throw new Error(method + " gagal (" + response.status + "): " + description.slice(0, 300));
-  }
-  return result;
-}
-
-async function deleteTelegramMessage(env, message) {
-  if (!message?.chat?.id || !message?.message_id) return false;
-  try {
-    await telegramApiRequest(env, "deleteMessage", {
-      chat_id: message.chat.id, message_id: message.message_id
-    });
-    return true;
-  } catch (error) {
-    console.warn(JSON.stringify({ level: "warn", event: "telegram_delete_before_replace", message: error.message }));
-    return false;
-  }
-}
-
-// Keeps a single interactive screen in the chat. Text/photo type changes replace
-// the old message because Telegram cannot convert a text message into a photo message.
-async function updateTelegramMessage(env, message, options) {
-  const text = String(options.text || "");
-  const photo = options.photo || null;
-  const replyMarkup = options.replyMarkup ?? null;
-  if (!message?.chat?.id || !message?.message_id) {
-    if (photo) return sendTelegramPhoto(env, message?.chat?.id, photo, text, replyMarkup);
-    return sendTelegram(env, message?.chat?.id, text, replyMarkup);
-  }
-  const chatId = message.chat.id;
-  const messageId = message.message_id;
-  const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
-  const markup = replyMarkup || { inline_keyboard: [] };
-
-  // Photo -> photo: replace the media and keep the same Telegram message.
-  if (hasPhoto && photo) {
-    return telegramApiRequest(env, "editMessageMedia", {
-      chat_id: chatId,
-      message_id: messageId,
-      media: { type: "photo", media: photo, caption: text.slice(0, 1024) },
-      reply_markup: markup
-    });
-  }
-
-  // Photo -> text screen: edit the caption in-place whenever possible.
-  // This missing case caused each checkout step to create another message.
-  if (hasPhoto && !photo && !options.clearMedia && text.length <= 1024) {
-    return telegramApiRequest(env, "editMessageCaption", {
-      chat_id: chatId,
-      message_id: messageId,
-      caption: text,
-      reply_markup: markup
-    });
-  }
-
-  // Text -> text: edit the existing message instead of sending another one.
-  if (!hasPhoto && !photo) {
-    if (text.length <= 4096) {
-      return telegramApiRequest(env, "editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
-        text,
-        disable_web_page_preview: true,
-        reply_markup: markup
-      });
-    }
-    await deleteTelegramMessage(env, message);
-    return sendTelegram(env, chatId, text.slice(0, 4096), replyMarkup);
-  }
-
-  // Telegram cannot convert a text message into a photo or remove photo media.
-  // Delete the old UI message before sending the replacement.
-  await deleteTelegramMessage(env, message);
-  if (photo) return sendTelegramPhoto(env, chatId, photo, text, replyMarkup);
-  return sendTelegram(env, chatId, text.slice(0, 4096), replyMarkup);
-}
-
-async function answerTelegramCallback(env, callbackId, message = "") {
-  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/answerCallbackQuery", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ callback_query_id: callbackId, text: message, show_alert: false })
-  });
-  if (!response.ok) throw new Error("Telegram answerCallbackQuery gagal (" + response.status + ")");
 }
 async function handleTelegramCallback(env, query) {
   const message = query.message || null;
@@ -2125,49 +1896,6 @@ async function showAdminCatalogPage(env, message, page = 0) {
   });
 }
 
-const PAID_ORDER_STATUSES = ["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI", "PAID", "COMPLETED"];
-const CANCELLED_ORDER_STATUSES = ["DIBATALKAN", "CANCELLED", "CANCELED"];
-function orderRowsToObjects(rows) {
-  return rows.filter(r => r[0]).map(r => ({
-    order_id: String(r[0] || ""),
-    created_at: String(r[1] || ""),
-    channel: String(r[2] || ""),
-    customer_id: String(r[3] || ""),
-    customer_name: String(r[4] || ""),
-    product: String(r[5] || ""),
-    quantity: Number(r[6] || 0),
-    unit_price: Number(r[7] || 0),
-    subtotal: Number(r[8] || 0),
-    shipping: Number(r[9] || 0),
-    total: Number(r[10] || 0),
-    payment_method: String(r[11] || ""),
-    status: String(r[12] || "").trim().toUpperCase(),
-    payment_confirmation_status: String(r[13] || "").trim().toUpperCase(),
-    payment_proof_file_id: String(r[14] || ""),
-    payment_proof_type: String(r[15] || ""),
-    payment_requested_at: String(r[16] || ""),
-    payment_confirmed_at: String(r[17] || ""),
-    receipt_code: String(r[18] || ""),
-    pickup_status: String(r[19] || "")
-  }));
-}
-function productRowsToObjects(rows) {
-  return rows.filter(r => r[0]).map(r => {
-    const p = parseCatalogProduct(r);
-    return {
-      sku: p.sku, name: p.name, price: p.price, price_valid: p.priceValid,
-      stock: p.stock, stock_valid: p.stockValid,
-      active: p.active && p.priceValid && p.stockValid,
-      photo_url: p.photoUrl, description: p.description
-    };
-  });
-}
-
-function localDateKey(value) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Tidak diketahui";
-  return new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
-}
 async function loadAdminDashboardData(env) {
   const state = await transactionReadiness(env);
   if (state.ready) {
@@ -2864,61 +2592,6 @@ async function handleAdminDashboardData(request, env) {
     return json({ ok: false, error: "Gagal membaca data Google Sheets: " + error.message }, 502);
   }
 }
-function csvCell(value) {
-  let text = value == null ? "" : String(value);
-  if (/^[\s\u0000-\u001f]*[=+\-@]/.test(text) && !/^-?\d+(\.\d+)?$/.test(text)) text = "'" + text;
-  return '"' + text.replace(/"/g, '""') + '"';
-}
-function csvText(rows) {
-  return "\uFEFF" + rows.map(row => row.map(csvCell).join(",")).join("\r\n");
-}
-function buildReportExportsFromData(data) {
-  const orders = data.orders;
-  const products = data.products;
-  const dateStamp = localDateKey(new Date().toISOString()).replace(/-/g, "");
-  const orderCsv = csvText([
-    ["ID Pesanan", "Waktu", "Channel", "Customer ID", "Nama Pelanggan", "Produk", "Jumlah", "Harga Satuan", "Subtotal", "Ongkir", "Total", "Metode Pembayaran", "Status"],
-    ...orders.map(o => [o.order_id, o.created_at, o.channel, o.customer_id, o.customer_name, o.product, o.quantity, o.unit_price, o.subtotal, o.shipping, o.total, o.payment_method, o.status])
-  ]);
-  const financeCsv = csvText([
-    ["ID Pesanan", "Tanggal", "Nama Pelanggan", "Produk", "Jumlah", "Subtotal", "Ongkir", "Total Tagihan", "Penerimaan Terkonfirmasi", "Belum Tertagih", "Metode Pembayaran", "Status"],
-    ...orders.map(o => {
-      const paid = PAID_ORDER_STATUSES.includes(o.status);
-      const cancelled = CANCELLED_ORDER_STATUSES.includes(o.status);
-      return [o.order_id, localDateKey(o.created_at), o.customer_name, o.product, o.quantity, o.subtotal, o.shipping, o.total, paid ? o.total : 0, !paid && !cancelled ? o.total : 0, o.payment_method, o.status];
-    })
-  ]);
-  const daily = new Map();
-  for (const o of orders) {
-    const day = localDateKey(o.created_at);
-    const d = daily.get(day) || { orders: 0, paid: 0, pending: 0, cancelled: 0, gross: 0, received: 0, outstanding: 0 };
-    d.orders++;
-    if (PAID_ORDER_STATUSES.includes(o.status)) { d.paid++; d.received += o.total; d.gross += o.total; }
-    else if (CANCELLED_ORDER_STATUSES.includes(o.status)) d.cancelled++;
-    else { d.pending++; d.outstanding += o.total; d.gross += o.total; }
-    daily.set(day, d);
-  }
-  const dailyCsv = csvText([
-    ["Tanggal", "Jumlah Pesanan", "Pesanan Terbayar", "Menunggu Pembayaran", "Dibatalkan", "Nilai Pesanan Non-Batal", "Penerimaan Terkonfirmasi", "Belum Tertagih"],
-    ...[...daily.entries()].sort((a,b) => a[0].localeCompare(b[0])).map(([day,d]) => [day,d.orders,d.paid,d.pending,d.cancelled,d.gross,d.received,d.outstanding])
-  ]);
-  const inventoryCsv = csvText([
-    ["SKU", "Nama Produk", "Harga Jual", "Stok", "Nilai Stok pada Harga Jual", "Aktif", "Foto URL", "Deskripsi"],
-    ...products.map(p => [p.sku,p.name,p.price,p.stock == null ? "Tidak dibatasi" : p.stock,p.stock == null ? "" : p.price * p.stock,p.active ? "TRUE" : "FALSE",p.photo_url,p.description])
-  ]);
-  return {
-    orders: { csv: orderCsv, filename: "Seiton_Pesanan_" + dateStamp + ".csv", caption: "📋 Rincian seluruh pesanan" },
-    finance: { csv: financeCsv, filename: "Seiton_Keuangan_" + dateStamp + ".csv", caption: "💰 Buku transaksi dan penerimaan terkonfirmasi" },
-    daily: { csv: dailyCsv, filename: "Seiton_Ringkasan_Harian_" + dateStamp + ".csv", caption: "📅 Ringkasan order dan penerimaan per hari" },
-    inventory: { csv: inventoryCsv, filename: "Seiton_Stok_Produk_" + dateStamp + ".csv", caption: "📦 Katalog dan estimasi nilai stok berdasarkan harga jual" }
-  };
-}
-function isValidReportDate(value) {
-  if (!value) return true;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const parsed = new Date(value + "T00:00:00.000Z");
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0,10) === value;
-}
 async function buildReportExports(env, range = {}) {
   const data = await loadAdminDashboardData(env);
   const from = String(range.from || "");
@@ -2956,58 +2629,6 @@ async function handleAdminDashboardExport(request, env) {
     console.error(JSON.stringify({level:"error",event:"admin_report_export_failed",type,from,to,error:String(error && error.message || error)}));
     return json({ ok: false, error: "Gagal membuat laporan. Periksa kesiapan data dan coba kembali." }, 502);
   }
-}
-async function sendTelegramDocument(env, chatId, csv, filename, caption = "") {
-  const form = new FormData();
-  form.set("chat_id", String(chatId));
-  if (caption) form.set("caption", caption);
-  form.set("document", new Blob([csv], { type: "text/csv;charset=utf-8" }), filename);
-  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendDocument", { method: "POST", body: form });
-  if (!response.ok) throw new Error("Telegram sendDocument gagal (" + response.status + "): " + (await response.text()).slice(0,300));
-}
-
-
-const PAYMENT_WORKFLOW_HEADERS = [
-  "payment_confirmation_status", "payment_proof_file_id", "payment_proof_type",
-  "payment_requested_at", "payment_confirmed_at", "receipt_code", "pickup_status"
-];
-async function ensurePaymentWorkflowHeaders(env) {
-  const current = await readSheet(env, "Pesanan!N1:T1");
-  const values = current[0] || [];
-  if (PAYMENT_WORKFLOW_HEADERS.every((name,i) => String(values[i] || "") === name)) return;
-  if (values.some(v => String(v || "").trim())) {
-    throw new Error("Kolom N:T pada tab Pesanan sudah terisi dengan struktur berbeda. Perlu pemeriksaan sebelum mengubah header.");
-  }
-  const token = await getGoogleAccessToken(env);
-  const range = encodeURIComponent("Pesanan!N1:T1");
-  const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + range + "?valueInputOption=RAW", {
-    method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ values: [PAYMENT_WORKFLOW_HEADERS] })
-  });
-  if (!response.ok) throw new Error("Gagal menyiapkan kolom verifikasi pembayaran: " + (await response.text()).slice(0,300));
-}
-async function updateSheetRange(env, range, values) {
-  const token = await getGoogleAccessToken(env);
-  const encoded = encodeURIComponent(range);
-  const response = await fetch(SHEETS_BASE + "/" + env.GOOGLE_SHEETS_ID + "/values/" + encoded + "?valueInputOption=RAW", {
-    method: "PUT", headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-    body: JSON.stringify({ values })
-  });
-  if (!response.ok) throw new Error("Google Sheets update gagal (" + response.status + "): " + (await response.text()).slice(0,350));
-  return response.json();
-}
-async function findOrderById(env, orderId) {
-  const state = await transactionReadiness(env);
-  if (state.ready) {
-    const order = await findOrderTransactional(env,String(orderId || "").trim());
-    return order ? {
-      rowNumber: order.legacy_sheet_row == null ? null : Number(order.legacy_sheet_row),
-      row: orderToSheetRow(order), order
-    } : null;
-  }
-  const rows = await readSheet(env, "Pesanan!A2:T");
-  const index = rows.findIndex(r => String(r[0] || "").trim() === String(orderId || "").trim());
-  return index < 0 ? null : { rowNumber: index + 2, row: rows[index], order: null };
 }
 function orderConfirmationKeyboard(order) {
   const buttons = [];
@@ -3815,105 +3436,6 @@ async function rejectPaymentRequest(env, reference, actor = "telegram-admin") {
   await recordAdminActivity(env, { actorChannel: actorChannel(actor), actorId: actorIdentifier(actor), action: "PAYMENT_REJECTED", resourceType: "order", resourceId: String(r[0]), summary: { payment_confirmation_status: "DITOLAK" } });
   return r;
 }
-async function createPickupTicketToken(env, orderId, receiptCode) {
-  const now = Math.floor(Date.now() / 1000);
-  const payload = base64url(JSON.stringify({
-    order: orderId, code: receiptCode, v: 2,
-    iat: now, exp: now + 30 * 24 * 60 * 60
-  }));
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode("SEITON_PICKUP_TICKET_V2." + payload));
-  return payload + "." + base64urlBytes(new Uint8Array(sig));
-}
-
-async function verifyPickupTicketToken(env, token) {
-  if (!env.TELEGRAM_WEBHOOK_SECRET) return null;
-  const parts = String(token || "").split(".");
-  if (parts.length !== 2) return null;
-  try {
-    const encoded = parts[0].replace(/-/g, "+").replace(/_/g, "/");
-    const decoded = atob(encoded + "=".repeat((4 - encoded.length % 4) % 4));
-    const payload = JSON.parse(decoded);
-    if (!payload || !payload.order || !payload.code || ![1, 2].includes(payload.v)) return null;
-    if (payload.v === 2 && (!Number.isFinite(Number(payload.exp)) || Number(payload.exp) <= Math.floor(Date.now() / 1000))) return null;
-    const prefix = payload.v === 2 ? "SEITON_PICKUP_TICKET_V2." : "SEITON_PICKUP_TICKET_V1.";
-    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.TELEGRAM_WEBHOOK_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(prefix + parts[0]));
-    if (!constantTimeEqual(base64urlBytes(new Uint8Array(sig)), parts[1])) return null;
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
-async function createPickupTicketUrl(env, orderId, receiptCode) {
-  const token = await createPickupTicketToken(env, orderId, receiptCode);
-  return "https://automate-bot.seiton.biz.id/pickup?ticket=" + encodeURIComponent(token);
-}
-function escapeHtml(value) {
-  return String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[ch]));
-}
-async function handlePickupVerificationPage(request, env) {
-  const ticket = await verifyPickupTicketToken(env, new URL(request.url).searchParams.get("ticket"));
-  let state = "INVALID", details = null;
-  if (ticket) {
-    const found = await findOrderById(env, ticket.order);
-    if (found && String(found.row[18] || "") === ticket.code && String(found.row[13] || "") === "DISETUJUI" && PAID_ORDER_STATUSES.includes(String(found.row[12] || "").toUpperCase())) {
-      details = found.row;
-      state = String(found.row[19] || "") === "DIAMBIL" ? "USED" : "VALID";
-    }
-  }
-  const isValid = state === "VALID";
-  const title = state === "VALID" ? "PEMBAYARAN TERVERIFIKASI" : state === "USED" ? "PESANAN SUDAH DIAMBIL" : "TIKET TIDAK VALID";
-  const color = state === "VALID" ? "#087f5b" : state === "USED" ? "#9a6700" : "#b42318";
-  const body = details ? [
-    "<div class='row'><span>ID Pesanan</span><b>" + escapeHtml(details[0]) + "</b></div>",
-    "<div class='row'><span>Produk</span><b>" + escapeHtml(details[5]) + "</b></div>",
-    "<div class='row'><span>Jumlah</span><b>" + escapeHtml(details[6]) + "</b></div>",
-    "<div class='row'><span>Total</span><b>" + escapeHtml(rupiah(details[10])) + "</b></div>",
-    "<div class='row'><span>Kode Resi</span><b>" + escapeHtml(details[18]) + "</b></div>",
-    "<div class='row'><span>Status Pengambilan</span><b>" + (state === "USED" ? "SUDAH DIAMBIL" : "BELUM DIAMBIL") + "</b></div>"
-  ].join("") : "<p>Kode tiket tidak ditemukan atau pembayaran belum disetujui.</p>";
-  const html = "<!doctype html><html lang='id'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Resi Seiton.id</title><style>body{margin:0;background:#f2f5f8;font:16px system-ui;color:#1b2735;display:grid;min-height:100vh;place-items:center}.ticket{background:white;border:1px solid #dce3ea;border-radius:18px;padding:28px;max-width:460px;width:calc(100% - 40px);box-shadow:0 12px 40px #10203018}.brand{font-size:13px;color:#64748b;font-weight:700;letter-spacing:.1em}.state{font-weight:800;color:" + color + ";font-size:21px;margin:18px 0}.row{display:flex;justify-content:space-between;gap:18px;border-top:1px dashed #d9e0e8;padding:12px 0}.row span{color:#64748b}.row b{text-align:right;max-width:60%;overflow-wrap:anywhere}.note{font-size:12px;color:#64748b;margin-top:16px}</style><main class='ticket'><div class='brand'>SEITON.ID · TIKET PENGAMBILAN</div><div class='state'>" + title + "</div>" + body + "<p class='note'>Tunjukkan halaman ini kepada petugas saat mengambil pesanan. Tiket tidak membuktikan pembayaran bank di luar status verifikasi Seiton.id.</p></main></html>";
-  return new Response(html, { status: 200, headers: { "Content-Type":"text/html; charset=utf-8", "Cache-Control":"no-store", "X-Content-Type-Options":"nosniff", "Referrer-Policy":"no-referrer" } });
-}
-function pickupQrImageUrl(ticketUrl) {
-  return "https://quickchart.io/qr?size=420&margin=2&ecLevel=H&text=" + encodeURIComponent(ticketUrl);
-}
-function pickupReceiptCaption(row, receiptCode) {
-  return [
-    "✅ BUKTI PEMBAYARAN TERVERIFIKASI · SEITON.ID",
-    "ID Pesanan: " + row[0],
-    "Pelanggan: " + (row[4] || "-"),
-    "Produk: " + (row[5] || "-"),
-    "Jumlah: " + (row[6] || 0),
-    "Total: " + rupiah(row[10]),
-    "Metode: " + (row[11] || "-"),
-    "Kode Resi: " + receiptCode,
-    "",
-    "Tunjukkan QR ini kepada petugas saat pengambilan."
-  ].join("\n");
-}
-async function sendPickupReceipt(env, customerId, row, orderId, receiptCode) {
-  const ticketUrl = await createPickupTicketUrl(env, orderId, receiptCode);
-  const caption = pickupReceiptCaption(row, receiptCode);
-  try {
-    await sendTelegramPhoto(env, customerId, pickupQrImageUrl(ticketUrl), caption, {
-      inline_keyboard: [[{ text: "🔎 Periksa Status Resi", url: ticketUrl }]]
-    });
-  } catch (error) {
-    console.error(JSON.stringify({ level: "error", event: "pickup_qr_send", message: error.message }));
-    await sendTelegram(env, customerId, caption + "\n\nLink verifikasi: " + ticketUrl);
-  }
-}
-async function sendTelegramDocumentById(env, chatId, fileId, caption = "") {
-  const payload = { chat_id: chatId, document: fileId };
-  if (caption) payload.caption = String(caption).slice(0, 1024);
-  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendDocument", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw new Error("Telegram sendDocument bukti gagal (" + response.status + "): " + (await response.text()).slice(0,300));
-}
 async function showPickupQueuePage(env, message, page = 0) {
   const state = await transactionReadiness(env);
   if (!state.ready) await ensurePaymentWorkflowHeaders(env);
@@ -4087,22 +3609,6 @@ async function createOrder(env, input) {
   return order;
 }
 
-function parseCatalogProduct(row) {
-  const sku = String(row[0] || "").trim();
-  const rawPrice = row[2], price = Number(rawPrice);
-  const priceValid = rawPrice != null && String(rawPrice).trim() !== "" && Number.isSafeInteger(price) && price >= 0;
-  const rawStock = row[3];
-  const stockBlank = rawStock == null || String(rawStock).trim() === "";
-  const parsedStock = stockBlank ? null : Number(rawStock);
-  const stockValid = stockBlank || (Number.isSafeInteger(parsedStock) && parsedStock >= 0);
-  const activeText = String(row[4] ?? "TRUE").trim().toUpperCase();
-  const active = activeText === "" || ["TRUE","1","YA","YES","AKTIF"].includes(activeText);
-  return {
-    sku, name: String(row[1] || sku).trim(), price: priceValid ? price : 0, priceValid,
-    stock: stockValid ? parsedStock : null, stockValid, active,
-    photoUrl: String(row[5] || "").trim(), description: String(row[6] || "").trim()
-  };
-}
 
 async function findProduct(env, sku) {
   const normalized = String(sku || "").trim().toUpperCase();
@@ -4124,207 +3630,6 @@ async function findProduct(env, sku) {
   if (!product.stockValid) throw new Error("Stok produk pada katalog tidak valid.");
   return product;
 }
-
-async function appendSheetRows(env, range, values) {
-  const token = await getGoogleAccessToken(env);
-  const encoded = encodeURIComponent(range);
-  const response = await fetch(`${SHEETS_BASE}/${env.GOOGLE_SHEETS_ID}/values/${encoded}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ values })
-  });
-  if (!response.ok) throw new Error(`Google Sheets append gagal (${response.status}): ${(await response.text()).slice(0,500)}`);
-  return response.json();
-}
-
-async function appendOrder(env, order) {
-  const row = [
-    order.orderId, order.createdAt, order.channel, order.customerId, order.customerName,
-    `${order.sku} - ${order.product}`, order.quantity, order.unitPrice, order.subtotal,
-    order.shipping, order.total, order.paymentMethod, order.status
-  ];
-  await appendSheetRows(env, "Pesanan!A:M", [row]);
-}
-
-async function readSheet(env, range) {
-  const token = await getGoogleAccessToken(env);
-  const encoded = encodeURIComponent(range);
-  const response = await fetch(`${SHEETS_BASE}/${env.GOOGLE_SHEETS_ID}/values/${encoded}`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
-  if (!response.ok) {
-    const detail = (await response.text()).slice(0,500);
-    throw new Error(`Google Sheets read gagal (${response.status}): ${detail}`);
-  }
-  const data = await response.json();
-  return data.values || [];
-}
-
-async function getGoogleAccessToken(env) {
-  const cacheKey = "google-sheets-access-token";
-  if (env.TOKEN_KV) {
-    const cached = await env.TOKEN_KV.get(cacheKey, "json");
-    if (cached && cached.expiresAt > Date.now() + 60000) return cached.token;
-  }
-  let serviceAccount;
-  try {
-    serviceAccount = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_KEY);
-  } catch {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_KEY harus berupa JSON service account yang valid");
-  }
-  if (!serviceAccount.client_email || !serviceAccount.private_key) {
-    throw new Error("Service account membutuhkan client_email dan private_key");
-  }
-  const now = Math.floor(Date.now() / 1000);
-  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claim = base64url(JSON.stringify({
-    iss: serviceAccount.client_email,
-    scope: "https://www.googleapis.com/auth/spreadsheets",
-    aud: GOOGLE_TOKEN_URL,
-    iat: now,
-    exp: now + 3600
-  }));
-  const unsigned = `${header}.${claim}`;
-  const key = await importPrivateKey(serviceAccount.private_key);
-  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, new TextEncoder().encode(unsigned));
-  const assertion = `${unsigned}.${base64urlBytes(new Uint8Array(signature))}`;
-  const response = await fetch(GOOGLE_TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion
-    })
-  });
-  if (!response.ok) throw new Error(`Google OAuth gagal (${response.status})`);
-  const result = await response.json();
-  if (env.TOKEN_KV && result.access_token) {
-    await env.TOKEN_KV.put(cacheKey, JSON.stringify({
-      token: result.access_token,
-      expiresAt: Date.now() + Number(result.expires_in || 3600) * 1000
-    }), { expirationTtl: Math.max(60, Number(result.expires_in || 3600) - 60) });
-  }
-  return result.access_token;
-}
-
-async function importPrivateKey(pem) {
-  const normalized = pem.replace(/\\n/g, "\n");
-  const body = normalized.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s/g, "");
-  const binary = atob(body);
-  const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
-  return crypto.subtle.importKey("pkcs8", bytes, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"]);
-}
-
-function base64url(value) {
-  return base64urlBytes(new TextEncoder().encode(value));
-}
-function base64urlBytes(bytes) {
-  let binary = "";
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
-}
-
-async function buildAdminReport(env) {
-  const rows = await readSheet(env, "Pesanan!A2:M");
-  const today = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-  const orders = rows.map(row => ({
-    orderId: String(row[0] || ""),
-    createdAt: String(row[1] || ""),
-    product: String(row[5] || "Tidak diketahui"),
-    quantity: Number(row[6] || 0),
-    total: Number(row[10] || 0),
-    payment: String(row[11] || "Lainnya"),
-    status: String(row[12] || "")
-  })).filter(row => row.orderId);
-  const paid = orders.filter(o => PAID_ORDER_STATUSES.includes(o.status.toUpperCase()));
-  const todays = paid.filter(o => {
-    const date = new Date(o.createdAt);
-    return !Number.isNaN(date.getTime()) &&
-      new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(date) === today;
-  });
-  const revenue = paid.reduce((sum, o) => sum + o.total, 0);
-  const todayRevenue = todays.reduce((sum, o) => sum + o.total, 0);
-  const topProducts = new Map();
-  for (const order of paid) {
-    const name = order.product.split(" - ").slice(1).join(" - ") || order.product;
-    topProducts.set(name, (topProducts.get(name) || 0) + order.quantity);
-  }
-  const best = [...topProducts.entries()].sort((a,b) => b[1] - a[1])[0];
-  const target = Math.max(0, Number(env.TARGET_OMSET_HARIAN || 0));
-  const pct = target > 0 ? Math.min(100, Math.floor(todayRevenue / target * 100)) : 0;
-  const filled = Math.round(pct / 10);
-  const bar = "▓".repeat(filled) + "░".repeat(10 - filled);
-  const paymentTotals = {};
-  for (const o of paid) paymentTotals[o.payment] = (paymentTotals[o.payment] || 0) + o.total;
-  return [
-    "📊 *REKAP PENJUALAN SEITON.ID*",
-    `🗓️ ${new Intl.DateTimeFormat("id-ID", { dateStyle: "full", timeZone: TZ }).format(new Date())}`,
-    "",
-    `💰 *Total Omset:* ${rupiah(revenue)}`,
-    `📦 *Total Order Dibayar:* ${paid.length.toLocaleString("id-ID")}`,
-    `🧾 *Omset Hari Ini:* ${rupiah(todayRevenue)}`,
-    `🛍️ *Order Hari Ini:* ${todays.length.toLocaleString("id-ID")}`,
-    `🏆 *Produk Terlaris:* ${best ? `${best[0]} (${best[1]} pcs)` : "Belum ada data"}`,
-    "",
-    "💳 *Distribusi Pembayaran*",
-    ...Object.entries(paymentTotals).map(([key, value]) => `• ${key}: ${rupiah(value)}`),
-    ...(Object.keys(paymentTotals).length ? [] : ["• Belum ada transaksi dibayar"]),
-    "",
-    `🎯 *Target Harian:* ${target ? rupiah(target) : "Belum diatur"}`,
-    `📈 [${bar}] ${pct}% Target`,
-    "",
-    "ℹ️ Omset menghitung transaksi berstatus DIBAYAR/SELESAI/PAID/COMPLETED.",
-    "_Powered by Seiton.id_"
-  ].join("\n");
-}
-
-function orderConfirmation(order, env) {
-  const paymentInfo = order.paymentMethod === "QRIS"
-    ? "\n\n📲 QRIS dinamis akan dikirim dalam layar pembayaran terpisah."
-    : order.paymentMethod === "TRANSFER"
-      ? "\n\n🏦 Instruksi transfer akan diberikan admin."
-      : "\n\n🚚 Pembayaran COD dipilih.";
-  return [
-    "✅ *PESANAN DICATAT - SEITON.ID*",
-    "🧾 ID: " + order.orderId,
-    "📦 " + order.product + " (" + order.sku + ")",
-    "🔢 Jumlah: " + order.quantity,
-    "💵 Harga: " + rupiah(order.unitPrice),
-    "🚚 Ongkir: " + rupiah(order.shipping),
-    "💰 *Total: " + rupiah(order.total) + "*",
-    "💳 Metode: " + order.paymentMethod,
-    "⏳ Status: " + order.status,
-    paymentInfo,
-    "",
-    "_Powered by Seiton.id_"
-  ].join("\n");
-}
-
-function helpText() {
-  return [
-    "🛍️ *BOT PEMESANAN SEITON.ID*",
-    "",
-    "Buat pesanan dengan format:",
-    "`beli SKU jumlah metode_pembayaran`",
-    "",
-    "Contoh: `beli SEI-001 2 QRIS`",
-    "Metode: QRIS, TRANSFER, COD",
-    "",
-    "Admin: gunakan `/laporan` untuk rekap penjualan.",
-    "_Powered by Seiton.id_"
-  ].join("\n");
-}
-
-async function sendTelegram(env, chatId, text, replyMarkup = null) {
-  if (!env.TELEGRAM_TOKEN) throw new Error("TELEGRAM_TOKEN belum diatur");
-  const payload = { chat_id: chatId, text, disable_web_page_preview: true };
-  if (replyMarkup) payload.reply_markup = replyMarkup;
-  const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendMessage", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw new Error("Telegram sendMessage gagal (" + response.status + "): " + (await response.text()).slice(0,300));
-}
-
 
 
 async function recordAdminActivity(env, entry) {
@@ -4363,11 +3668,6 @@ function actorIdentifier(actor) {
 function isAdmin(id, env) {
   const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
   return admins.includes(String(id));
-}
-function rupiah(value) {
-  return new Intl.NumberFormat("id-ID", {
-    style: "currency", currency: "IDR", maximumFractionDigits: 0
-  }).format(Number(value) || 0);
 }
 
 async function messagingCoreReady(env) {
@@ -4655,19 +3955,4 @@ async function dispatchTelegramMessagingOutbox(env, limit = 20) {
     }
   }
   return { claimed: jobs.length, sent, failed };
-}
-
-function json(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
-  });
-}
-function constantTimeEqual(a, b) {
-  const x = new TextEncoder().encode(String(a));
-  const y = new TextEncoder().encode(String(b));
-  if (x.length !== y.length) return false;
-  let diff = 0;
-  for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
-  return diff === 0;
 }

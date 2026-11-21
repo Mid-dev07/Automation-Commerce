@@ -6,7 +6,8 @@ const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const ownerWorker = ["auth.mjs", "pricing.mjs", "otp-proxy.mjs", "owner-page.mjs", "order-proxy.mjs", "worker.js"].map((file) => fs.readFileSync(path.join(root, "site-admin", file), "utf8")).join("\n");
-const orderWorker = fs.readFileSync(path.join(root, "worker.js"), "utf8");
+const orderWorker = ["worker.js", "src/order-bot/reports.mjs"]
+  .map((file) => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
 
 function ownerHtml() {
   const pageSource = fs.readFileSync(path.join(root, "site-admin", "owner-page.mjs"), "utf8");

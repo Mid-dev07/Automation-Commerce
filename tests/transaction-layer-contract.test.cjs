@@ -4,7 +4,16 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const root = path.resolve(__dirname, "..");
-const worker = fs.readFileSync(path.join(root, "worker.js"), "utf8");
+const worker = [
+  "worker.js",
+  "src/order-bot/utils.mjs",
+  "src/order-bot/dashboard-html.mjs",
+  "src/order-bot/keyboards.mjs",
+  "src/order-bot/telegram-api.mjs",
+  "src/order-bot/sheets-client.mjs",
+  "src/order-bot/reports.mjs",
+  "src/order-bot/pickup.mjs"
+].map((file) => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
 const layer = fs.readFileSync(path.join(root, "transaction-layer.js"), "utf8");
 const schema = fs.readFileSync(path.join(root, "migrations/0001_transaction_core.sql"), "utf8");
 const paymentMethodsSchema = fs.readFileSync(path.join(root, "migrations/0013_payment_methods_and_bank_accounts.sql"), "utf8");
