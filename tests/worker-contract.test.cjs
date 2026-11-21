@@ -16,7 +16,8 @@ const orderBotModules = [
   "src/order-bot/telegram-api.mjs",
   "src/order-bot/sheets-client.mjs",
   "src/order-bot/reports.mjs",
-  "src/order-bot/pickup.mjs"
+  "src/order-bot/pickup.mjs",
+  "src/order-bot/handlers.mjs"
 ];
 const worker = orderBotModules.map((file) => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
 const transactionLayer = fs.readFileSync(transactionLayerPath, "utf8");
