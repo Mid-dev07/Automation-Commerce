@@ -221,3 +221,60 @@ test("public GET/OPTIONS /api/pricing enforces cache-control and strict CORS all
   );
   assert.equal(evilOpt.status, 403);
 });
+
+test("owner /api/admin/mail/status enforces auth and proxies MAIL_BACKEND health", async () => {
+  const mod = await import("../site-admin/worker.js");
+  const unauth = await mod.default.fetch(
+    new Request("https://admin.seiton.biz.id/api/admin/mail/status"),
+    {}
+  );
+  assert.equal(unauth.status, 401);
+
+  const authEnv = {
+    ORDER_BACKEND: {
+      async fetch() {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+    },
+    MAIL_BACKEND: {
+      async fetch(req) {
+        assert.equal(new URL(req.url).pathname, "/health");
+        return new Response(JSON.stringify({ ok: true, service: "seiton-mail-automation" }), { status: 200 });
+      }
+    },
+    SITE_DB: {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async first() {
+                return {
+                  session_id: "sess-1",
+                  client_hash: "hash-1",
+                  created_at_ms: Date.now() - 1000,
+                  last_seen_at_ms: Date.now() - 1000,
+                  expires_at_ms: Date.now() + 60000,
+                  revoked_at_ms: null
+                };
+              },
+              async run() {
+                return { success: true };
+              }
+            };
+          }
+        };
+      }
+    }
+  };
+  const okRes = await mod.default.fetch(
+    new Request("https://admin.seiton.biz.id/api/admin/mail/status", {
+      headers: { Cookie: "site_owner_session=valid-test-token" }
+    }),
+    authEnv
+  );
+  assert.equal(okRes.status, 200);
+  const body = await okRes.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.healthy, true);
+  assert.equal(body.panel_url, "https://mail.seiton.biz.id");
+});
