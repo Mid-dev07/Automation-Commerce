@@ -8,7 +8,17 @@ const assert = require("node:assert/strict");
 const root = path.resolve(__dirname, "..");
 const workerPath = path.join(root, "worker.js");
 const transactionLayerPath = path.join(root, "transaction-layer.js");
-const worker = fs.readFileSync(workerPath, "utf8");
+const orderBotModules = [
+  "worker.js",
+  "src/order-bot/utils.mjs",
+  "src/order-bot/dashboard-html.mjs",
+  "src/order-bot/keyboards.mjs",
+  "src/order-bot/telegram-api.mjs",
+  "src/order-bot/sheets-client.mjs",
+  "src/order-bot/reports.mjs",
+  "src/order-bot/pickup.mjs"
+];
+const worker = orderBotModules.map((file) => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
 const transactionLayer = fs.readFileSync(transactionLayerPath, "utf8");
 
 function extractBetween(source, start, end) {
@@ -28,7 +38,11 @@ const parseOrderText = evaluateFunction(
   "parseOrderText"
 );
 const parseCatalogProduct = evaluateFunction(
-  extractBetween(worker, "function parseCatalogProduct(row) {", "async function findProduct(env, sku) {"),
+  extractBetween(
+    fs.readFileSync(path.join(root, "src/order-bot/utils.mjs"), "utf8"),
+    "function parseCatalogProduct(row) {",
+    "function base64url(value) {"
+  ),
   "parseCatalogProduct"
 );
 const csvCell = evaluateFunction(

@@ -19,7 +19,15 @@ jobs:
           node-version: "22"
           package-manager-cache: false
       - name: Check Worker syntax
-        run: node --check worker.js
+        run: |
+          node --check worker.js
+          node --check src/order-bot/utils.mjs
+          node --check src/order-bot/dashboard-html.mjs
+          node --check src/order-bot/keyboards.mjs
+          node --check src/order-bot/telegram-api.mjs
+          node --check src/order-bot/sheets-client.mjs
+          node --check src/order-bot/reports.mjs
+          node --check src/order-bot/pickup.mjs
       - name: Check transactional module syntax
         run: node --check transaction-layer.js
       - name: Check digital products module syntax
