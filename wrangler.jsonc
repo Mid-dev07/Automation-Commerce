@@ -9,7 +9,9 @@
     "OTP_PORTAL_URL": "https://otp.seiton.biz.id",
     "OTP_EMAIL_ROUTING_READY": "false",
     "QRIS_INTERNAL_ENABLED": "true",
-    "QRIS_STATIC_FALLBACK_ENABLED": "true"
+    "QRIS_STATIC_FALLBACK_ENABLED": "true",
+    "ENABLE_BUTTON_STYLES": "true",
+    "SUPPORT_URL": "https://seiton.biz.id/kontak/"
   },
   "ai": {
     "binding": "AI"
