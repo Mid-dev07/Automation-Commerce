@@ -5,14 +5,15 @@ const assert = require("node:assert/strict");
 const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
-const ownerWorker = fs.readFileSync(path.join(root, "site-admin", "worker.js"), "utf8");
+const ownerWorker = ["auth.mjs", "pricing.mjs", "otp-proxy.mjs", "owner-page.mjs", "order-proxy.mjs", "worker.js"].map((file) => fs.readFileSync(path.join(root, "site-admin", file), "utf8")).join("\n");
 const orderWorker = fs.readFileSync(path.join(root, "worker.js"), "utf8");
 
 function ownerHtml() {
-  const start = ownerWorker.indexOf("function page(){");
-  const end = ownerWorker.indexOf("async function parseControlJson", start);
+  const pageSource = fs.readFileSync(path.join(root, "site-admin", "owner-page.mjs"), "utf8");
+  const start = pageSource.indexOf("function page(){");
+  const end = pageSource.indexOf("export { page }", start);
   assert.ok(start >= 0 && end > start, "owner page() function must exist");
-  return vm.runInNewContext(ownerWorker.slice(start, end) + "\npage();");
+  return vm.runInNewContext(pageSource.slice(start, end) + "\npage();");
 }
 function ownerInlineScript() {
   const html = ownerHtml();

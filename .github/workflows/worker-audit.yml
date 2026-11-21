@@ -29,7 +29,13 @@ jobs:
       - name: Check OTP email parser syntax
         run: node --check otp-portal/email-parser.js
       - name: Check site-admin Worker syntax
-        run: node --check site-admin/worker.js
+        run: |
+          node --check site-admin/worker.js
+          node --check site-admin/auth.mjs
+          node --check site-admin/pricing.mjs
+          node --check site-admin/otp-proxy.mjs
+          node --check site-admin/owner-page.mjs
+          node --check site-admin/order-proxy.mjs
       - name: Check Mail Automation Worker syntax
         run: node --check mail-automation/worker.js
       - name: Check TMail agent client syntax

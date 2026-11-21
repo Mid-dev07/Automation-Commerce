@@ -27,7 +27,8 @@ test("owner operations endpoints are protected by owner-session and same-origin 
   assert.match(worker, /\/api\/owner\/operations/);
   assert.ok(worker.includes("activeSession(req,env)"), "owner routes must validate the active owner session");
   assert.ok(worker.includes("sameOriginAdmin(req)"), "owner mutations must enforce same-origin requests");
-  assert.match(worker, /data-view-panel='projects'/);
-  assert.match(worker, /data-view-target='projects'/);
+  const ownerPage = await readFile(new URL("../site-admin/owner-page.mjs", import.meta.url), "utf8");
+  assert.match(ownerPage, /data-view-panel='projects'/);
+  assert.match(ownerPage, /data-view-target='projects'/);
   assert.match(worker, /handleOwnerOperationsRequest/);
 });
