@@ -29,6 +29,9 @@ test("OTP portal config matches deployed entrypoint and bindings", () => {
   assert.ok(config.durable_objects?.bindings?.some((binding) =>
     binding.name === "MAILBOX_INDEX" && binding.class_name === "MailboxIndex"
   ));
+  assert.ok(config.migrations?.some((migration) =>
+    migration.tag === "v1" && migration.new_sqlite_classes?.includes("MailboxIndex")
+  ));
   assert.equal(config.vars?.OTP_ALLOWED_DOMAINS, "seiton.biz.id");
   assert.equal(config.vars?.OTP_PORTAL_URL, "https://otp.seiton.biz.id");
   assert.ok(existsSync(new URL("../otp-portal/index.js", import.meta.url)));
