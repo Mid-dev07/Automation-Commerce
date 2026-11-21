@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const root = path.resolve(__dirname, "..");
-const worker = fs.readFileSync(path.join(root, "site-admin", "worker.js"), "utf8");
+const worker = ["auth.mjs", "pricing.mjs", "otp-proxy.mjs", "owner-page.mjs", "order-proxy.mjs", "worker.js"].map((file) => fs.readFileSync(path.join(root, "site-admin", file), "utf8")).join("\n");
 
 
 

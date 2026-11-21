@@ -7,7 +7,7 @@ const assert = require("node:assert/strict");
 
 const root = path.resolve(__dirname, "..");
 const workerPath = path.join(root, "site-admin", "worker.js");
-const worker = fs.readFileSync(workerPath, "utf8");
+const worker = ["auth.mjs", "pricing.mjs", "otp-proxy.mjs", "owner-page.mjs", "order-proxy.mjs", "worker.js"].map((file) => fs.readFileSync(path.join(root, "site-admin", file), "utf8")).join("\n");
 
 test("owner admin Worker parses", () => {
   execFileSync(process.execPath, ["--check", workerPath], { stdio: "pipe" });
@@ -80,10 +80,11 @@ test("owner admin audit and session controls are visible in the panel", () => {
 });
 
 test("owner admin inline dashboard JavaScript parses", () => {
-  const start=worker.indexOf("function page(){");
-  const end=worker.indexOf("async function parseControlJson",start);
+  const pageSource=fs.readFileSync(path.join(root,"site-admin","owner-page.mjs"),"utf8");
+  const start=pageSource.indexOf("function page(){");
+  const end=pageSource.indexOf("export { page }",start);
   assert.ok(start>=0&&end>start);
-  const pageFn=worker.slice(start,end);
+  const pageFn=pageSource.slice(start,end);
   const html=new vm.Script(pageFn+"\npage();",{filename:"owner-page.js"}).runInNewContext();
   const scriptStart=html.indexOf("<script>");
   const scriptEnd=html.indexOf("</script>",scriptStart);
@@ -159,9 +160,10 @@ test("owner panel exposes a guided add/edit product form and archives instead of
 });
 
 test("bot inline dashboard JavaScript parses with product-management handlers", () => {
-  const start=worker.indexOf("function page(){");
-  const end=worker.indexOf("async function parseControlJson",start);
-  const html=vm.runInNewContext(worker.slice(start,end)+"\npage();");
+  const pageSource=fs.readFileSync(path.join(root,"site-admin","owner-page.mjs"),"utf8");
+  const start=pageSource.indexOf("function page(){");
+  const end=pageSource.indexOf("export { page }",start);
+  const html=vm.runInNewContext(pageSource.slice(start,end)+"\npage();");
   const scriptStart=html.indexOf("<script>");
   const scriptEnd=html.indexOf("</script>",scriptStart);
   assert.ok(scriptStart>=0&&scriptEnd>scriptStart);
