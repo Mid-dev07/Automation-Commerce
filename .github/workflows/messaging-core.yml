@@ -48,6 +48,7 @@ jobs:
           node --check src/order-bot/sheets-client.mjs
           node --check src/order-bot/reports.mjs
           node --check src/order-bot/pickup.mjs
+          node --check src/order-bot/handlers.mjs
       - name: Check transaction and QRIS modules
         run: |
           node --check transaction-layer.js

@@ -12,7 +12,8 @@ const worker = [
   "src/order-bot/telegram-api.mjs",
   "src/order-bot/sheets-client.mjs",
   "src/order-bot/reports.mjs",
-  "src/order-bot/pickup.mjs"
+  "src/order-bot/pickup.mjs",
+  "src/order-bot/handlers.mjs"
 ].map((file) => fs.readFileSync(path.join(root, file), "utf8")).join("\n");
 const layer = fs.readFileSync(path.join(root, "transaction-layer.js"), "utf8");
 const schema = fs.readFileSync(path.join(root, "migrations/0001_transaction_core.sql"), "utf8");
