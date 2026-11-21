@@ -8,8 +8,11 @@
     "GOOGLE_SHEETS_ID": "137aLgWekyqy0cbdsPkVIgszm6oMKAKeZ-coK5knMwic",
     "OTP_PORTAL_URL": "https://otp.seiton.biz.id",
     "OTP_EMAIL_ROUTING_READY": "false",
-    "QRIS_INTERNAL_ENABLED": "false",
+    "QRIS_INTERNAL_ENABLED": "true",
     "QRIS_STATIC_FALLBACK_ENABLED": "true"
+  },
+  "ai": {
+    "binding": "AI"
   },
   "d1_databases": [
     {
