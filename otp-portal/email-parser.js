@@ -92,6 +92,8 @@ function stripHtml(value){
     .replace(/&quot;/gi,'"')
     .replace(/&#39;|&apos;/gi,"'")
     .replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Number(n)||0))
+    .replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCodePoint(parseInt(n,16)||0))
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g,"")
     .replace(/[ \t]+/g," ")
     .replace(/\n[ \t]+/g,"\n")
     .trim();
@@ -145,13 +147,25 @@ export function parseEmail(raw){
   const {headerBlock}=splitEntity(source);
   const headers=parseHeaders(headerBlock);
   const parts=collectText(source);
-  const plain=parts.find(part=>part.type==="text/plain"&&part.text.trim());
-  const html=parts.find(part=>part.type==="text/html"&&part.text.trim());
-  const text=plain?plain.text:html?stripHtml(html.text):"";
+  const plainParts=parts.filter(part=>part.type==="text/plain"&&part.text.trim());
+  const htmlParts=parts.filter(part=>part.type==="text/html"&&part.text.trim());
+  const htmlText=htmlParts.map(part=>stripHtml(part.text)).filter(Boolean);
+  const searchableParts=[...plainParts.map(part=>part.text),...htmlText];
+  const uniqueSearchableParts=[];
+  const seenSearchableParts=new Set();
+  for(const part of searchableParts){
+    const key=part.normalize("NFKC").replace(/\s+/g," ").trim().toLowerCase();
+    if(!key||seenSearchableParts.has(key))continue;
+    seenSearchableParts.add(key);
+    uniqueSearchableParts.push(part);
+  }
+  const text=plainParts[0]?.text||htmlText[0]||"";
+  const searchText=uniqueSearchableParts.join("\n");
   return {
     from:decodeHeaderWord(headers.from||""),
     subject:decodeHeaderWord(headers.subject||"(Tanpa subjek)"),
     messageId:String(headers["message-id"]||"").trim(),
-    text
+    text,
+    searchText
   };
 }
