@@ -31,7 +31,14 @@ jobs:
       - name: Check site-admin Worker syntax
         run: node --check site-admin/worker.js
       - name: Check Mail Automation Worker syntax
-        run: node --check mail-automation/worker.js
+        run: |
+          node --check mail-automation/worker.js
+          node --check mail-automation/core.mjs
+          node --check mail-automation/tmail-public.mjs
+          node --check mail-automation/owner-api.mjs
+          node --check mail-automation/agent-api.mjs
+          node --check mail-automation/owner-ui.mjs
+          node --check mail-automation/inbound.mjs
       - name: Check TMail agent client syntax
         run: node --check mail-automation/agent-client.mjs
       - name: Check TMail TOTP module syntax
