@@ -17,6 +17,7 @@ Canonical migration directory for `seiton-transactions-prod` is now `migrations/
 | `0011_qris_payments.sql` | QRIS order ledger, unique amount, and receipt OCR | Applied to production D1 |
 | `0012_qris_static_fallback_product_form.sql` | Static QRIS fallback mode and Telegram product form drafts | Applied to production D1 |
 | `0013_payment_methods_and_bank_accounts.sql` | Admin-controlled checkout methods and multiple bank transfer accounts | Tables present in production; migration registry unverified |
+| `0014_operational_alert_state.sql` | Cooldown state for opt-in operational alerts | Pending release (do not enable `OPERATIONAL_ALERTS_ENABLED` before preview UAT) |
 
 ## Important
 

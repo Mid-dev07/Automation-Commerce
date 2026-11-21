@@ -24,8 +24,6 @@ jobs:
         run: node --check transaction-layer.js
       - name: Check digital products module syntax
         run: node --check digital-products.mjs
-      - name: Check OTP portal legacy Worker syntax
-        run: node --check otp-portal/worker.js
       - name: Check deployed OTP portal entrypoint syntax
         run: node --check otp-portal/index.js
       - name: Check OTP email parser syntax
