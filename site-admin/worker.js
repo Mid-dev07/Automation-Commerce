@@ -1,6 +1,6 @@
 import { handleOwnerOperationsRequest } from "./owner-operations.js";
 const COOKIE="site_owner_session",TTL=28800;
-const ORIGINS=new Set(["https://seiton.biz.id","https://www.seiton.biz.id","https://rebuild.seiton-main-preview.pages.dev"]);
+const ORIGINS=new Set(["https://seiton.biz.id","https://www.seiton.biz.id","https://seiton-main-preview.pages.dev","https://rebuild.seiton-main-preview.pages.dev"]);
 function j(d,s=200,h={}){return new Response(JSON.stringify(d),{status:s,headers:Object.assign({"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store"},h)});}
 function secure(r){const h=new Headers(r.headers);h.set("X-Content-Type-Options","nosniff");h.set("X-Frame-Options","DENY");h.set("Referrer-Policy","no-referrer");h.set("Permissions-Policy","camera=(), microphone=(), geolocation=()");h.set("Content-Security-Policy","default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");return new Response(r.body,{status:r.status,headers:h});}
 function equal(a,b){const x=new TextEncoder().encode(String(a)),y=new TextEncoder().encode(String(b));if(x.length!==y.length)return false;let n=0;for(let i=0;i<x.length;i++)n|=x[i]^y[i];return n===0;}
@@ -235,7 +235,7 @@ if(u.pathname.startsWith("/api/owner/operations")){
   return secure(await handleOwnerOperationsRequest(req,env));
 }
 if(u.pathname==="/api/pricing"&&req.method==="OPTIONS"){const origin=req.headers.get("Origin")||"";if(!ORIGINS.has(origin))return secure(new Response(null,{status:403}));return secure(new Response(null,{status:204,headers:{"Access-Control-Allow-Origin":origin,"Access-Control-Allow-Methods":"GET, OPTIONS","Access-Control-Allow-Headers":"Content-Type","Access-Control-Max-Age":"600","Vary":"Origin"}}));}
-if(u.pathname==="/api/pricing"&&req.method==="GET"){const origin=req.headers.get("Origin")||"",h={"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","Vary":"Origin"};if(ORIGINS.has(origin))h["Access-Control-Allow-Origin"]=origin;return secure(new Response(JSON.stringify(await getPricing(env)),{headers:h}));}
+if(u.pathname==="/api/pricing"&&req.method==="GET"){const origin=req.headers.get("Origin")||"",h={"Content-Type":"application/json; charset=utf-8","Cache-Control":"public, max-age=60, stale-while-revalidate=300","Vary":"Origin"};if(ORIGINS.has(origin))h["Access-Control-Allow-Origin"]=origin;return secure(new Response(JSON.stringify(await getPricing(env)),{headers:h}));}
 if(u.pathname==="/api/session"&&req.method==="GET")return secure(j({ok:true,authenticated:Boolean(await activeSession(req,env))}));
 if(u.pathname==="/api/login"&&req.method==="POST"){
   if(!sameOriginAdmin(req))return secure(j({ok:false,error:"Origin tidak diizinkan."},403));
