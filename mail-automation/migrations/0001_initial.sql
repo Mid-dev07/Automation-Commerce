@@ -1,0 +1,78 @@
+-- Baseline schema for seiton-mail-automation-prod (reconstructed from live D1 DDL).
+
+-- Paired with 0002_owner_2fa_machine_tokens.sql and 0003_public_tmail_inboxes.sql.
+
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS mail_admin (
+  id TEXT PRIMARY KEY CHECK (id = 'owner'),
+  password_salt TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mail_aliases (
+  id TEXT PRIMARY KEY,
+  slug TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVOKED','EXPIRED')),
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_received_at INTEGER,
+  received_count INTEGER NOT NULL DEFAULT 0 CHECK (received_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS mail_login_attempts (
+  ip_hash TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  window_started_at INTEGER NOT NULL,
+  blocked_until INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS mail_machine_aliases (
+  alias_id TEXT PRIMARY KEY,
+  client_ref TEXT UNIQUE,
+  token_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (alias_id) REFERENCES mail_aliases(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS mail_machine_rate_limits (
+  token_hash TEXT PRIMARY KEY,
+  window_started_at INTEGER NOT NULL,
+  request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS mail_messages (
+  id TEXT PRIMARY KEY,
+  alias_id TEXT NOT NULL,
+  sender TEXT NOT NULL DEFAULT '',
+  recipient TEXT NOT NULL,
+  subject TEXT NOT NULL DEFAULT '',
+  body_text TEXT NOT NULL DEFAULT '',
+  verification_code TEXT,
+  message_id TEXT NOT NULL DEFAULT '',
+  received_at INTEGER NOT NULL, payload_iv TEXT, payload_ciphertext TEXT,
+  UNIQUE(alias_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS mail_sessions (
+  session_hash TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  last_seen_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mail_aliases_status_expiry ON mail_aliases(status, expires_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mail_machine_aliases_created
+  ON mail_machine_aliases(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mail_machine_aliases_token
+  ON mail_machine_aliases(token_hash, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mail_messages_alias_received ON mail_messages(alias_id, received_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mail_messages_received ON mail_messages(received_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_mail_sessions_expiry ON mail_sessions(expires_at);
