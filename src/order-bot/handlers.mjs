@@ -64,6 +64,16 @@ import {
   appendSheetRows, appendOrder, readSheet, getGoogleAccessToken, importPrivateKey
 } from "./sheets-client.mjs";
 import {
+  handleCustomerHybridMessage,
+  handleCustomerHybridCallback,
+  cleanupStoredQrisMessage
+} from "./ui/controller.mjs";
+import {
+  setQrisMessageRef,
+  invalidateStoreUiCaches,
+  runBackground
+} from "./ui/state.mjs";
+import {
   orderRowsToObjects, productRowsToObjects, localDateKey,
   csvCell, csvText, buildReportExportsFromData, isValidReportDate, buildAdminReport
 } from "./reports.mjs";
@@ -291,7 +301,7 @@ async function handleTelegram(request, env, ctx) {
   let update;
   try { update = await request.json(); } catch { return json({ ok: false }, 400); }
   if (update.callback_query) {
-    ctx.waitUntil(handleTelegramCallback(env, update.callback_query).catch(async error => {
+    ctx.waitUntil(handleTelegramCallback(env, update.callback_query, ctx).catch(async error => {
       console.error(JSON.stringify({ level: "error", event: "telegram_callback", message: error.message }));
       const callbackChatId = String(update.callback_query.message?.chat?.id || update.callback_query.from?.id || "");
       try {
@@ -628,6 +638,13 @@ async function handleTelegram(request, env, ctx) {
         return;
       }
       if (message.chat.type && message.chat.type !== "private") return;
+      if (text.startsWith("/start")) {
+        const handledStart = await handleCustomerHybridMessage(env, ctx, message, "/start", {
+          readTelegramCatalogRows,
+          getAvailablePaymentMethods
+        });
+        if (handledStart) return;
+      }
       if (await messagingCoreReady(env)) {
         const messagingText = text.startsWith("/start") ? "START" : "MENU";
         const event = telegramMessagingEvent(update, message, messagingText);
@@ -640,6 +657,11 @@ async function handleTelegram(request, env, ctx) {
     }
     if (!isAdmin(customerId, env)) {
       if (message.chat.type && message.chat.type !== "private") return;
+      const handledUi = await handleCustomerHybridMessage(env, ctx, message, text, {
+        readTelegramCatalogRows,
+        getAvailablePaymentMethods
+      });
+      if (handledUi) return;
       if (await messagingCoreReady(env)) {
         const event = telegramMessagingEvent(update, message, text);
         await processMessagingEvent(env, event, createMessagingServices(env));
@@ -962,6 +984,7 @@ async function saveCatalogProduct(env, product, originalSku = "") {
     const result = await saveProductTransactional(env,{sku,name,price,stock,active:product.active,photo_url:photo,description},originalSku);
     const stored = await findProductTransactional(env,sku);
     await mirrorTransactionalProduct(env,stored);
+    await invalidateStoreUiCaches(env);
     return result;
   }
 
@@ -992,6 +1015,7 @@ async function deleteCatalogProduct(env, sku) {
     const result = await deleteProductTransactional(env,normalizedSku);
     const stored = await findProductTransactional(env,normalizedSku);
     await mirrorTransactionalProduct(env,stored);
+    await invalidateStoreUiCaches(env);
     return result;
   }
   const rows = await readCatalogRows(env);
@@ -1015,12 +1039,48 @@ async function deleteCatalogProduct(env, sku) {
   if (!response.ok) throw new Error("Gagal menghapus produk (" + response.status + "): " + (await response.text()).slice(0,400));
   return { sku: normalizedSku, row: index + 2 };
 }
-async function handleTelegramCallback(env, query) {
+async function deliverOrderCheckout(env, ctx, message, chatId, method, result) {
+  if (String(method).toUpperCase() === "QRIS") {
+    runBackground(ctx, deleteTelegramMessage(env, message), "ui_delete_checkout_before_qris");
+    try {
+      await sendQrisPaymentScreen(env, chatId, result);
+    } catch (error) {
+      console.error(JSON.stringify({ level: "error", event: "qris_charge_or_delivery_failed", order_id: result.orderId, message: String(error?.message || "QRIS_FAILED").slice(0, 160) }));
+      for (const adminId of String(env.ADMIN_CHAT_ID || "").split(",").map(value => value.trim()).filter(Boolean)) {
+        try {
+          await sendTelegram(env, adminId, "⚠️ QRIS untuk order " + result.orderId + " gagal dibuat/dikirim. Periksa konfigurasi payload QRIS internal dan bukti pembayaran sebelum membatalkan order.");
+        } catch (notifyErr) {
+          console.warn(JSON.stringify({ level: "warn", event: "qris_admin_notify_failed", order_id: result.orderId, message: String(notifyErr?.message || notifyErr).slice(0, 120) }));
+        }
+      }
+      await sendTelegram(env, chatId,
+        "⚠️ Kode QRIS belum dapat ditampilkan untuk order " + result.orderId + ". Jangan lakukan pembayaran dari kode lain. Pesanan belum dibatalkan; hubungi admin Seiton.id untuk pemeriksaan sebelum mencoba kembali.");
+    }
+    return;
+  }
+  await updateTelegramMessage(env, message, {
+    text: await orderConfirmationWithPaymentInstructions(env, result),
+    replyMarkup: orderConfirmationKeyboard(result),
+    clearMedia: true
+  });
+}
+
+async function handleTelegramCallback(env, query, ctx = null) {
   const message = query.message || null;
   const chatId = String(message?.chat?.id || query.from?.id || "");
   const userId = String(query.from?.id || "");
   const data = String(query.data || "");
   const admin = isAdmin(userId, env);
+
+  const handledHybrid = await handleCustomerHybridCallback(env, ctx, query, {
+    isAdmin,
+    readTelegramCatalogRows,
+    getAvailablePaymentMethods,
+    createOrder,
+    deliverOrderCheckout
+  });
+  if (handledHybrid) return;
+
   await answerTelegramCallback(env, query.id);
 
   if (data.startsWith("hf:")) {
@@ -2755,13 +2815,17 @@ async function sendQrisPaymentScreen(env, chatId, order) {
     "Setelah pembayaran berhasil, tekan Upload Bukti Pembayaran dan kirim screenshot transaksi.",
     "Sistem membaca nominal dan data bukti. Admin tetap mencocokkan transaksi masuk sebelum pembayaran disahkan."
   ].join("\n");
-  await sendTelegramPhotoBlob(env, chatId, image, caption, {
+  const sent = await sendTelegramPhotoBlob(env, chatId, image, caption, {
     inline_keyboard: [
-      [{ text: "📎 Saya Sudah Bayar — Upload Bukti", callback_data: "pc:req:" + order.orderId }],
-      [{ text: "🔄 Periksa Status Pembayaran", callback_data: "qris:check:" + order.orderId }],
-      [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]
+      [{ text: "📎 Saya Sudah Bayar — Upload Bukti", callback_data: "pc:req:" + order.orderId, style: "success" }],
+      [{ text: "🔄 Periksa Status Pembayaran", callback_data: "qris:check:" + order.orderId, style: "primary" }],
+      [{ text: "📜 Riwayat Pesanan", callback_data: "nav:orders", style: "primary" }]
     ]
   });
+  const qrisMsgId = sent?.result?.message_id;
+  if (qrisMsgId && order?.orderId) {
+    await setQrisMessageRef(env, order.orderId, { chatId: String(chatId), messageId: qrisMsgId });
+  }
   return payment;
 }
 
@@ -3222,6 +3286,10 @@ async function approvePaymentAndIssueTicket(env, reference, actor = "telegram-ad
       return { row, receiptCode: String(approved.receipt_code || ""), ticketUrl: "", rowNumber: approved.legacy_sheet_row, alreadyApproved: true };
     }
     await mirrorTransactionalOrder(env,approved);
+    await Promise.allSettled([
+      cleanupStoredQrisMessage(env, String(approved.order_id)),
+      invalidateStoreUiCaches(env)
+    ]);
     const row = orderToSheetRow(approved);
     const ticketUrl = await createPickupTicketUrl(env,String(approved.order_id),String(approved.receipt_code));
     return {row,receiptCode:approved.receipt_code,ticketUrl,rowNumber:approved.legacy_sheet_row,alreadyApproved:false};

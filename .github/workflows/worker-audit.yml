@@ -29,6 +29,11 @@ jobs:
           node --check src/order-bot/reports.mjs
           node --check src/order-bot/pickup.mjs
           node --check src/order-bot/handlers.mjs
+          node --check src/order-bot/ui/formatters.mjs
+          node --check src/order-bot/ui/keyboards.mjs
+          node --check src/order-bot/ui/screens.mjs
+          node --check src/order-bot/ui/state.mjs
+          node --check src/order-bot/ui/controller.mjs
       - name: Check transactional module syntax
         run: node --check transaction-layer.js
       - name: Check digital products module syntax
