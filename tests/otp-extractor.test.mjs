@@ -97,3 +97,20 @@ test("decodes hexadecimal HTML entities before OTP detection", () => {
   const parsed = parseEmail(raw);
   assert.equal(extractVerificationCode(parsed.subject, parsed.searchText), "582104");
 });
+
+test("otp-portal and mail-automation email-parser modules stay synchronized", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { parseEmail: parseOtpPortalEmail } = await import("../otp-portal/email-parser.js");
+  const mailSource = readFileSync(new URL("../mail-automation/email-parser.js", import.meta.url), "utf8").replace(/\r\n/g, "\n").trim();
+  const otpSource = readFileSync(new URL("../otp-portal/email-parser.js", import.meta.url), "utf8").replace(/\r\n/g, "\n").trim();
+  assert.equal(otpSource, mailSource);
+
+  const sample = [
+    "From: no-reply@example.test",
+    "Subject: Security code",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    "<p>Code: <b>&#x35;&#x38;&#x32;\u200B&#x31;&#x30;&#x34;</b></p>"
+  ].join("\r\n");
+  assert.deepEqual(parseOtpPortalEmail(sample), parseEmail(sample));
+});
