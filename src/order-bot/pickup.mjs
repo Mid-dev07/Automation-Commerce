@@ -51,17 +51,24 @@ async function handlePickupVerificationPage(request, env) {
     }
   }
   const isValid = state === "VALID";
-  const title = state === "VALID" ? "PEMBAYARAN TERVERIFIKASI" : state === "USED" ? "PESANAN SUDAH DIAMBIL" : "TIKET TIDAK VALID";
-  const color = state === "VALID" ? "#087f5b" : state === "USED" ? "#9a6700" : "#b42318";
+  const title = state === "VALID" ? "Pembayaran Terverifikasi" : state === "USED" ? "Pesanan Sudah Diambil" : "Tiket Tidak Valid";
+  const pillStyle = state === "VALID"
+    ? "background:#E7F6EC;border-color:#B7E4C7;color:#14532D"
+    : state === "USED"
+      ? "background:#FEF6E4;border-color:#F4D49C;color:#7C410C"
+      : "background:#FEF1F2;border-color:#F5C2C7;color:#991B1B";
+  const dotColor = state === "VALID" ? "#16A34A" : state === "USED" ? "#D97706" : "#DC2626";
   const body = details ? [
-    "<div class='row'><span>ID Pesanan</span><b>" + escapeHtml(details[0]) + "</b></div>",
+    "<div class='rows'>",
+    "<div class='row'><span>ID Pesanan</span><b class='mono'>" + escapeHtml(details[0]) + "</b></div>",
     "<div class='row'><span>Produk</span><b>" + escapeHtml(details[5]) + "</b></div>",
-    "<div class='row'><span>Jumlah</span><b>" + escapeHtml(details[6]) + "</b></div>",
-    "<div class='row'><span>Total</span><b>" + escapeHtml(rupiah(details[10])) + "</b></div>",
-    "<div class='row'><span>Kode Resi</span><b>" + escapeHtml(details[18]) + "</b></div>",
-    "<div class='row'><span>Status Pengambilan</span><b>" + (state === "USED" ? "SUDAH DIAMBIL" : "BELUM DIAMBIL") + "</b></div>"
-  ].join("") : "<p>Kode tiket tidak ditemukan atau pembayaran belum disetujui.</p>";
-  const html = "<!doctype html><html lang='id'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Verifikasi Resi Seiton.id</title><style>body{margin:0;background:#f2f5f8;font:16px system-ui;color:#1b2735;display:grid;min-height:100vh;place-items:center}.ticket{background:white;border:1px solid #dce3ea;border-radius:18px;padding:28px;max-width:460px;width:calc(100% - 40px);box-shadow:0 12px 40px #10203018}.brand{font-size:13px;color:#64748b;font-weight:700;letter-spacing:.1em}.state{font-weight:800;color:" + color + ";font-size:21px;margin:18px 0}.row{display:flex;justify-content:space-between;gap:18px;border-top:1px dashed #d9e0e8;padding:12px 0}.row span{color:#64748b}.row b{text-align:right;max-width:60%;overflow-wrap:anywhere}.note{font-size:12px;color:#64748b;margin-top:16px}</style><main class='ticket'><div class='brand'>SEITON.ID · TIKET PENGAMBILAN</div><div class='state'>" + title + "</div>" + body + "<p class='note'>Tunjukkan halaman ini kepada petugas saat mengambil pesanan. Tiket tidak membuktikan pembayaran bank di luar status verifikasi Seiton.id.</p></main></html>";
+    "<div class='row'><span>Jumlah</span><b class='mono'>" + escapeHtml(details[6]) + " pcs</b></div>",
+    "<div class='row'><span>Total</span><b class='mono'>" + escapeHtml(rupiah(details[10])) + "</b></div>",
+    "<div class='row'><span>Kode Resi</span><b class='mono'>" + escapeHtml(details[18]) + "</b></div>",
+    "<div class='row'><span>Status Pengambilan</span><b>" + (state === "USED" ? "SUDAH DIAMBIL" : "BELUM DIAMBIL") + "</b></div>",
+    "</div>"
+  ].join("") : "<p class='empty'>Kode tiket tidak ditemukan atau pembayaran belum disetujui.</p>";
+  const html = "<!doctype html><html lang='id'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='robots' content='noindex,nofollow'><meta name='theme-color' content='#F7F5EF'><title>Verifikasi Resi — Seiton.id</title><style>*,*::before,*::after{box-sizing:border-box}body{margin:0;min-height:100vh;padding:24px 16px;background:#F7F5EF;background-image:linear-gradient(to right,rgba(31,41,55,.04) 1px,transparent 1px),linear-gradient(to bottom,rgba(31,41,55,.04) 1px,transparent 1px);background-size:32px 32px;color:#1F2937;font:15px/1.55 system-ui,-apple-system,'Segoe UI',sans-serif;display:grid;place-items:center}.ticket{width:min(460px,100%);background:#FFFFFF;border:1px solid #DFE1DC;border-top:4px solid #FF6B35;border-radius:16px;padding:28px;box-shadow:0 8px 24px rgba(31,41,55,.06)}.head{display:flex;align-items:center;gap:10px;margin-bottom:20px}.mark{width:34px;height:34px;border-radius:9px;background:#FF6B35;color:#1F2937;display:grid;place-items:center;font-weight:900;font-size:17px;flex:none}.brand{font-size:12px;color:#A94420;font-weight:800;letter-spacing:.08em}.pill{display:inline-flex;align-items:center;gap:8px;padding:7px 13px;border:1px solid;border-radius:999px;font-size:13px;font-weight:800;margin-bottom:18px;" + pillStyle + "}.pill::before{content:'';width:8px;height:8px;border-radius:50%;background:" + dotColor + ";flex:none}.rows{border-top:1px solid #DFE1DC}.row{display:flex;justify-content:space-between;align-items:baseline;gap:16px;border-bottom:1px dashed #DFE1DC;padding:12px 0}.row span{color:#525C68;font-size:13px}.row b{text-align:right;max-width:62%;overflow-wrap:anywhere;font-size:14px;color:#1F2937}.mono{font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.empty{margin:0 0 12px;padding:14px;border:1px dashed #C8CBC3;border-radius:10px;background:#F2F0E8;color:#525C68;font-size:14px}.note{font-size:12px;color:#525C68;margin:18px 0 0;padding-top:14px;border-top:1px solid #DFE1DC;line-height:1.55}</style></head><body><main class='ticket'><div class='head'><span class='mark'>S</span><div class='brand'>SEITON.ID · TIKET PENGAMBILAN</div></div><div class='pill'>" + title + "</div>" + body + "<p class='note'>Tunjukkan halaman ini kepada petugas saat mengambil pesanan. Tiket tidak membuktikan pembayaran bank di luar status verifikasi Seiton.id.</p></main></body></html>";
   return new Response(html, { status: 200, headers: { "Content-Type":"text/html; charset=utf-8", "Cache-Control":"no-store", "X-Content-Type-Options":"nosniff", "Referrer-Policy":"no-referrer" } });
 }
 function pickupQrImageUrl(ticketUrl) {

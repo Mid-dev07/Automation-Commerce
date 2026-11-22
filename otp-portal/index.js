@@ -194,37 +194,54 @@ function html() {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
 <meta name="referrer" content="no-referrer">
-<meta name="theme-color" content="#0F172A">
+<meta name="theme-color" content="#F7F5EF">
 <title>Portal OTP Privat — Seiton.id</title>
 <style>
-:root{color-scheme:light;--ink:#152238;--muted:#65738a;--line:#e4e9f0;--panel:#fff;--bg:#f3f5f8;--accent:#10b981}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{width:min(760px,calc(100% - 32px));margin:40px auto}
-header{margin-bottom:22px}header p{color:var(--muted);margin:4px 0}h1{font-size:clamp(25px,5vw,34px);line-height:1.15;margin:0}
-.brand{font-size:12px;letter-spacing:.14em;font-weight:800;color:#0f766e}
-.notice{padding:15px;border:1px solid var(--line);border-radius:14px;background:#fff;color:var(--muted)}
-.notice strong{color:var(--ink)}.messages{display:grid;gap:12px;margin-top:16px}
-.message{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:17px;box-shadow:0 5px 18px #15223808}
-.message-top{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.subject{font-weight:750;font-size:16px}.meta{color:var(--muted);font-size:12px}
-.codes{display:flex;gap:8px;flex-wrap:wrap;margin:13px 0}
-.code{font:700 22px/1.2 ui-monospace,monospace;letter-spacing:.1em;background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;border-radius:9px;padding:9px 12px}
-button{border:0;border-radius:8px;padding:8px 11px;background:#17263c;color:#fff;font-weight:650;cursor:pointer}
-button:focus-visible{outline:3px solid #6ee7b7;outline-offset:2px}
-.preview{white-space:pre-wrap;overflow-wrap:anywhere;color:#536176;font-size:13px;max-height:160px;overflow:auto}
-.actions{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:14px}
-footer{margin-top:28px;color:#738096;font-size:12px}
+:root{color-scheme:light;--bg:#F7F5EF;--panel:#FFFFFF;--soft:#F2F0E8;--sage:#E7EDE4;--ink:#1F2937;--ink-soft:#354253;--muted:#525C68;--line:#DFE1DC;--line-strong:#C8CBC3;--brand:#FF6B35;--accent:#B94A22;--accent-hover:#9A3B19;--accent-text:#A94420;--ok-bg:#E7F6EC;--ok-fg:#14532D;--ok-line:#B7E4C7;--danger:#991B1B;--danger-bg:#FEF1F2;--danger-line:#F5C2C7}
+*,*::before,*::after{box-sizing:border-box}
+html{min-width:320px;-webkit-text-size-adjust:100%}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-rendering:optimizeLegibility}
+main{width:min(760px,calc(100% - 32px));margin:32px auto 48px}
+header{margin-bottom:24px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+.brand-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.mark{width:34px;height:34px;border-radius:9px;background:var(--brand);color:var(--ink);display:grid;place-items:center;font-weight:900;font-size:17px;letter-spacing:-.04em;flex:none}
+.brand{font-size:12px;letter-spacing:.08em;font-weight:800;color:var(--accent-text)}
+header p{color:var(--muted);margin:6px 0 0;font-size:14px}
+h1{font-size:clamp(24px,5vw,32px);line-height:1.15;letter-spacing:-.03em;margin:0}
+.notice{padding:16px 18px;border:1px solid var(--line);border-left:4px solid var(--brand);border-radius:12px;background:var(--panel);color:var(--muted);font-size:14px}
+.notice strong{display:block;color:var(--ink);font-size:15px;margin-bottom:4px}
+.notice p{margin:0;line-height:1.55}
+.messages{display:grid;gap:12px;margin-top:16px}
+.message{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;box-shadow:0 1px 2px rgba(31,41,55,.05)}
+.message-top{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+.subject{font-weight:750;font-size:16px;color:var(--ink);overflow-wrap:anywhere}
+.meta{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;margin-top:3px}
+.codes{display:grid;gap:8px;margin:14px 0}
+.code-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;background:var(--ok-bg);border:1px solid var(--ok-line);border-radius:10px}
+.code{font:800 22px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;letter-spacing:.12em;color:var(--ok-fg)}
+button{display:inline-flex;align-items:center;justify-content:center;min-height:40px;border:1px solid var(--line-strong);border-radius:8px;padding:8px 13px;background:var(--panel);color:var(--ink);font-size:13px;font-weight:700;cursor:pointer;transition:background .15s,border-color .15s}
+button:hover{background:var(--soft);border-color:#9DA4AE}
+button.primary{border-color:var(--accent);background:var(--accent);color:#FFFFFF}
+button.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
+button.danger{border-color:var(--danger-line);background:var(--danger-bg);color:var(--danger)}
+button.danger:hover{background:#FDE2E4}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.preview{white-space:pre-wrap;overflow-wrap:anywhere;color:var(--ink-soft);background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:12px;font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;max-height:180px;overflow:auto;margin:12px 0}
+.actions{display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-top:16px}
+.action-group{display:flex;gap:8px;flex-wrap:wrap}
+footer{margin-top:24px;padding:14px 16px;border:1px solid #D3DDD0;border-radius:12px;background:var(--sage);color:var(--ink-soft);font-size:12px;line-height:1.6}
 .hidden{display:none!important}
-@media(max-width:520px){main{margin:24px auto}.message{padding:14px}.actions{align-items:flex-start;flex-direction:column}}
+@media(max-width:560px){main{width:calc(100% - 24px);margin:20px auto 36px}.message{padding:15px}.actions{align-items:stretch;flex-direction:column}.action-group button{flex:1;min-height:44px}button{min-height:44px}.code{font-size:19px}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
 </style>
 </head>
 <body>
 <main>
-<header><div class="brand">SEITON.ID · PRIVATE MAILBOX</div><h1>Portal Kode OTP</h1><p>Inbox privat untuk alamat email yang telah didaftarkan pemiliknya.</p></header>
+<header><div class="brand-row"><span class="mark">S</span><div class="brand">SEITON.ID · PRIVATE MAILBOX</div></div><h1>Portal Kode OTP</h1><p>Inbox privat untuk alamat email yang telah didaftarkan pemiliknya.</p></header>
 <section id="status" class="notice" role="status" aria-live="polite">Memeriksa tautan akses…</section>
 <section id="content" class="hidden">
 <div class="notice"><strong id="mailbox-label">Mailbox privat</strong><p>Email hanya terlihat oleh pemegang tautan akses khusus. Lima pesan terakhir disimpan maksimal satu jam.</p></div>
-<div class="actions"><span id="updated" class="meta"></span><div><button id="refresh" type="button">Muat ulang</button> <button id="logout" type="button">Keluar</button></div></div>
+<div class="actions"><span id="updated" class="meta"></span><div class="action-group"><button id="refresh" class="primary" type="button">Muat ulang</button><button id="logout" class="danger" type="button">Keluar</button></div></div>
 <div id="messages" class="messages"></div>
 </section>
 <footer>Jangan bagikan tautan akses. Keluar dari portal setelah selesai. Email yang kedaluwarsa akan dihapus otomatis.</footer>
@@ -248,7 +265,7 @@ footer{margin-top:28px;color:#738096;font-size:12px}
    const from=document.createElement("div");from.className="meta";from.textContent="Dari: "+(item.from||"Pengirim tidak diketahui");card.append(from);
    if(Array.isArray(item.otpCandidates)&&item.otpCandidates.length){
     const codes=document.createElement("div");codes.className="codes";
-    for(const code of item.otpCandidates){const wrap=document.createElement("div");const label=document.createElement("span");label.className="code";label.textContent=code;const button=document.createElement("button");button.type="button";button.textContent="Salin kode";button.addEventListener("click",()=>copy(code,button));wrap.append(label,button);codes.append(wrap);}
+    for(const code of item.otpCandidates){const wrap=document.createElement("div");wrap.className="code-item";const label=document.createElement("span");label.className="code";label.textContent=code;const button=document.createElement("button");button.type="button";button.className="primary";button.textContent="Salin kode";button.addEventListener("click",()=>copy(code,button));wrap.append(label,button);codes.append(wrap);}
     card.append(codes);
    }
    const preview=document.createElement("p");preview.className="preview";preview.textContent=item.textPreview||"Isi teks tidak tersedia.";card.append(preview);

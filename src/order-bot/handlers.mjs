@@ -74,6 +74,20 @@ import {
   runBackground
 } from "./ui/state.mjs";
 import {
+  renderAdminHomeScreen,
+  renderAdminSubmenuScreen,
+  renderAdminRecentOrdersScreen,
+  renderAdminOrderDetailScreen,
+  renderAdminPaymentQueueScreen,
+  renderAdminPaymentDetailScreen,
+  renderAdminPickupQueueScreen,
+  renderAdminPickupDetailScreen,
+  renderAdminCatalogItemScreen,
+  renderAdminDeleteConfirmScreen,
+  renderAdminDashboardLinkScreen,
+  renderAdminExportsScreen
+} from "./ui/admin-screens.mjs";
+import {
   orderRowsToObjects, productRowsToObjects, localDateKey,
   csvCell, csvText, buildReportExportsFromData, isValidReportDate, buildAdminReport
 } from "./reports.mjs";
@@ -593,9 +607,11 @@ async function handleTelegram(request, env, ctx) {
     }
     if (text.startsWith("/laporan")) {
       if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
-      const report = await buildAdminReport(env);
+      const state = await transactionReadiness(env);
+      const d1Orders = state.ready ? await listOrdersTransactional(env, { limit: 5000 }) : null;
+      const report = await buildAdminReport(env, d1Orders);
       await recordAdminActivity(env, { actorId: customerId, action: "REPORT_GENERATED", resourceType: "sales_report", summary: { report_type: "sales_summary" } });
-      await sendTelegram(env, chatId, report);
+      await sendTelegram(env, chatId, report, adminMenuKeyboard(), { parseMode: "HTML" });
       return;
     }
     if (/^SETUP\s*\|/i.test(text)) {
@@ -1169,8 +1185,18 @@ async function handleTelegramCallback(env, query, ctx = null) {
 
   if (data === "nav:home" || data === "adm:home") {
     const showAdmin = data === "adm:home" && admin;
+    if (showAdmin) {
+      const home = renderAdminHomeScreen();
+      await updateTelegramMessage(env, message, {
+        text: home.text,
+        parseMode: home.parseMode,
+        replyMarkup: home.replyMarkup,
+        clearMedia: true
+      });
+      return;
+    }
     await deleteTelegramMessage(env, message);
-    await sendSeitonWelcome(env, chatId, showAdmin);
+    await sendSeitonWelcome(env, chatId, false);
     return;
   }
 
@@ -1398,16 +1424,11 @@ async function handleTelegramCallback(env, query, ctx = null) {
     }
     const action = data.slice(4);
     if (action === "orders" || action === "products" || action === "reports" || action === "support") {
-      const menus = {
-        orders: { title: "🧾 KELOLA PESANAN", description: "Pesanan masuk, pembayaran, status, dan pengambilan.", keyboard: adminOrdersKeyboard() },
-        products: { title: "🛍️ KELOLA PRODUK", description: "Atur katalog, harga, stok, foto, dan produk baru.", keyboard: adminProductsKeyboard() },
-        reports: { title: "📊 LAPORAN & ANALITIK", description: "Ringkasan transaksi, dashboard, dan ekspor data.", keyboard: adminReportsKeyboard() },
-        support: { title: "💬 LAYANAN PELANGGAN", description: "Tangani permintaan bantuan dan percakapan pelanggan.", keyboard: adminSupportKeyboard() }
-      };
-      const menu = menus[action];
+      const screen = renderAdminSubmenuScreen(action);
       await updateTelegramMessage(env, message, {
-        text: menu.title + "\n" + menu.description,
-        replyMarkup: menu.keyboard,
+        text: screen.text,
+        parseMode: screen.parseMode,
+        replyMarkup: screen.replyMarkup,
         clearMedia: true
       });
       return;
@@ -1417,9 +1438,11 @@ async function handleTelegramCallback(env, query, ctx = null) {
       return;
     }
     if (action === "report") {
-      const report = await buildAdminReport(env);
+      const state = await transactionReadiness(env);
+      const d1Orders = state.ready ? await listOrdersTransactional(env, { limit: 5000 }) : null;
+      const report = await buildAdminReport(env, d1Orders);
       await recordAdminActivity(env, { actorId: userId, action: "REPORT_GENERATED", resourceType: "sales_report", summary: { report_type: "sales_summary" } });
-      await updateTelegramMessage(env, message, { text: report, replyMarkup: adminMenuKeyboard(), clearMedia: true });
+      await updateTelegramMessage(env, message, { text: report, parseMode: "HTML", replyMarkup: adminMenuKeyboard(), clearMedia: true });
       return;
     }
     if (action === "paymentchecks" || action.startsWith("paymentchecks:")) {
@@ -1435,28 +1458,22 @@ async function handleTelegramCallback(env, query, ctx = null) {
       const accessToken = await createDashboardAccessToken(env, chatId);
       await recordAdminActivity(env, { actorId: userId, action: "DASHBOARD_LINK_ISSUED", resourceType: "admin_dashboard", summary: { lifetime_minutes: 240 } });
       const link = "https://admin.seiton.biz.id/#access=" + encodeURIComponent(accessToken);
+      const screen = renderAdminDashboardLinkScreen(link);
       await updateTelegramMessage(env, message, {
-        text: "📈 Dashboard admin siap dibuka. Tautan akses berlaku selama 4 jam. Jangan teruskan tautan ini kepada orang lain.",
+        text: screen.text,
+        parseMode: screen.parseMode,
         clearMedia: true,
-        replyMarkup: { inline_keyboard: [
-          [{ text: "Buka Dashboard Interaktif", url: link }],
-          [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-        ] }
+        replyMarkup: screen.replyMarkup
       });
       return;
     }
     if (action === "exports") {
+      const screen = renderAdminExportsScreen();
       await updateTelegramMessage(env, message, {
-        text: "📥 Pilih jenis laporan yang ingin diunduh. Semua file berformat CSV dan bisa dibuka di Excel atau Google Sheets.",
+        text: screen.text,
+        parseMode: screen.parseMode,
         clearMedia: true,
-        replyMarkup: { inline_keyboard: [
-          [{ text: "📋 Data Pesanan", callback_data: "exp:orders" }],
-          [{ text: "💰 Buku Kas / Keuangan", callback_data: "exp:finance" }],
-          [{ text: "📅 Ringkasan Harian", callback_data: "exp:daily" }],
-          [{ text: "📦 Stok & Katalog Produk", callback_data: "exp:inventory" }],
-          [{ text: "🗂️ Paket Lengkap (4 file)", callback_data: "exp:all" }],
-          [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-        ] }
+        replyMarkup: screen.replyMarkup
       });
       return;
     }
@@ -1477,17 +1494,12 @@ async function handleTelegramCallback(env, query, ctx = null) {
       const recent = state.ready
         ? (await listOrdersTransactional(env,{limit:10})).map(o => ({r:orderToSheetRow(o),reference:o.order_id}))
         : (await readSheet(env, "Pesanan!A2:M")).map((r,i) => ({r,reference:String(i+2)})).filter(x => x.r[0]).slice(-10).reverse();
-      if (!recent.length) {
-        await updateTelegramMessage(env, message, { text: "Belum ada pesanan.", replyMarkup: adminMenuKeyboard() });
-        return;
-      }
-      const buttons = recent.map(x => [{ text: String(x.r[0]).slice(0,22) + " · " + String(x.r[12] || "BARU").slice(0,18),
-        callback_data: (action === "statuslist" ? "st:" : "detail:") + x.reference }]);
-      buttons.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
-      const summary = recent.map(x => String(x.r[0]) + " | " + String(x.r[5]) + " | " + rupiah(x.r[10]) + " | " + String(x.r[12])).join("\n");
+      const screen = renderAdminRecentOrdersScreen(recent, action);
       await updateTelegramMessage(env, message, {
-        text: action === "statuslist" ? "Pilih pesanan yang statusnya ingin diperbarui:" : "10 pesanan terbaru:\n\n" + summary,
-        replyMarkup: { inline_keyboard: buttons }
+        text: screen.text,
+        parseMode: screen.parseMode,
+        replyMarkup: screen.replyMarkup,
+        clearMedia: true
       });
       return;
     }
@@ -1509,12 +1521,12 @@ async function handleTelegramCallback(env, query, ctx = null) {
       return;
     }
     const sku = data.slice("prod:delete:".length);
+    const screen = renderAdminDeleteConfirmScreen(sku);
     await updateTelegramMessage(env, message, {
-      text: "Yakin ingin menghapus produk " + sku + "? Produk akan dinonaktifkan agar riwayat pesanan tetap utuh.",
-      replyMarkup: { inline_keyboard: [
-        [{ text: "🗑️ Ya, arsipkan produk", callback_data: "prod:delok:" + sku }],
-        [{ text: "Batal", callback_data: "adm:catalog" }]
-      ] }
+      text: screen.text,
+      parseMode: screen.parseMode,
+      replyMarkup: screen.replyMarkup,
+      clearMedia: true
     });
     return;
   }
@@ -1680,12 +1692,12 @@ async function handleTelegramCallback(env, query, ctx = null) {
     const found = await resolveOrderReference(env,reference);
     const r = found?.row;
     if (!r) throw new Error("Pesanan tidak ditemukan");
+    const screen = renderAdminOrderDetailScreen(r, reference);
     await updateTelegramMessage(env, message, {
-      text: "Detail Pesanan\nID: " + r[0] + "\nPelanggan: " + r[4] + " (" + r[3] + ")\nProduk: " + r[5] + "\nJumlah: " + r[6] + "\nTotal: " + rupiah(r[10]) + "\nPembayaran: " + r[11] + "\nStatus: " + r[12],
-      replyMarkup: { inline_keyboard: [
-        [{ text: "🔄 Perbarui Status", callback_data: "st:" + reference }],
-        [{ text: "⬅️ Pesanan Terbaru", callback_data: "adm:recent" }]
-      ] }
+      text: screen.text,
+      parseMode: screen.parseMode,
+      replyMarkup: screen.replyMarkup,
+      clearMedia: true
     });
     return;
   }
@@ -1852,35 +1864,24 @@ async function showAdminCatalogPage(env, message, page = 0) {
   const rows = await readCatalogRows(env);
   const products = rows.filter(r => r[0]);
   if (!products.length) {
-    await updateTelegramMessage(env, message, { text: "Katalog masih kosong.", replyMarkup: adminCatalogKeyboard() });
+    await updateTelegramMessage(env, message, {
+      text: "🛍️ <b>KATALOG ADMIN</b>\n━━━━━━━━━━━━━━━━━━━━━━\n<i>Katalog masih kosong.</i>",
+      parseMode: "HTML",
+      replyMarkup: adminCatalogKeyboard(),
+      clearMedia: true
+    });
     return;
   }
   const pageCount = products.length;
   const current = Math.max(0, Math.min(pageCount - 1, Number.isInteger(page) ? page : 0));
   const p = products[current];
-  const sku = String(p[0]).trim();
-  const caption = [
-    "📦 Katalog Admin (" + (current + 1) + "/" + pageCount + ")",
-    String(p[1] || sku) + " (" + sku + ")",
-    "Harga: " + rupiah(p[2]),
-    "Stok: " + (p[3] === "" ? "Tidak dibatasi" : p[3]),
-    "Status: " + (p[4] ?? "TRUE"),
-    p[6] ? String(p[6]) : ""
-  ].filter(Boolean).join("\n");
-  const nav = [];
-  if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "adm:catalog:" + (current - 1) });
-  if (current < pageCount - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "adm:catalog:" + (current + 1) });
-  const keyboard = { inline_keyboard: [
-    [{ text: "✏️ Atur Produk", callback_data: "prod:edit:" + sku }, { text: "🗑️ Hapus", callback_data: "prod:delete:" + sku }],
-    ...(nav.length ? [nav] : []),
-    [{ text: "➕ Tambah Produk", callback_data: "adm:addproduct" }],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
+  const screen = renderAdminCatalogItemScreen({ row: p, current, total: pageCount });
   await updateTelegramMessage(env, message, {
-    text: caption,
+    text: screen.text,
+    parseMode: screen.parseMode,
     photo: p[5] && /^https:\/\//i.test(String(p[5])) ? String(p[5]) : null,
     clearMedia: !(p[5] && /^https:\/\//i.test(String(p[5]))),
-    replyMarkup: keyboard
+    replyMarkup: screen.replyMarkup
   });
 }
 
@@ -3167,16 +3168,12 @@ async function showPaymentRequestsPage(env, message, page = 0) {
   const pages = Math.max(1, Math.ceil(pending.length / pageSize));
   const current = Math.max(0, Math.min(pages - 1, Number.isInteger(page) ? page : 0));
   const subset = pending.slice(current * pageSize, current * pageSize + pageSize);
-  const lines = subset.map(x => String(x.r[0]) + " · " + String(x.r[4] || "Pelanggan") + " · " + rupiah(x.r[10]) + " · " + (x.r[14] ? "Bukti tersedia" : "Belum ada bukti"));
-  const keyboard = subset.map(x => [{ text: String(x.r[0]) + (x.r[14] ? " 📎" : " ⏳"), callback_data: "payview:" + x.reference }]);
-  const nav = [];
-  if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "paylist:" + (current - 1) });
-  if (current < pages - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "paylist:" + (current + 1) });
-  if (nav.length) keyboard.push(nav);
-  keyboard.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
+  const screen = renderAdminPaymentQueueScreen({ subset, current, pages, total: pending.length });
   await updateTelegramMessage(env, message, {
-    text: pending.length ? "💳 PERMINTAAN VERIFIKASI PEMBAYARAN\nHalaman " + (current + 1) + "/" + pages + "\n\n" + lines.join("\n") : "✅ Tidak ada permintaan verifikasi pembayaran yang menunggu.",
-    replyMarkup: { inline_keyboard: keyboard }, clearMedia: true
+    text: screen.text,
+    parseMode: screen.parseMode,
+    replyMarkup: screen.replyMarkup,
+    clearMedia: true
   });
 }
 async function showPaymentRequestDetail(env, message, reference) {
@@ -3189,49 +3186,17 @@ async function showPaymentRequestDetail(env, message, reference) {
   if (String(r[11] || "").toUpperCase() === "QRIS" && env.DB) {
     try { qrisPayment = await getQrisPaymentForOrder(env,String(r[0])); } catch {}
   }
-  const details = [
-    "🔎 VERIFIKASI PEMBAYARAN",
-    "Pesanan: " + r[0],
-    "Pelanggan: " + (r[4] || "-") + " (" + (r[3] || "-") + ")",
-    "Produk: " + (r[5] || "-"),
-    "Jumlah: " + (r[6] || 0),
-    "Total pesanan: " + rupiah(r[10]),
-    "Metode: " + (r[11] || "-"),
-    "Bukti: " + (r[14] ? (r[15] === "PHOTO" ? "Foto tersedia" : "Dokumen tersedia") : "Tidak diunggah")
-  ];
-  if (qrisPayment) {
-    details.push("Nominal QRIS: " + rupiah(qrisPayment.expected_amount));
-    details.push("Kode unik: " + String(qrisPayment.unique_code).padStart(3,"0"));
-    details.push("Status OCR: " + String(qrisPayment.ocr_status || "NOT_RUN"));
-    details.push("Nominal terbaca: " + (qrisPayment.ocr_amount == null ? "Tidak terbaca" : rupiah(qrisPayment.ocr_amount)));
-    details.push("Merchant terbaca: " + (qrisPayment.ocr_merchant_name || "Tidak terbaca"));
-    details.push("Waktu transaksi: " + (qrisPayment.ocr_transaction_at || "Tidak terbaca"));
-    details.push("Referensi transaksi: " + (qrisPayment.ocr_reference || "Tidak terbaca"));
-    details.push("");
-    const qrisMismatch = String(qrisPayment.ocr_status || "").toUpperCase() === "MISMATCH"
-      || String(qrisPayment.status || "").toUpperCase() === "OCR_MISMATCH"
-      || (qrisPayment.ocr_amount !== null && qrisPayment.ocr_amount !== undefined
-        && Number(qrisPayment.ocr_amount) !== Number(qrisPayment.expected_amount));
-    details.push(qrisMismatch
-      ? "⛔ BUKTI / NOMINAL TERDETEKSI TIDAK COCOK. Persetujuan dikunci; minta pelanggan mengunggah bukti yang benar."
-      : "⚠️ OCR hanya membaca isi screenshot. WAJIB cocokkan mutasi/riwayat transaksi merchant sebelum menyetujui. OCR bukan konfirmasi settlement.");
-  }
-  const qrisMismatch = qrisPayment && (
+  const qrisMismatch = Boolean(qrisPayment && (
     String(qrisPayment.ocr_status || "").toUpperCase() === "MISMATCH"
     || String(qrisPayment.status || "").toUpperCase() === "OCR_MISMATCH"
     || (qrisPayment.ocr_amount !== null && qrisPayment.ocr_amount !== undefined
       && Number(qrisPayment.ocr_amount) !== Number(qrisPayment.expected_amount))
-  );
-  const keyboard = { inline_keyboard: [
-    ...(qrisMismatch ? [] : [[{ text: "✅ Setujui Pembayaran", callback_data: "payapprove:" + ref }]]),
-    [{ text: "❌ Tolak / Minta Ulang", callback_data: "payreject:" + ref }],
-    [{ text: "⬅️ Daftar Verifikasi", callback_data: "adm:paymentchecks" }]
-  ] };
-  const text = details.join("\n");
+  ));
+  const screen = renderAdminPaymentDetailScreen({ row: r, reference: ref, qrisPayment, qrisMismatch });
   if (r[14] && r[15] === "PHOTO") {
-    await updateTelegramMessage(env, message, { text, photo: String(r[14]), replyMarkup: keyboard });
+    await updateTelegramMessage(env, message, { text: screen.text, parseMode: screen.parseMode, photo: String(r[14]), replyMarkup: screen.replyMarkup });
   } else {
-    await updateTelegramMessage(env, message, { text, replyMarkup: keyboard, clearMedia: true });
+    await updateTelegramMessage(env, message, { text: screen.text, parseMode: screen.parseMode, replyMarkup: screen.replyMarkup, clearMedia: true });
     if (r[14] && r[15] === "DOCUMENT") await sendTelegramDocumentById(env, message.chat.id, String(r[14]), "Bukti pembayaran " + r[0]);
   }
 }
@@ -3446,15 +3411,12 @@ async function showPickupQueuePage(env, message, page = 0) {
   const pageSize = 8; const pages = Math.max(1, Math.ceil(queue.length / pageSize));
   const current = Math.max(0, Math.min(pages - 1, Number.isInteger(page) ? page : 0));
   const subset = queue.slice(current * pageSize, current * pageSize + pageSize);
-  const buttons = subset.map(x => [{ text: String(x.r[0]) + " · " + String(x.r[4] || "Pelanggan"), callback_data: "pickupview:" + x.reference }]);
-  const nav = [];
-  if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "picklist:" + (current - 1) });
-  if (current < pages - 1) nav.push({ text: "Berikutnya ▶️", callback_data: "picklist:" + (current + 1) });
-  if (nav.length) buttons.push(nav);
-  buttons.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
+  const screen = renderAdminPickupQueueScreen({ subset, current, pages, total: queue.length });
   await updateTelegramMessage(env, message, {
-    text: queue.length ? "📦 PESANAN SUDAH DIBAYAR — BELUM DIAMBIL\nHalaman " + (current + 1) + "/" + pages + "\nTotal antrean: " + queue.length : "✅ Tidak ada pesanan lunas yang menunggu pengambilan.",
-    replyMarkup: { inline_keyboard: buttons }, clearMedia: true
+    text: screen.text,
+    parseMode: screen.parseMode,
+    replyMarkup: screen.replyMarkup,
+    clearMedia: true
   });
 }
 async function showPickupOrderDetail(env, message, reference) {
@@ -3466,21 +3428,12 @@ async function showPickupOrderDetail(env, message, reference) {
   }
   const ticketUrl = await createPickupTicketUrl(env, String(r[0]), String(r[18]));
   const picked = String(r[19] || "") === "DIAMBIL";
-  const buttons = picked ? [] : [[{ text: "✅ Tandai Sudah Diambil", callback_data: "pickupdone:" + String(reference) }]];
-  buttons.push([{ text: "🔗 Buka Verifikasi QR", url: ticketUrl }]);
-  buttons.push([{ text: "⬅️ Antrean Pengambilan", callback_data: "adm:pickup" }]);
+  const screen = renderAdminPickupDetailScreen({ row: r, reference, ticketUrl, picked });
   await updateTelegramMessage(env, message, {
-    text: [
-      "📦 DETAIL PENGAMBILAN",
-      "Pesanan: " + r[0],
-      "Pelanggan: " + (r[4] || "-") + " (" + (r[3] || "-") + ")",
-      "Produk: " + (r[5] || "-"),
-      "Jumlah: " + r[6],
-      "Total: " + rupiah(r[10]),
-      "Kode Resi: " + r[18],
-      "Status: " + (picked ? "SUDAH DIAMBIL" : "BELUM DIAMBIL")
-    ].join("\n"),
-    replyMarkup: { inline_keyboard: buttons }, clearMedia: true
+    text: screen.text,
+    parseMode: screen.parseMode,
+    replyMarkup: screen.replyMarkup,
+    clearMedia: true
   });
 }
 async function markOrderPickedUp(env, reference, actor = "telegram-admin") {
@@ -3706,7 +3659,8 @@ function formatHandoffDate(value) {
 async function showTelegramHandoffQueue(env, message, adminChatId, notice = "") {
   if (!(await messagingHandoffSchemaReady(env))) {
     await updateTelegramMessage(env, message, {
-      text: "⚠️ Antrean bantuan belum tersedia. Periksa migrasi D1 Messaging Core.",
+      text: "⚠️ <b>ANTREAN BANTUAN BELUM TERSEDIA</b>\n━━━━━━━━━━━━━━━━━━━━━━\nPeriksa migrasi D1 Messaging Core.",
+      parseMode: "HTML",
       replyMarkup: { inline_keyboard: [[{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]] },
       clearMedia: true
     });
@@ -3716,10 +3670,11 @@ async function showTelegramHandoffQueue(env, message, adminChatId, notice = "") 
   const items = await listMessagingHandoffs(env, 20, "telegram");
   if (!items.length) {
     await updateTelegramMessage(env, message, {
-      text: (notice ? notice + "\n\n" : "") +
-        "🆘 ANTREAN BANTUAN PELANGGAN\n\n✅ Tidak ada permintaan bantuan yang menunggu atau sedang ditangani.",
+      text: (notice ? `<blockquote>${escapeHtml(notice)}</blockquote>\n\n` : "") +
+        "🆘 <b>ANTREAN BANTUAN PELANGGAN</b>\n━━━━━━━━━━━━━━━━━━━━━━\n✅ <i>Tidak ada permintaan bantuan yang menunggu atau sedang ditangani.</i>",
+      parseMode: "HTML",
       replyMarkup: { inline_keyboard: [
-        [{ text: "🔄 Perbarui", callback_data: "adm:handoff" }],
+        [{ text: "🔄 Perbarui", callback_data: "adm:handoff", style: "primary" }],
         [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
       ] },
       clearMedia: true
@@ -3733,32 +3688,29 @@ async function showTelegramHandoffQueue(env, message, adminChatId, notice = "") 
     const status = item.status === "OPEN" ? "🆕 MENUNGGU ADMIN" :
       claimedBy === String(adminChatId) ? "🟡 ANDA MENANGANI" : "🔒 SEDANG DITANGANI";
     const owner = item.status === "CLAIMED"
-      ? "\nAdmin: " + (claimedBy === String(adminChatId) ? "Anda" : claimedBy)
+      ? "\n• Admin: " + escapeHtml(claimedBy === String(adminChatId) ? "Anda" : claimedBy)
       : "";
     if (item.status === "OPEN") {
       const row = [];
       const take = telegramHandoffCallback("take", item.handoff_id);
       const decline = telegramHandoffCallback("decline", item.handoff_id);
-      if (take) row.push({ text: "✅ Terima #" + (index + 1), callback_data: take });
-      if (decline) row.push({ text: "❌ Tolak #" + (index + 1), callback_data: decline });
+      if (take) row.push({ text: "✅ Terima #" + (index + 1), callback_data: take, style: "success" });
+      if (decline) row.push({ text: "❌ Tolak #" + (index + 1), callback_data: decline, style: "danger" });
       if (row.length) keyboard.push(row);
     } else if (claimedBy === String(adminChatId)) {
       const done = telegramHandoffCallback("done", item.handoff_id);
-      if (done) keyboard.push([{ text: "✅ Selesaikan #" + (index + 1), callback_data: done }]);
+      if (done) keyboard.push([{ text: "✅ Selesaikan #" + (index + 1), callback_data: done, style: "success" }]);
     }
-    return (index + 1) + ". " + String(item.customer_name || "Pelanggan") +
-      "\nStatus: " + status +
-      "\nKanal: " + item.source_channel +
-      "\nWaktu: " + formatHandoffDate(item.created_at) +
-      owner;
+    return `<b>${index + 1}. ${escapeHtml(String(item.customer_name || "Pelanggan"))}</b>\n• Status: ${status}\n• Kanal: <code>${escapeHtml(item.source_channel)}</code>\n• Waktu: ${escapeHtml(formatHandoffDate(item.created_at))}` + owner;
   });
 
-  keyboard.push([{ text: "🔄 Perbarui antrean", callback_data: "adm:handoff" }]);
+  keyboard.push([{ text: "🔄 Perbarui antrean", callback_data: "adm:handoff", style: "primary" }]);
   keyboard.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
   await updateTelegramMessage(env, message, {
-    text: (notice ? notice + "\n\n" : "") +
-      "🆘 ANTREAN BANTUAN PELANGGAN\n" +
-      "Pilih tindakan pada setiap permintaan.\n\n" + cards.join("\n\n"),
+    text: (notice ? `<blockquote>${escapeHtml(notice)}</blockquote>\n\n` : "") +
+      "🆘 <b>ANTREAN BANTUAN PELANGGAN</b>\n━━━━━━━━━━━━━━━━━━━━━━\n" +
+      "Pilih tindakan pada setiap permintaan:\n\n" + cards.join("\n\n"),
+    parseMode: "HTML",
     replyMarkup: { inline_keyboard: keyboard },
     clearMedia: true
   });
