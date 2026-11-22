@@ -1,4 +1,12 @@
 import { parseCatalogProduct, rupiah } from "./utils.mjs";
+import {
+  adminHomeKeyboard,
+  adminOrdersInlineKeyboard,
+  adminProductsInlineKeyboard,
+  adminReportsInlineKeyboard,
+  adminSupportInlineKeyboard,
+  renderAdminHomeScreen
+} from "./ui/admin-screens.mjs";
 
 function customerMenuText() {
   return [
@@ -8,7 +16,7 @@ function customerMenuText() {
   ].join("\n");
 }
 function adminMenuText() {
-  return "🛠️ SEITON.ID — PANEL ADMIN\nPilih area kerja. Menu dikelompokkan agar lebih ringkas.";
+  return renderAdminHomeScreen().text;
 }
 function customerMenuKeyboard() {
   return { inline_keyboard: [
@@ -23,64 +31,27 @@ function customerMenuKeyboard() {
   ] };
 }
 function adminMenuKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "🧾 Pesanan", callback_data: "adm:orders" },
-      { text: "🛍️ Produk", callback_data: "adm:products" }
-    ],
-    [
-      { text: "📊 Laporan & Dashboard", callback_data: "adm:reports" },
-      { text: "💬 Bantuan Pelanggan", callback_data: "adm:support" }
-    ],
-    [
-      { text: "💳 Verifikasi Pembayaran", callback_data: "adm:paymentchecks" },
-      { text: "🎟️ Pengambilan", callback_data: "adm:pickup" }
-    ],
-    [{ text: "🛒 Tampilan Pelanggan", callback_data: "nav:home" }]
-  ] };
+  return adminHomeKeyboard();
 }
 function adminOrdersKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "📋 Pesanan Terbaru", callback_data: "adm:recent" },
-      { text: "🔄 Ubah Status", callback_data: "adm:statuslist" }
-    ],
-    [
-      { text: "💳 Verifikasi Bayar", callback_data: "adm:paymentchecks" },
-      { text: "🎟️ Antrean Ambil", callback_data: "adm:pickup" }
-    ],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
+  return adminOrdersInlineKeyboard();
 }
 function adminProductsKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "🗂️ Kelola Katalog", callback_data: "adm:catalog" },
-      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" }
-    ],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
+  return adminProductsInlineKeyboard();
 }
 function adminReportsKeyboard() {
-  return { inline_keyboard: [
-    [
-      { text: "📊 Ringkasan Penjualan", callback_data: "adm:report" },
-      { text: "📈 Dashboard", callback_data: "adm:dashboard" }
-    ],
-    [{ text: "📥 Unduh Laporan", callback_data: "adm:exports" }],
-    [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
-  ] };
+  return adminReportsInlineKeyboard();
 }
 function adminSupportKeyboard() {
   return { inline_keyboard: [
-    [{ text: "🆘 Antrean Bantuan Pelanggan", callback_data: "adm:handoff" }],
+    [{ text: "🆘 Antrean Bantuan Pelanggan", callback_data: "adm:handoff", style: "primary" }],
     [{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]
   ] };
 }
 function adminCatalogKeyboard() {
   return { inline_keyboard: [
     [
-      { text: "➕ Tambah Produk", callback_data: "adm:addproduct" },
+      { text: "➕ Tambah Produk", callback_data: "adm:addproduct", style: "success" },
       { text: "⬅️ Menu Admin", callback_data: "adm:products" }
     ]
   ] };

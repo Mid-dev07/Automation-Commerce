@@ -55,11 +55,12 @@ async function sendTelegramPhoto(env, chatId, photo, caption, replyMarkup = null
 async function sendSeitonWelcome(env, chatId, isAdminUser = false) {
   const text = isAdminUser ? adminMenuText() : customerMenuText();
   const keyboard = isAdminUser ? adminMenuKeyboard() : customerMenuKeyboard();
+  const opts = isAdminUser ? { parseMode: "HTML" } : {};
   try {
-    return await sendTelegramPhoto(env, chatId, SEITON_LOGO_URL, text, keyboard);
+    return await sendTelegramPhoto(env, chatId, SEITON_LOGO_URL, text, keyboard, opts);
   } catch (error) {
     console.warn(JSON.stringify({ level: "warn", event: "telegram_brand_image_fallback", message: String(error?.message || "IMAGE_SEND_FAILED").slice(0, 100) }));
-    return sendTelegram(env, chatId, text, keyboard);
+    return sendTelegram(env, chatId, text, keyboard, opts);
   }
 }
 

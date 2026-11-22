@@ -1,5 +1,6 @@
 import { TZ, PAID_ORDER_STATUSES, CANCELLED_ORDER_STATUSES, parseCatalogProduct, rupiah } from "./utils.mjs";
 import { readSheet } from "./sheets-client.mjs";
+import { renderAdminSalesReportHtml } from "./ui/admin-screens.mjs";
 
 function orderRowsToObjects(rows) {
   return rows.filter(r => r[0]).map(r => ({
@@ -99,18 +100,31 @@ function isValidReportDate(value) {
   return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0,10) === value;
 }
 
-async function buildAdminReport(env) {
-  const rows = await readSheet(env, "Pesanan!A2:M");
+async function buildAdminReport(env, d1Orders = null) {
+  let orders;
+  if (Array.isArray(d1Orders)) {
+    orders = d1Orders.map((row) => ({
+      orderId: String(row.order_id || ""),
+      createdAt: String(row.created_at || ""),
+      product: String(row.product || "Tidak diketahui"),
+      quantity: Number(row.quantity || 0),
+      total: Number(row.total || 0),
+      payment: String(row.payment_method || "Lainnya"),
+      status: String(row.status || "")
+    })).filter((row) => row.orderId);
+  } else {
+    const rows = await readSheet(env, "Pesanan!A2:M");
+    orders = rows.map(row => ({
+      orderId: String(row[0] || ""),
+      createdAt: String(row[1] || ""),
+      product: String(row[5] || "Tidak diketahui"),
+      quantity: Number(row[6] || 0),
+      total: Number(row[10] || 0),
+      payment: String(row[11] || "Lainnya"),
+      status: String(row[12] || "")
+    })).filter(row => row.orderId);
+  }
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-  const orders = rows.map(row => ({
-    orderId: String(row[0] || ""),
-    createdAt: String(row[1] || ""),
-    product: String(row[5] || "Tidak diketahui"),
-    quantity: Number(row[6] || 0),
-    total: Number(row[10] || 0),
-    payment: String(row[11] || "Lainnya"),
-    status: String(row[12] || "")
-  })).filter(row => row.orderId);
   const paid = orders.filter(o => PAID_ORDER_STATUSES.includes(o.status.toUpperCase()));
   const todays = paid.filter(o => {
     const date = new Date(o.createdAt);
@@ -126,31 +140,18 @@ async function buildAdminReport(env) {
   }
   const best = [...topProducts.entries()].sort((a,b) => b[1] - a[1])[0];
   const target = Math.max(0, Number(env.TARGET_OMSET_HARIAN || 0));
-  const pct = target > 0 ? Math.min(100, Math.floor(todayRevenue / target * 100)) : 0;
-  const filled = Math.round(pct / 10);
-  const bar = "▓".repeat(filled) + "░".repeat(10 - filled);
   const paymentTotals = {};
   for (const o of paid) paymentTotals[o.payment] = (paymentTotals[o.payment] || 0) + o.total;
-  return [
-    "📊 *REKAP PENJUALAN SEITON.ID*",
-    `🗓️ ${new Intl.DateTimeFormat("id-ID", { dateStyle: "full", timeZone: TZ }).format(new Date())}`,
-    "",
-    `💰 *Total Omset:* ${rupiah(revenue)}`,
-    `📦 *Total Order Dibayar:* ${paid.length.toLocaleString("id-ID")}`,
-    `🧾 *Omset Hari Ini:* ${rupiah(todayRevenue)}`,
-    `🛍️ *Order Hari Ini:* ${todays.length.toLocaleString("id-ID")}`,
-    `🏆 *Produk Terlaris:* ${best ? `${best[0]} (${best[1]} pcs)` : "Belum ada data"}`,
-    "",
-    "💳 *Distribusi Pembayaran*",
-    ...Object.entries(paymentTotals).map(([key, value]) => `• ${key}: ${rupiah(value)}`),
-    ...(Object.keys(paymentTotals).length ? [] : ["• Belum ada transaksi dibayar"]),
-    "",
-    `🎯 *Target Harian:* ${target ? rupiah(target) : "Belum diatur"}`,
-    `📈 [${bar}] ${pct}% Target`,
-    "",
-    "ℹ️ Omset menghitung transaksi berstatus DIBAYAR/SELESAI/PAID/COMPLETED.",
-    "_Powered by Seiton.id_"
-  ].join("\n");
+  return renderAdminSalesReportHtml({
+    dateLabel: new Intl.DateTimeFormat("id-ID", { dateStyle: "full", timeZone: TZ }).format(new Date()),
+    revenue,
+    paidCount: paid.length,
+    todayRevenue,
+    todayCount: todays.length,
+    bestProduct: best || null,
+    paymentTotals,
+    target
+  });
 }
 
 
