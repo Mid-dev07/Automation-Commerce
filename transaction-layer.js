@@ -635,6 +635,73 @@ export async function requestVerificationTransactional(env,id,userId) {
 export async function approvePaymentTransactional(env,id,actor) {
   return orderOperation(env,id,"approvePayment",actor);
 }
+async function approvePaymentByMutationD1(db,id,mutationInfo={},actor="qris-mutation") {
+  await requireReady(db);
+  const o=await getOrderD1(db,id);
+  if(!o)throw new Error("Pesanan tidak ditemukan.");
+  const method=String(o.payment_method||"").toUpperCase();
+  if(method!=="QRIS")throw new Error("Auto-approval mutasi hanya berlaku untuk pembayaran QRIS.");
+  if(CANCELLED_STATUSES.has(String(o.status).toUpperCase()))throw new Error("Pesanan sudah dibatalkan.");
+  if (String(o.payment_confirmation_status).toUpperCase() === "DISETUJUI" && o.receipt_code) {
+    return { ...o, alreadyApproved: true };
+  }
+  const payment=await db.prepare(
+    "SELECT status,base_amount,unique_code,expected_amount,expires_at FROM qris_payments WHERE order_id=? LIMIT 1"
+  ).bind(id).first();
+  if(!payment)throw new Error("Tagihan QRIS untuk pesanan ini tidak ditemukan.");
+  const base=Number(payment.base_amount),suffix=Number(payment.unique_code),expected=Number(payment.expected_amount);
+  const matchedAmount=Number(mutationInfo?.amount);
+  if(!Number.isSafeInteger(base)||base!==Number(o.total)||!Number.isInteger(suffix)||suffix<1||suffix>999
+    ||!Number.isSafeInteger(expected)||expected!==base+suffix||matchedAmount!==expected) {
+    throw new Error("Nominal mutasi tidak cocok eksak dengan tagihan QRIS.");
+  }
+  if(String(payment.status||"").toUpperCase()==="PAID") {
+    throw new Error("QRIS sudah tercatat lunas, tetapi status pesanan belum sinkron.");
+  }
+  const expiresMs=Date.parse(String(payment.expires_at||""));
+  if(Number.isFinite(expiresMs)&&expiresMs<Date.now()) {
+    throw new Error("Tagihan QRIS sudah kedaluwarsa.");
+  }
+
+  const at=nowJakarta(), code="SEI-"+dateStamp(at)+"-"+crypto.randomUUID().slice(0,6).toUpperCase();
+  const sourceKey="approve:"+code;
+  const eventPayload=JSON.stringify({
+    via: "mutation_ingest",
+    mutation_id: clean(mutationInfo?.mutationId, 80),
+    source_app: clean(mutationInfo?.sourceApp, 120),
+    matched_amount: matchedAmount
+  });
+  const results=await db.batch([
+    db.prepare(`UPDATE orders SET status='DIBAYAR',payment_confirmation_status='DISETUJUI',
+      payment_confirmed_at=?,receipt_code=?,pickup_status='BELUM_DIAMBIL',updated_at=?
+      WHERE order_id=? AND COALESCE(payment_confirmation_status,'')<>'DISETUJUI'
+        AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')
+        AND EXISTS (
+          SELECT 1 FROM qris_payments qp WHERE qp.order_id=orders.order_id
+            AND qp.status<>'PAID' AND qp.base_amount=orders.total
+            AND qp.expected_amount=qp.base_amount+qp.unique_code
+            AND qp.expected_amount=?
+        )`).bind(at,code,at,id,matchedAmount),
+    db.prepare(`UPDATE qris_payments SET status='PAID',raw_provider_status='MUTATION_MATCHED',
+      reviewed_by=?,reviewed_at=?,paid_at=?,updated_at=?
+      WHERE order_id=? AND status<>'PAID' AND base_amount=?
+        AND expected_amount=base_amount+unique_code AND expected_amount=?
+        AND EXISTS (SELECT 1 FROM orders o WHERE o.order_id=qris_payments.order_id
+          AND o.payment_confirmation_status='DISETUJUI' AND o.receipt_code=?)`)
+      .bind(clean(actor,100),at,at,at,id,Number(o.total),matchedAmount,code),
+    db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
+      SELECT order_id,'PAYMENT_APPROVED',?,'DIBAYAR',?,?,?,? FROM orders
+      WHERE order_id=? AND receipt_code=?`).bind(o.status,clean(actor,128),sourceKey,eventPayload,at,id,code),
+    adminActivityAuditStatement(db,actor,"PAYMENT_APPROVED",id,{from_status:String(o.status||""),to_status:"DIBAYAR",transition_type:"order_status",via:"mutation_ingest"},at,sourceKey),
+    sheetMirrorStatement(db,id,at)
+  ].filter(Boolean));
+  checkChanges(results[0],"Pembayaran sudah diproses atau tidak memenuhi syarat auto-approval.");
+  checkChanges(results[1],"Pembaruan ledger QRIS tidak berhasil.");
+  return getOrderD1(db,id);
+}
+export async function approvePaymentByMutationTransactional(env,id,mutationInfo,actor="qris-mutation") {
+  return orderOperation(env,id,"approvePaymentByMutation",mutationInfo,actor);
+}
 export async function rejectPaymentTransactional(env,id,actor) {
   return orderOperation(env,id,"rejectPayment",actor);
 }
@@ -760,6 +827,13 @@ export class OrderCoordinator extends DurableObject {
     return this.enqueue(async()=>{
       const result=await approvePaymentD1(this.env.DB,id,actor);
       this.audit("APPROVE_PAYMENT",id,result.receipt_code);
+      return result;
+    });
+  }
+  async approvePaymentByMutation(id,mutationInfo,actor) {
+    return this.enqueue(async()=>{
+      const result=await approvePaymentByMutationD1(this.env.DB,id,mutationInfo,actor);
+      this.audit("APPROVE_PAYMENT_MUTATION",id,result.receipt_code);
       return result;
     });
   }

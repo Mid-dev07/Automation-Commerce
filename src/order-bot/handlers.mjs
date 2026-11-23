@@ -3,7 +3,7 @@ import {
   findOrderTransactional, findOrderByLegacyRow, listOrdersTransactional,
   listProductsTransactional, findProductTransactional, saveProductTransactional,
   deleteProductTransactional, setLegacyRowTransactional, updateProofTransactional,
-  requestVerificationTransactional, approvePaymentTransactional, rejectPaymentTransactional,
+  requestVerificationTransactional, approvePaymentTransactional, approvePaymentByMutationTransactional, rejectPaymentTransactional,
   setOrderStatusTransactional, markPickedUpTransactional, listDashboardDataTransactional,
   orderToSheetRow, OrderCoordinator, claimSheetMirrorOutbox,
   completeSheetMirrorOutbox, failSheetMirrorOutbox
@@ -41,6 +41,19 @@ import {
   declineMessagingHandoff,
   queueMessagingHandoffReply
 } from "../../messaging-core.mjs";
+import {
+  parseMutationNotification,
+  buildMutationDedupeKey,
+  verifyMutationDeviceToken,
+  sha256Hex
+} from "./payment-mutations.mjs";
+import {
+  validateWebhookTargetUrl,
+  buildPaymentWebhookPayload,
+  enqueuePaymentWebhookDeliveries,
+  dispatchPaymentWebhookDeliveries,
+  deliverSingleWebhook
+} from "./payment-webhooks.mjs";
 import {
   SHEETS_BASE, GOOGLE_TOKEN_URL, TELEGRAM_API, SEITON_LOGO_URL, TZ, HEADERS,
   PAID_ORDER_STATUSES, CANCELLED_ORDER_STATUSES, PAYMENT_WORKFLOW_HEADERS,
@@ -3906,6 +3919,298 @@ async function dispatchTelegramMessagingOutbox(env, limit = 20) {
 }
 
 
+async function handleMutationIngest(request, env) {
+  const token = request.headers.get("X-Device-Token") || "";
+  const auth = await verifyMutationDeviceToken(env, token);
+  if (!auth.ok) {
+    return json({ ok: false, error: "Device token tidak valid." }, 401);
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ ok: false, error: "Payload JSON tidak valid." }, 400);
+  }
+
+  const nowIso = new Date().toISOString();
+  if (env?.DB && auth.deviceId !== "env-device") {
+    try {
+      await env.DB.prepare("UPDATE payment_listener_devices SET last_seen_at=? WHERE device_id=?")
+        .bind(nowIso, auth.deviceId).run();
+    } catch {
+      // Best-effort heartbeat update.
+    }
+  }
+
+  const parsed = parseMutationNotification(body);
+  if (auth.allowedApps?.length && parsed.sourceApp && !auth.allowedApps.includes(parsed.sourceApp)) {
+    return json({ ok: true, status: "IGNORED", reason: "APP_NOT_ALLOWED" });
+  }
+
+  const dedupeKey = await buildMutationDedupeKey(parsed);
+  const mutationId = "mut_" + crypto.randomUUID().replace(/-/g, "").slice(0, 20);
+  const initialStatus = parsed.accepted ? "UNMATCHED" : "IGNORED";
+
+  if (env?.DB) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO payment_mutations
+          (mutation_id, device_id, source_app, title, body, extracted_amount, dedupe_key, match_status, match_note, received_at, processed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        mutationId,
+        auth.deviceId,
+        parsed.sourceApp || "unknown",
+        parsed.title,
+        parsed.body,
+        parsed.amount,
+        dedupeKey,
+        initialStatus,
+        parsed.accepted ? "" : parsed.reason,
+        nowIso,
+        parsed.accepted ? "" : nowIso
+      ).run();
+    } catch (error) {
+      if (String(error?.message || "").toLowerCase().includes("unique")) {
+        return json({ ok: true, status: "DUPLICATE" });
+      }
+      return json({ ok: false, error: "Gagal mencatat mutasi ke database." }, 500);
+    }
+  }
+
+  if (!parsed.accepted) {
+    return json({ ok: true, status: "IGNORED", reason: parsed.reason, mutation_id: mutationId });
+  }
+
+  const state = await transactionReadiness(env);
+  if (!state.ready) {
+    return json({ ok: false, error: "Lapisan transaksi D1 belum siap." }, 503);
+  }
+
+  const candidate = await env.DB.prepare(
+    `SELECT qp.order_id, qp.provider_order_id, qp.base_amount, qp.unique_code, qp.expected_amount, qp.expires_at
+     FROM qris_payments qp
+     JOIN orders o ON o.order_id = qp.order_id
+     WHERE qp.expected_amount = ?
+       AND qp.status NOT IN ('PAID', 'FAILED')
+       AND o.status NOT IN ('DIBATALKAN', 'CANCELLED', 'CANCELED')
+       AND COALESCE(o.payment_confirmation_status, '') <> 'DISETUJUI'
+     ORDER BY qp.created_at DESC LIMIT 1`
+  ).bind(parsed.amount).first();
+
+  if (!candidate) {
+    await env.DB.prepare(
+      "UPDATE payment_mutations SET match_status='UNMATCHED', match_note='NO_ACTIVE_ORDER', processed_at=? WHERE mutation_id=?"
+    ).bind(new Date().toISOString(), mutationId).run();
+    return json({ ok: true, status: "UNMATCHED", mutation_id: mutationId, extracted_amount: parsed.amount });
+  }
+
+  const expiresMs = Date.parse(String(candidate.expires_at || ""));
+  if (Number.isFinite(expiresMs) && expiresMs < Date.now()) {
+    await env.DB.prepare(
+      "UPDATE payment_mutations SET match_status='UNMATCHED', matched_order_id=?, match_note='ORDER_EXPIRED', processed_at=? WHERE mutation_id=?"
+    ).bind(String(candidate.order_id), new Date().toISOString(), mutationId).run();
+    return json({ ok: true, status: "UNMATCHED", reason: "ORDER_EXPIRED", mutation_id: mutationId });
+  }
+
+  try {
+    const actor = "qris-mutation:" + auth.deviceId;
+    const approved = await approvePaymentByMutationTransactional(
+      env,
+      String(candidate.order_id),
+      { mutationId, sourceApp: parsed.sourceApp, amount: parsed.amount },
+      actor
+    );
+    await env.DB.prepare(
+      "UPDATE payment_mutations SET match_status='MATCHED', matched_order_id=?, match_note='AUTO_APPROVED', processed_at=? WHERE mutation_id=?"
+    ).bind(String(candidate.order_id), new Date().toISOString(), mutationId).run();
+
+    let receiptSent = false;
+    let webhooksEnqueued = 0;
+    if (!approved.alreadyApproved) {
+      await mirrorTransactionalOrder(env, approved);
+      await Promise.allSettled([
+        cleanupStoredQrisMessage(env, String(approved.order_id)),
+        invalidateStoreUiCaches(env)
+      ]);
+      try {
+        const row = orderToSheetRow(approved);
+        await sendPickupReceipt(env, String(approved.customer_id), row, String(approved.order_id), String(approved.receipt_code));
+        receiptSent = true;
+      } catch (error) {
+        console.error(JSON.stringify({ level: "error", event: "mutation_receipt_delivery", order_id: approved.order_id, message: String(error?.message || error).slice(0, 200) }));
+      }
+      const webhookPayload = buildPaymentWebhookPayload("payment.paid", approved, candidate, parsed);
+      const queued = await enqueuePaymentWebhookDeliveries(env, "payment.paid", webhookPayload);
+      webhooksEnqueued = queued.enqueued;
+      if (queued.enqueued > 0) {
+        await dispatchPaymentWebhookDeliveries(env, 10).catch(() => {});
+      }
+    }
+
+    return json({
+      ok: true,
+      status: "MATCHED",
+      mutation_id: mutationId,
+      order_id: String(approved.order_id),
+      receipt_code: String(approved.receipt_code || ""),
+      already_approved: Boolean(approved.alreadyApproved),
+      receipt_sent: receiptSent,
+      webhooks_enqueued: webhooksEnqueued
+    });
+  } catch (error) {
+    const errMsg = String(error?.message || error).slice(0, 200);
+    await env.DB.prepare(
+      "UPDATE payment_mutations SET match_status='APPROVAL_FAILED', matched_order_id=?, match_note=?, processed_at=? WHERE mutation_id=?"
+    ).bind(String(candidate.order_id), errMsg, new Date().toISOString(), mutationId).run();
+    return json({ ok: false, status: "APPROVAL_FAILED", mutation_id: mutationId, error: errMsg }, 409);
+  }
+}
+
+async function handleAdminMutations(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) {
+    return json({ ok: false, error: "Sesi admin tidak valid atau kedaluwarsa." }, 401);
+  }
+  if (!env?.DB) return json({ ok: false, error: "D1 tidak tersedia." }, 503);
+
+  if (request.method === "GET") {
+    try {
+      const [mutationsRes, devicesRes] = await Promise.all([
+        env.DB.prepare(
+          "SELECT mutation_id, device_id, source_app, title, extracted_amount, match_status, matched_order_id, match_note, received_at, processed_at FROM payment_mutations ORDER BY received_at DESC LIMIT 50"
+        ).all(),
+        env.DB.prepare(
+          "SELECT device_id, label, allowed_apps_json, enabled, last_seen_at, created_at, revoked_at FROM payment_listener_devices ORDER BY created_at DESC LIMIT 20"
+        ).all()
+      ]);
+      return json({ ok: true, mutations: mutationsRes.results || [], devices: devicesRes.results || [] });
+    } catch {
+      return json({ ok: false, error: "Tabel mutasi belum dimigrasi (0015)." }, 503);
+    }
+  }
+
+  let body;
+  try { body = await request.json(); } catch { return json({ ok: false, error: "JSON tidak valid." }, 400); }
+  const action = String(body?.action || "").trim();
+  const nowIso = new Date().toISOString();
+
+  if (action === "create_device") {
+    const label = String(body?.label || "Android Listener").trim().slice(0, 80);
+    const allowedApps = Array.isArray(body?.allowed_apps)
+      ? body.allowed_apps.map(x => String(x || "").trim().toLowerCase()).filter(Boolean).slice(0, 20)
+      : [];
+    const deviceId = "dev_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const rawToken = "dt_" + crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const tokenHash = await sha256Hex(rawToken);
+    await env.DB.prepare(
+      "INSERT INTO payment_listener_devices (device_id, label, token_hash, allowed_apps_json, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)"
+    ).bind(deviceId, label, tokenHash, JSON.stringify(allowedApps), nowIso).run();
+    return json({ ok: true, device_id: deviceId, label, device_token: rawToken }, 201);
+  }
+
+  if (action === "revoke_device") {
+    const deviceId = String(body?.device_id || "").trim();
+    if (!deviceId) return json({ ok: false, error: "device_id wajib diisi." }, 400);
+    await env.DB.prepare(
+      "UPDATE payment_listener_devices SET enabled=0, revoked_at=? WHERE device_id=?"
+    ).bind(nowIso, deviceId).run();
+    return json({ ok: true, revoked: deviceId });
+  }
+
+  return json({ ok: false, error: "Aksi tidak dikenal." }, 400);
+}
+
+async function handleAdminWebhooks(request, env) {
+  if (!(await verifyDashboardAccess(request, env))) {
+    return json({ ok: false, error: "Sesi admin tidak valid atau kedaluwarsa." }, 401);
+  }
+  if (!env?.DB) return json({ ok: false, error: "D1 tidak tersedia." }, 503);
+
+  if (request.method === "GET") {
+    try {
+      const [endpointsRes, deliveriesRes] = await Promise.all([
+        env.DB.prepare(
+          "SELECT endpoint_id, name, target_url, events_json, enabled, created_at, updated_at FROM payment_webhook_endpoints ORDER BY created_at DESC LIMIT 20"
+        ).all(),
+        env.DB.prepare(
+          "SELECT delivery_id, endpoint_id, order_id, event_type, target_url, status, attempts, max_attempts, last_http_status, last_error, created_at, delivered_at FROM payment_webhook_deliveries ORDER BY created_at DESC LIMIT 30"
+        ).all()
+      ]);
+      return json({ ok: true, endpoints: endpointsRes.results || [], deliveries: deliveriesRes.results || [] });
+    } catch {
+      return json({ ok: false, error: "Tabel webhook belum dimigrasi (0015)." }, 503);
+    }
+  }
+
+  let body;
+  try { body = await request.json(); } catch { return json({ ok: false, error: "JSON tidak valid." }, 400); }
+  const action = String(body?.action || "").trim();
+  const nowIso = new Date().toISOString();
+
+  if (action === "save") {
+    const check = validateWebhookTargetUrl(body?.target_url);
+    if (!check.ok) return json({ ok: false, error: check.error }, 400);
+    const name = String(body?.name || "Primary Webhook").trim().slice(0, 80);
+    const enabled = body?.enabled === false ? 0 : 1;
+    const events = Array.isArray(body?.events) && body.events.length
+      ? body.events.map(e => String(e || "").trim()).filter(Boolean).slice(0, 10)
+      : ["payment.paid"];
+    const existingId = String(body?.endpoint_id || "").trim();
+    if (existingId) {
+      await env.DB.prepare(
+        "UPDATE payment_webhook_endpoints SET name=?, target_url=?, events_json=?, enabled=?, updated_at=? WHERE endpoint_id=?"
+      ).bind(name, check.url, JSON.stringify(events), enabled, nowIso, existingId).run();
+      return json({ ok: true, endpoint_id: existingId, target_url: check.url });
+    }
+    const endpointId = "whe_" + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    const signingSecret = "whsec_" + crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    await env.DB.prepare(
+      "INSERT INTO payment_webhook_endpoints (endpoint_id, name, target_url, signing_secret, events_json, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(endpointId, name, check.url, signingSecret, JSON.stringify(events), enabled, nowIso, nowIso).run();
+    return json({ ok: true, endpoint_id: endpointId, target_url: check.url, signing_secret: signingSecret }, 201);
+  }
+
+  if (action === "rotate_secret") {
+    const endpointId = String(body?.endpoint_id || "").trim();
+    if (!endpointId) return json({ ok: false, error: "endpoint_id wajib diisi." }, 400);
+    const signingSecret = "whsec_" + crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+    await env.DB.prepare(
+      "UPDATE payment_webhook_endpoints SET signing_secret=?, updated_at=? WHERE endpoint_id=?"
+    ).bind(signingSecret, nowIso, endpointId).run();
+    return json({ ok: true, endpoint_id: endpointId, signing_secret: signingSecret });
+  }
+
+  if (action === "delete") {
+    const endpointId = String(body?.endpoint_id || "").trim();
+    if (!endpointId) return json({ ok: false, error: "endpoint_id wajib diisi." }, 400);
+    await env.DB.prepare("DELETE FROM payment_webhook_endpoints WHERE endpoint_id=?").bind(endpointId).run();
+    return json({ ok: true, deleted: endpointId });
+  }
+
+  if (action === "test") {
+    const endpointId = String(body?.endpoint_id || "").trim();
+    if (!endpointId) return json({ ok: false, error: "endpoint_id wajib diisi." }, 400);
+    const row = await env.DB.prepare(
+      "SELECT target_url, signing_secret FROM payment_webhook_endpoints WHERE endpoint_id=? LIMIT 1"
+    ).bind(endpointId).first();
+    if (!row) return json({ ok: false, error: "Endpoint webhook tidak ditemukan." }, 404);
+    const testPayload = JSON.stringify({
+      event: "webhook.test",
+      transaction_id: "trx_test",
+      external_order_id: "TEST-PING",
+      base_amount: 10000,
+      unique_code: 7,
+      total_amount: 10007,
+      paid_at: nowIso,
+      created_at: nowIso
+    });
+    const res = await deliverSingleWebhook(row.target_url, row.signing_secret, "webhook.test", testPayload, "whd_test_" + Date.now(), 1);
+    return json({ ok: res.ok, http_status: res.status, error: res.error || "" }, res.ok ? 200 : 502);
+  }
+
+  return json({ ok: false, error: "Aksi webhook tidak dikenal." }, 400);
+}
+
 export {
   pruneAdminLoginAttempts,
   pruneAdminWebSessions,
@@ -3913,6 +4218,7 @@ export {
   dispatchTelegramMessagingOutbox,
   dispatchOperationalAlerts,
   dispatchSheetsMirrorOutbox,
+  dispatchPaymentWebhookDeliveries,
   handleAdminLogin,
   handleAdminWebSessionRevoke,
   handleAdminPaymentMethods,
@@ -3924,5 +4230,8 @@ export {
   handleAdminBotDiagnostics,
   handleAdminActivityAudit,
   handleAdminDashboardExport,
+  handleMutationIngest,
+  handleAdminMutations,
+  handleAdminWebhooks,
   handleTelegram
 };

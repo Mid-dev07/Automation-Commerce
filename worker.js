@@ -9,6 +9,7 @@ import {
   dispatchTelegramMessagingOutbox,
   dispatchOperationalAlerts,
   dispatchSheetsMirrorOutbox,
+  dispatchPaymentWebhookDeliveries,
   handleAdminLogin,
   handleAdminWebSessionRevoke,
   handleAdminPaymentMethods,
@@ -20,6 +21,9 @@ import {
   handleAdminBotDiagnostics,
   handleAdminActivityAudit,
   handleAdminDashboardExport,
+  handleMutationIngest,
+  handleAdminMutations,
+  handleAdminWebhooks,
   handleTelegram
 } from "./src/order-bot/handlers.mjs";
 
@@ -55,6 +59,14 @@ export default {
     if (result.claimed) {
       console.log(JSON.stringify({level:"info",event:"sheet_mirror_outbox_batch",cron:controller.cron,...result}));
     }
+    try {
+      const webhooks = await dispatchPaymentWebhookDeliveries(env, 20);
+      if (webhooks.claimed) {
+        console.log(JSON.stringify({level:"info",event:"payment_webhook_batch",cron:controller.cron,...webhooks}));
+      }
+    } catch (error) {
+      console.warn(JSON.stringify({level:"warn",event:"payment_webhook_dispatch_failed",message:String(error?.message||error).slice(0,200)}));
+    }
   },
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -84,6 +96,15 @@ export default {
     }
     if (request.method === "GET" && url.pathname === "/api/admin/export") {
       return handleAdminDashboardExport(request, env);
+    }
+    if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/admin/mutations") {
+      return handleAdminMutations(request, env);
+    }
+    if ((request.method === "GET" || request.method === "POST") && url.pathname === "/api/admin/webhooks") {
+      return handleAdminWebhooks(request, env);
+    }
+    if (request.method === "POST" && url.pathname === "/api/v1/mutations/ingest") {
+      return handleMutationIngest(request, env);
     }
     if (request.method === "GET" && url.pathname === "/health") {
       const tx = await transactionReadiness(env);
