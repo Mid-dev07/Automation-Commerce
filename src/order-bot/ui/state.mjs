@@ -11,6 +11,8 @@ const STORE_STATS_TTL_SECONDS = 90;
 const CATALOG_SNAPSHOT_TTL_SECONDS = 60;
 const BANNER_FILE_ID_TTL_SECONDS = 7 * 24 * 60 * 60;
 const QRIS_MSG_TTL_SECONDS = 24 * 60 * 60;
+const USER_LANG_TTL_SECONDS = 30 * 24 * 60 * 60;
+const PENDING_PROOF_TTL_SECONDS = 2 * 60 * 60;
 
 const PAID_SQL_STATUSES = "('DIBAYAR','DIPROSES','DIKIRIM','SELESAI','PAID','COMPLETED')";
 
@@ -93,6 +95,35 @@ export function setQrisMessageRef(env, orderId, ref) {
 
 export function clearQrisMessageRef(env, orderId) {
   return kvDelete(env, "ui:qris_msg:" + String(orderId));
+}
+
+export async function getUserLang(env, userId) {
+  if (!userId) return { lang: "id", chosen: false };
+  const record = await kvGetJson(env, "ui:lang:" + String(userId));
+  if (record && (record.lang === "id" || record.lang === "en")) {
+    return { lang: record.lang, chosen: Boolean(record.chosen) };
+  }
+  return { lang: "id", chosen: false };
+}
+
+export function setUserLang(env, userId, lang) {
+  const safe = String(lang || "").toLowerCase() === "en" ? "en" : "id";
+  return kvPutJson(env, "ui:lang:" + String(userId), { lang: safe, chosen: true }, USER_LANG_TTL_SECONDS);
+}
+
+export function getPendingProofOrder(env, userId) {
+  if (!userId) return Promise.resolve(null);
+  return kvGetJson(env, "ui:proof_order:" + String(userId));
+}
+
+export function setPendingProofOrder(env, userId, orderId) {
+  if (!userId || !orderId) return Promise.resolve();
+  return kvPutJson(env, "ui:proof_order:" + String(userId), { orderId: String(orderId), updatedAt: Date.now() }, PENDING_PROOF_TTL_SECONDS);
+}
+
+export function clearPendingProofOrder(env, userId) {
+  if (!userId) return Promise.resolve();
+  return kvDelete(env, "ui:proof_order:" + String(userId));
 }
 
 function simpleUrlKey(url) {

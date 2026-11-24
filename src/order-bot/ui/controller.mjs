@@ -2,6 +2,7 @@
  * High-performance Telegram Hybrid UI controller.
  * Keeps webhook latency < 150ms (cached) / < 350ms (D1) using Promise.all,
  * KV caching, Telegram file_id reuse, and ctx.waitUntil() background side effects.
+ * Supports bilingual ('id' / 'en') flows, international checkout, and post-payment claim.
  */
 
 import { SEITON_LOGO_URL } from "../utils.mjs";
@@ -16,9 +17,14 @@ import {
 } from "../telegram-api.mjs";
 import { createLatencyTracker } from "./formatters.mjs";
 import {
+  loadIntlPaymentConfig,
+  normalizeLang,
+  renderLanguageSelectScreen,
+  resolveMenuIntent
+} from "./i18n.mjs";
+import {
   CATALOG_PAGE_SIZE,
   HISTORY_PAGE_SIZE,
-  MENU_LABELS,
   STOCK_PAGE_SIZE,
   isMainMenuLabel,
   parseUiCallback
@@ -42,12 +48,14 @@ import {
   getQrisMessageRef,
   getStoreStats,
   getUiMode,
+  getUserLang,
   invalidateStoreUiCaches,
   listCustomerOrdersPage,
   runBackground,
   setBannerFileId,
   setCatalogMapping,
-  setUiMode
+  setUiMode,
+  setUserLang
 } from "./state.mjs";
 
 function bannerUrlFor(env) {
@@ -64,30 +72,33 @@ function extractLargestPhotoFileId(telegramResponse) {
   return String(photos[photos.length - 1]?.file_id || "");
 }
 
-export async function sendCustomerHome(env, ctx, chatId, fromUser) {
+export async function sendCustomerHome(env, ctx, chatId, fromUser, { forceLang = "" } = {}) {
   const tracker = createLatencyTracker("home");
   const userId = String(fromUser?.id || chatId);
   const bannerUrl = bannerUrlFor(env);
 
   runBackground(ctx, clearUiMode(env, userId), "ui_clear_mode_home");
 
-  const [{ stats, cacheHit }, cachedBanner] = await tracker.measure("kv", () =>
+  const [{ stats, cacheHit }, cachedBanner, langPref] = await tracker.measure("kv", () =>
     Promise.all([
       getStoreStats(env, { ctx }),
-      bannerUrl ? getBannerFileId(env, bannerUrl) : Promise.resolve(null)
+      bannerUrl ? getBannerFileId(env, bannerUrl) : Promise.resolve(null),
+      forceLang ? Promise.resolve({ lang: normalizeLang(forceLang), chosen: true }) : getUserLang(env, userId)
     ])
   );
   tracker.markCacheHit(cacheHit);
+  const lang = normalizeLang(langPref?.lang);
 
   const screen = renderHomeScreen(
     {
       user: {
         id: userId,
-        firstName: [fromUser?.first_name, fromUser?.last_name].filter(Boolean).join(" ") || "Pelanggan",
+        firstName: [fromUser?.first_name, fromUser?.last_name].filter(Boolean).join(" ") || (lang === "en" ? "Customer" : "Pelanggan"),
         username: fromUser?.username || ""
       },
       stats,
-      storeName: storeNameFor(env)
+      storeName: storeNameFor(env),
+      lang
     },
     env
   );
@@ -105,30 +116,53 @@ export async function sendCustomerHome(env, ctx, chatId, fromUser) {
             runBackground(ctx, setBannerFileId(env, bannerUrl, newFileId), "ui_banner_file_id_cache");
           }
         }
-        return;
       } catch (error) {
         console.warn(JSON.stringify({
           level: "warn",
           event: "ui_home_banner_fallback",
           message: String(error?.message || "BANNER_FAILED").slice(0, 120)
         }));
+        await sendTelegram(env, chatId, screen.text, screen.replyKeyboard, { parseMode: screen.parseMode });
       }
+    } else {
+      await sendTelegram(env, chatId, screen.text, screen.replyKeyboard, { parseMode: screen.parseMode });
     }
-    await sendTelegram(env, chatId, screen.text, screen.replyKeyboard, { parseMode: screen.parseMode });
   });
 
-  tracker.emit({ banner_cached: Boolean(cachedBanner?.fileId) });
+  tracker.emit({ banner_cached: Boolean(cachedBanner?.fileId), lang });
+}
+
+export async function showLanguageScreen(env, ctx, { chatId, userId, message = null, callbackId = "" }) {
+  const langPref = await getUserLang(env, userId);
+  const screen = renderLanguageSelectScreen(langPref.lang);
+  if (message) {
+    await Promise.all([
+      callbackId ? answerTelegramCallback(env, callbackId) : Promise.resolve(),
+      updateTelegramMessage(env, message, {
+        text: screen.text,
+        parseMode: screen.parseMode,
+        replyMarkup: screen.inlineKeyboard,
+        clearMedia: true
+      })
+    ]);
+    return;
+  }
+  await sendTelegram(env, chatId, screen.text, screen.inlineKeyboard, { parseMode: screen.parseMode });
 }
 
 export async function showCatalogScreen(env, ctx, { chatId, userId, page = 0, message = null, callbackId = "", fallbackRowsReader = null }) {
   const tracker = createLatencyTracker("catalog");
   runBackground(ctx, clearUiMode(env, userId), "ui_clear_mode_catalog");
 
-  const { items: allItems, cacheHit } = await tracker.measure(
+  const [{ items: allItems, cacheHit }, langPref] = await tracker.measure(
     "d1",
-    () => getCatalogSnapshot(env, { ctx, fallbackRowsReader })
+    () => Promise.all([
+      getCatalogSnapshot(env, { ctx, fallbackRowsReader }),
+      getUserLang(env, userId)
+    ])
   );
   tracker.markCacheHit(cacheHit);
+  const lang = normalizeLang(langPref?.lang);
 
   const totalItems = allItems.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / CATALOG_PAGE_SIZE));
@@ -141,7 +175,7 @@ export async function showCatalogScreen(env, ctx, { chatId, userId, page = 0, me
     "ui_catalog_mapping_put"
   );
 
-  const screen = renderCatalogScreen({ items: pageItems, page: safePage, totalPages, totalItems }, env);
+  const screen = renderCatalogScreen({ items: pageItems, page: safePage, totalPages, totalItems, lang }, env);
 
   await tracker.measure("tg", async () => {
     if (message) {
@@ -158,16 +192,19 @@ export async function showCatalogScreen(env, ctx, { chatId, userId, page = 0, me
     }
     await sendTelegram(env, chatId, screen.text, screen.replyKeyboard, { parseMode: screen.parseMode });
     if (totalPages > 1) {
+      const navHint = lang === "en"
+        ? `<i>📄 Catalog page navigation (${safePage + 1}/${totalPages}):</i>`
+        : "<i>📄 Navigasi halaman katalog (" + (safePage + 1) + "/" + totalPages + "):</i>";
       await sendTelegram(
         env,
         chatId,
-        "<i>📄 Navigasi halaman katalog (" + (safePage + 1) + "/" + totalPages + "):</i>",
+        navHint,
         screen.inlineKeyboard,
         { parseMode: "HTML" }
       );
     }
   });
-  tracker.emit({ page: safePage, items: pageItems.length });
+  tracker.emit({ page: safePage, items: pageItems.length, lang });
 }
 
 export async function showStockScreen(
@@ -180,11 +217,15 @@ export async function showStockScreen(
     runBackground(ctx, clearUiMode(env, userId), "ui_clear_mode_stock");
   }
 
-  const { items: allItems, cacheHit } = await tracker.measure(
+  const [{ items: allItems, cacheHit }, langPref] = await tracker.measure(
     bypassCache ? "d1" : "kv",
-    () => getCatalogSnapshot(env, { bypassCache, ctx, fallbackRowsReader })
+    () => Promise.all([
+      getCatalogSnapshot(env, { bypassCache, ctx, fallbackRowsReader }),
+      getUserLang(env, userId)
+    ])
   );
   tracker.markCacheHit(cacheHit);
+  const lang = normalizeLang(langPref?.lang);
 
   const availItems = allItems.filter((item) => item.stock === null || item.stock > 0);
   const emptyItems = allItems.filter((item) => item.stock !== null && item.stock <= 0);
@@ -201,12 +242,13 @@ export async function showStockScreen(
       availCount: availItems.length,
       emptyCount: emptyItems.length,
       page: safePage,
-      totalPages
+      totalPages,
+      lang
     },
     env
   );
 
-  const toast = bypassCache ? "✅ Stok diperbarui" : "";
+  const toast = bypassCache ? (lang === "en" ? "✅ Stock refreshed" : "✅ Stok diperbarui") : "";
   await tracker.measure("tg", async () => {
     if (message) {
       await Promise.all([
@@ -222,29 +264,33 @@ export async function showStockScreen(
     }
     await sendTelegram(env, chatId, screen.text, screen.inlineKeyboard, { parseMode: screen.parseMode });
   });
-  tracker.emit({ tab: activeTab, page: safePage, avail: availItems.length, empty: emptyItems.length });
+  tracker.emit({ tab: activeTab, page: safePage, avail: availItems.length, empty: emptyItems.length, lang });
 }
 
 export async function showProductCheckout(
   env,
   ctx,
-  { chatId, sku, qty = 1, message = null, callbackId = "", backCallback = "cat:page:0", fallbackRowsReader = null, getAvailablePaymentMethods }
+  { chatId, userId = "", sku, qty = 1, message = null, callbackId = "", backCallback = "cat:page:0", fallbackRowsReader = null, getAvailablePaymentMethods }
 ) {
   const tracker = createLatencyTracker("checkout_card");
   const normalizedSku = String(sku || "").trim().toUpperCase();
 
-  const [{ items, cacheHit }, availableMethods] = await tracker.measure("d1", () =>
+  const [{ items, cacheHit }, availableMethods, intlConfig, langPref] = await tracker.measure("d1", () =>
     Promise.all([
       getCatalogSnapshot(env, { ctx, fallbackRowsReader }),
-      getAvailablePaymentMethods(env)
+      getAvailablePaymentMethods(env),
+      loadIntlPaymentConfig(env),
+      getUserLang(env, userId || chatId)
     ])
   );
   tracker.markCacheHit(cacheHit);
+  const lang = normalizeLang(langPref?.lang);
 
   const product = items.find((item) => String(item.sku || "").toUpperCase() === normalizedSku);
   if (!product) {
-    if (callbackId) await answerTelegramCallback(env, callbackId, "⚠️ Produk tidak ditemukan atau nonaktif", true);
-    else await sendTelegram(env, chatId, "⚠️ Produk tidak ditemukan atau sudah tidak tersedia.");
+    const msg = lang === "en" ? "⚠️ Product not found or unavailable." : "⚠️ Produk tidak ditemukan atau sudah tidak tersedia.";
+    if (callbackId) await answerTelegramCallback(env, callbackId, msg, true);
+    else await sendTelegram(env, chatId, msg);
     return;
   }
 
@@ -254,7 +300,9 @@ export async function showProductCheckout(
       qty,
       availableMethods,
       qrisMode: getQrisCheckoutMode(env),
-      backCallback
+      backCallback,
+      intlConfig,
+      lang
     },
     env
   );
@@ -287,7 +335,7 @@ export async function showProductCheckout(
     }
     await sendTelegram(env, chatId, screen.text, screen.inlineKeyboard, { parseMode: screen.parseMode });
   });
-  tracker.emit({ sku: product.sku, qty: screen.clampedQty });
+  tracker.emit({ sku: product.sku, qty: screen.clampedQty, lang });
 }
 
 export async function showHistoryScreen(env, ctx, { chatId, userId, page = 0, message = null, callbackId = "" }) {
@@ -296,13 +344,18 @@ export async function showHistoryScreen(env, ctx, { chatId, userId, page = 0, me
     runBackground(ctx, clearUiMode(env, userId), "ui_clear_mode_history");
   }
 
-  const pageData = await tracker.measure("d1", () =>
-    listCustomerOrdersPage(env, userId, page, HISTORY_PAGE_SIZE)
+  const [pageData, langPref] = await tracker.measure("d1", () =>
+    Promise.all([
+      listCustomerOrdersPage(env, userId, page, HISTORY_PAGE_SIZE),
+      getUserLang(env, userId)
+    ])
   );
+  const lang = normalizeLang(langPref?.lang);
   const screen = renderHistoryScreen(
     {
       ...pageData,
-      qrisAvailable: isQrisCheckoutAvailable(env)
+      qrisAvailable: isQrisCheckoutAvailable(env),
+      lang
     },
     env
   );
@@ -322,7 +375,7 @@ export async function showHistoryScreen(env, ctx, { chatId, userId, page = 0, me
     }
     await sendTelegram(env, chatId, screen.text, screen.inlineKeyboard, { parseMode: screen.parseMode });
   });
-  tracker.emit({ page: pageData.page, count: pageData.orders.length, total: pageData.totalCount });
+  tracker.emit({ page: pageData.page, count: pageData.orders.length, total: pageData.totalCount, lang });
 }
 
 export async function showGuideScreen(env, ctx, { chatId, userId, message = null, callbackId = "" }) {
@@ -330,7 +383,9 @@ export async function showGuideScreen(env, ctx, { chatId, userId, message = null
   if (!message && userId) {
     runBackground(ctx, clearUiMode(env, userId), "ui_clear_mode_guide");
   }
-  const screen = renderGuideScreen(env);
+  const langPref = await getUserLang(env, userId);
+  const lang = normalizeLang(langPref?.lang);
+  const screen = renderGuideScreen(env, lang);
   await tracker.measure("tg", async () => {
     if (message) {
       await Promise.all([
@@ -346,12 +401,14 @@ export async function showGuideScreen(env, ctx, { chatId, userId, message = null
     }
     await sendTelegram(env, chatId, screen.text, screen.inlineKeyboard, { parseMode: screen.parseMode });
   });
-  tracker.emit();
+  tracker.emit({ lang });
 }
 
 export async function openSearchMode(env, ctx, { chatId, userId, message = null, callbackId = "" }) {
   runBackground(ctx, setUiMode(env, userId, { mode: "WAITING_SEARCH" }), "ui_set_search_mode");
-  const screen = renderSearchPromptScreen(env);
+  const langPref = await getUserLang(env, userId);
+  const lang = normalizeLang(langPref?.lang);
+  const screen = renderSearchPromptScreen(env, lang);
   if (message) {
     await Promise.all([
       callbackId ? answerTelegramCallback(env, callbackId) : Promise.resolve(),
@@ -371,10 +428,14 @@ export async function handleSearchQueryText(env, ctx, { chatId, userId, query, f
   const tracker = createLatencyTracker("search_results");
   runBackground(ctx, clearUiMode(env, userId), "ui_clear_mode_search_done");
 
-  const { items: allItems, cacheHit } = await tracker.measure("kv", () =>
-    getCatalogSnapshot(env, { ctx, fallbackRowsReader })
+  const [{ items: allItems, cacheHit }, langPref] = await tracker.measure("kv", () =>
+    Promise.all([
+      getCatalogSnapshot(env, { ctx, fallbackRowsReader }),
+      getUserLang(env, userId)
+    ])
   );
   tracker.markCacheHit(cacheHit);
+  const lang = normalizeLang(langPref?.lang);
 
   const needle = String(query || "").trim().toLowerCase();
   const matches = allItems.filter((item) => {
@@ -382,11 +443,11 @@ export async function handleSearchQueryText(env, ctx, { chatId, userId, query, f
     return haystack.includes(needle);
   });
 
-  const screen = renderSearchResultsScreen({ query, items: matches }, env);
+  const screen = renderSearchResultsScreen({ query, items: matches, lang }, env);
   await tracker.measure("tg", () =>
     sendTelegram(env, chatId, screen.text, screen.inlineKeyboard, { parseMode: screen.parseMode })
   );
-  tracker.emit({ query_len: needle.length, matches: matches.length });
+  tracker.emit({ query_len: needle.length, matches: matches.length, lang });
 }
 
 export async function cleanupStoredQrisMessage(env, orderId) {
@@ -399,34 +460,39 @@ export async function cleanupStoredQrisMessage(env, orderId) {
 
 /**
  * Handles customer private Reply Keyboard actions, dynamic numeric keypad (1..9),
- * and WAITING_SEARCH text input. Returns true when handled.
+ * language switching, and WAITING_SEARCH text input. Returns true when handled.
  */
 export async function handleCustomerHybridMessage(env, ctx, message, text, deps) {
   const chatId = String(message.chat.id);
   const userId = String(message.from.id);
   const trimmed = String(text || "").trim();
+  const intent = resolveMenuIntent(trimmed);
 
-  if (trimmed === MENU_LABELS.MAIN_MENU || trimmed === "/start") {
+  if (intent === "MAIN_MENU" || trimmed === "/start") {
     await sendCustomerHome(env, ctx, chatId, message.from);
     return true;
   }
-  if (trimmed === MENU_LABELS.LIST_PRODUCTS) {
+  if (intent === "LANGUAGE" || trimmed === "/lang" || trimmed === "/language" || trimmed === "/bahasa") {
+    await showLanguageScreen(env, ctx, { chatId, userId });
+    return true;
+  }
+  if (intent === "LIST_PRODUCTS") {
     await showCatalogScreen(env, ctx, { chatId, userId, page: 0, fallbackRowsReader: deps.readTelegramCatalogRows });
     return true;
   }
-  if (trimmed === MENU_LABELS.CHECK_STOCK) {
+  if (intent === "CHECK_STOCK") {
     await showStockScreen(env, ctx, { chatId, userId, tab: "avail", page: 0, fallbackRowsReader: deps.readTelegramCatalogRows });
     return true;
   }
-  if (trimmed === MENU_LABELS.HISTORY) {
+  if (intent === "HISTORY") {
     await showHistoryScreen(env, ctx, { chatId, userId, page: 0 });
     return true;
   }
-  if (trimmed === MENU_LABELS.HOW_TO_ORDER) {
+  if (intent === "HOW_TO_ORDER") {
     await showGuideScreen(env, ctx, { chatId, userId });
     return true;
   }
-  if (trimmed === MENU_LABELS.SEARCH_PRODUCTS) {
+  if (intent === "SEARCH_PRODUCTS") {
     await openSearchMode(env, ctx, { chatId, userId });
     return true;
   }
@@ -451,6 +517,7 @@ export async function handleCustomerHybridMessage(env, ctx, message, text, deps)
     if (sku) {
       await showProductCheckout(env, ctx, {
         chatId,
+        userId,
         sku,
         qty: 1,
         backCallback: "cat:page:" + Number(mapping.page || 0),
@@ -507,11 +574,35 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
   const parsed = parseUiCallback(data);
   if (!parsed) return false;
 
+  if (parsed.type === "LANG_OPEN") {
+    await showLanguageScreen(env, ctx, { chatId, userId, message, callbackId });
+    return true;
+  }
+
+  if (parsed.type === "LANG_SET") {
+    const newLang = normalizeLang(parsed.lang);
+    await setUserLang(env, userId, newLang);
+    const toast = newLang === "en" ? "🇬🇧 Language set to English" : "🇮🇩 Bahasa Indonesia dipilih";
+    await Promise.all([
+      answerTelegramCallback(env, callbackId, toast),
+      deleteTelegramMessage(env, message)
+    ]);
+    await sendCustomerHome(env, ctx, chatId, query.from, { forceLang: newLang });
+    return true;
+  }
+
+  if (parsed.type === "CLAIM_BOT" && typeof deps.handleClaimProductBot === "function") {
+    await deps.handleClaimProductBot(env, ctx, query, parsed.orderId);
+    return true;
+  }
+
   if (parsed.type === "NOOP") {
+    const langPref = await getUserLang(env, userId);
+    const isEn = normalizeLang(langPref?.lang) === "en";
     const toast = parsed.reason === "min"
-      ? "Jumlah minimal 1 unit"
+      ? (isEn ? "Minimum quantity is 1 unit" : "Jumlah minimal 1 unit")
       : parsed.reason === "max"
-        ? "Mencapai batas stok tersedia"
+        ? (isEn ? "Reached maximum available stock" : "Mencapai batas stok tersedia")
         : "";
     await answerTelegramCallback(env, callbackId, toast);
     return true;
@@ -524,8 +615,10 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
 
   if (parsed.type === "SEARCH_CANCEL") {
     runBackground(ctx, clearUiMode(env, userId), "ui_clear_mode_cancel");
+    const langPref = await getUserLang(env, userId);
+    const isEn = normalizeLang(langPref?.lang) === "en";
     await Promise.all([
-      answerTelegramCallback(env, callbackId, "Pencarian dibatalkan"),
+      answerTelegramCallback(env, callbackId, isEn ? "Search cancelled" : "Pencarian dibatalkan"),
       deleteTelegramMessage(env, message)
     ]);
     await sendCustomerHome(env, ctx, chatId, query.from);
@@ -549,6 +642,7 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
   if (parsed.type === "PROD_VIEW") {
     await showProductCheckout(env, ctx, {
       chatId,
+      userId,
       sku: parsed.sku,
       qty: 1,
       message,
@@ -563,6 +657,7 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
   if (parsed.type === "CHK_QTY") {
     await showProductCheckout(env, ctx, {
       chatId,
+      userId,
       sku: parsed.sku,
       qty: parsed.qty,
       message,
@@ -580,7 +675,9 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
   }
 
   if (parsed.type === "CHK_PAY") {
-    await answerTelegramCallback(env, callbackId, "Memproses pesanan…");
+    const langPref = await getUserLang(env, userId);
+    const isEn = normalizeLang(langPref?.lang) === "en";
+    await answerTelegramCallback(env, callbackId, isEn ? "Creating order…" : "Memproses pesanan…");
     const customerName = [query.from?.first_name, query.from?.last_name].filter(Boolean).join(" ");
     const result = await deps.createOrder(env, {
       sku: parsed.sku.toUpperCase(),
@@ -596,7 +693,7 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
       ].join(":")
     });
     runBackground(ctx, invalidateStoreUiCaches(env), "ui_invalidate_after_order");
-    await deps.deliverOrderCheckout(env, ctx, message, chatId, parsed.method, result);
+    await deps.deliverOrderCheckout(env, ctx, message, chatId, parsed.method, result, userId);
     return true;
   }
 

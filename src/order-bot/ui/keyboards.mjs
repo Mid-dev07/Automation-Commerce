@@ -1,18 +1,29 @@
 /**
  * Single source of truth for Reply Keyboards, color-coded Inline Keyboards,
  * and structured callback_data (< 64 bytes) for Seiton.id Telegram Bot.
+ * Supports bilingual mode ('id' / 'en') and flexible local + international payment methods.
  */
 
-export const MENU_LABELS = Object.freeze({
-  LIST_PRODUCTS: "🛍️ List Produk",
-  CHECK_STOCK: "📦 Cek Stok",
-  HISTORY: "📜 Riwayat",
-  HOW_TO_ORDER: "📖 Cara Order",
-  SEARCH_PRODUCTS: "🔍 Cari Produk",
-  MAIN_MENU: "🏠 Menu Utama"
-});
+import {
+  MENU_LABELS_BY_LANG,
+  convertIdrToStars,
+  convertIdrToUsdt,
+  getMenuLabels,
+  isAnyMainMenuLabel,
+  normalizeLang
+} from "./i18n.mjs";
 
-const MENU_LABEL_SET = new Set(Object.values(MENU_LABELS));
+export const MENU_LABELS = MENU_LABELS_BY_LANG.id;
+export const MENU_LABELS_EN = MENU_LABELS_BY_LANG.en;
+
+export const SUPPORTED_CHECKOUT_METHODS = Object.freeze([
+  "QRIS",
+  "USDT",
+  "TRANSFER",
+  "PAYPAL",
+  "STARS",
+  "COD"
+]);
 
 export const CATALOG_PAGE_SIZE = 6;
 export const STOCK_PAGE_SIZE = 6;
@@ -28,7 +39,7 @@ function styledButton(button, style, env) {
 }
 
 export function isMainMenuLabel(text) {
-  return MENU_LABEL_SET.has(String(text || "").trim());
+  return isAnyMainMenuLabel(text);
 }
 
 /**
@@ -70,33 +81,40 @@ export function hasButtonStyles(replyMarkup) {
 
 /**
  * Persistent Reply Keyboard (Opsi A — direct payment without Saldo/Wallet).
- * Layout: 2-2-1 grid.
+ * Layout: 2-2-2 grid (with quick Language toggle button).
  */
-export function buildMainReplyKeyboard(env = {}) {
+export function buildMainReplyKeyboard(env = {}, lang = "id") {
+  const labels = getMenuLabels(lang);
+  const isEn = normalizeLang(lang) === "en";
   return {
     keyboard: [
       [
-        styledButton({ text: MENU_LABELS.LIST_PRODUCTS }, "primary", env),
-        styledButton({ text: MENU_LABELS.CHECK_STOCK }, "primary", env)
+        styledButton({ text: labels.LIST_PRODUCTS }, "primary", env),
+        styledButton({ text: labels.CHECK_STOCK }, "primary", env)
       ],
       [
-        styledButton({ text: MENU_LABELS.HISTORY }, "primary", env),
-        styledButton({ text: MENU_LABELS.HOW_TO_ORDER }, "primary", env)
+        styledButton({ text: labels.HISTORY }, "primary", env),
+        styledButton({ text: labels.HOW_TO_ORDER }, "primary", env)
       ],
       [
-        styledButton({ text: MENU_LABELS.SEARCH_PRODUCTS }, "primary", env)
+        styledButton({ text: labels.SEARCH_PRODUCTS }, "primary", env),
+        styledButton({ text: labels.LANGUAGE }, "primary", env)
       ]
     ],
     resize_keyboard: true,
     is_persistent: true,
-    input_field_placeholder: "Pilih menu di bawah atau cari produk…"
+    input_field_placeholder: isEn
+      ? "Choose a menu below or search products…"
+      : "Pilih menu di bawah atau cari produk…"
   };
 }
 
 /**
  * Dynamic 3-column numeric keypad (1..N) for List Produk screen.
  */
-export function buildCatalogKeypadKeyboard(itemCount, env = {}) {
+export function buildCatalogKeypadKeyboard(itemCount, env = {}, lang = "id") {
+  const labels = getMenuLabels(lang);
+  const isEn = normalizeLang(lang) === "en";
   const count = Math.max(0, Math.min(9, Number(itemCount) || 0));
   const rows = [];
   for (let i = 1; i <= count; i += 3) {
@@ -107,54 +125,87 @@ export function buildCatalogKeypadKeyboard(itemCount, env = {}) {
     rows.push(row);
   }
   rows.push([
-    styledButton({ text: MENU_LABELS.SEARCH_PRODUCTS }, "primary", env),
-    styledButton({ text: MENU_LABELS.MAIN_MENU }, "primary", env)
+    styledButton({ text: labels.SEARCH_PRODUCTS }, "primary", env),
+    styledButton({ text: labels.MAIN_MENU }, "primary", env)
   ]);
   return {
     keyboard: rows,
     resize_keyboard: true,
     is_persistent: true,
-    input_field_placeholder: count > 0 ? "Pilih nomor 1–" + count + " atau ketik cari…" : "Kembali ke Menu Utama…"
+    input_field_placeholder: count > 0
+      ? (isEn ? `Pick number 1–${count} or type search…` : "Pilih nomor 1–" + count + " atau ketik cari…")
+      : (isEn ? "Return to Main Menu…" : "Kembali ke Menu Utama…")
   };
 }
 
-export function buildCatalogInlineKeyboard({ page, totalPages }, env = {}) {
+export function buildHomeInlineKeyboard(env = {}, lang = "id") {
+  const isEn = normalizeLang(lang) === "en";
+  return {
+    inline_keyboard: [
+      [
+        styledButton({
+          text: (!isEn ? "✓ " : "") + "🇮🇩 Indonesia",
+          callback_data: "lang:set:id"
+        }, !isEn ? "success" : "primary", env),
+        styledButton({
+          text: (isEn ? "✓ " : "") + "🇬🇧 English",
+          callback_data: "lang:set:en"
+        }, isEn ? "success" : "primary", env)
+      ],
+      [
+        styledButton({
+          text: isEn ? "🛍️ Browse Products" : "🛍️ Lihat Produk",
+          callback_data: "cat:page:0"
+        }, "success", env),
+        styledButton({
+          text: isEn ? "📜 My Orders" : "📜 Riwayat Pesanan",
+          callback_data: "nav:orders"
+        }, "primary", env)
+      ]
+    ]
+  };
+}
+
+export function buildCatalogInlineKeyboard({ page, totalPages, lang = "id" }, env = {}) {
+  const isEn = normalizeLang(lang) === "en";
   const rows = [];
   if (totalPages > 1) {
     const navRow = [];
     if (page > 0) {
-      navRow.push(styledButton({ text: "◀️ Sebelumnya", callback_data: "cat:page:" + (page - 1) }, "primary", env));
+      navRow.push(styledButton({ text: isEn ? "◀️ Prev" : "◀️ Sebelumnya", callback_data: "cat:page:" + (page - 1) }, "primary", env));
     }
-    navRow.push(styledButton({ text: "Hal " + (page + 1) + "/" + totalPages, callback_data: "noop" }, "primary", env));
+    navRow.push(styledButton({ text: (isEn ? "Page " : "Hal ") + (page + 1) + "/" + totalPages, callback_data: "noop" }, "primary", env));
     if (page + 1 < totalPages) {
-      navRow.push(styledButton({ text: "Berikutnya ▶️", callback_data: "cat:page:" + (page + 1) }, "primary", env));
+      navRow.push(styledButton({ text: isEn ? "Next ▶️" : "Berikutnya ▶️", callback_data: "cat:page:" + (page + 1) }, "primary", env));
     }
     rows.push(navRow);
   }
   rows.push([
-    styledButton({ text: "📦 Cek Stok", callback_data: "stock:tab:avail:0" }, "primary", env),
-    styledButton({ text: "🏠 Beranda", callback_data: "nav:home" }, "primary", env)
+    styledButton({ text: isEn ? "📦 Check Stock" : "📦 Cek Stok", callback_data: "stock:tab:avail:0" }, "primary", env),
+    styledButton({ text: isEn ? "🏠 Home" : "🏠 Beranda", callback_data: "nav:home" }, "primary", env)
   ]);
   return { inline_keyboard: rows };
 }
 
-export function buildStockInlineKeyboard({ tab, availCount, emptyCount, page, totalPages, items }, env = {}) {
+export function buildStockInlineKeyboard({ tab, availCount, emptyCount, page, totalPages, items, lang = "id" }, env = {}) {
+  const isEn = normalizeLang(lang) === "en";
   const rows = [];
   const activeTab = tab === "empty" ? "empty" : "avail";
   rows.push([
     styledButton({
-      text: (activeTab === "avail" ? "✓ " : "") + "Tersedia (" + availCount + ")",
+      text: (activeTab === "avail" ? "✓ " : "") + (isEn ? `Available (${availCount})` : "Tersedia (" + availCount + ")"),
       callback_data: "stock:tab:avail:0"
     }, "success", env),
     styledButton({
-      text: (activeTab === "empty" ? "✓ " : "") + "Habis (" + emptyCount + ")",
+      text: (activeTab === "empty" ? "✓ " : "") + (isEn ? `Out of Stock (${emptyCount})` : "Habis (" + emptyCount + ")"),
       callback_data: "stock:tab:empty:0"
     }, "danger", env)
   ]);
 
   for (const item of items || []) {
     const inStock = item.stock === null || item.stock > 0;
-    const label = String(item.name || item.sku).slice(0, 38) + (inStock ? "" : " (Habis)");
+    const outSuffix = isEn ? " (Out)" : " (Habis)";
+    const label = String(item.name || item.sku).slice(0, 38) + (inStock ? "" : outSuffix);
     rows.push([
       styledButton({
         text: label,
@@ -176,16 +227,20 @@ export function buildStockInlineKeyboard({ tab, availCount, emptyCount, page, to
   }
 
   rows.push([
-    styledButton({ text: "🔄 Perbarui", callback_data: "stock:refresh:" + activeTab + ":" + page }, "primary", env)
+    styledButton({ text: isEn ? "🔄 Refresh" : "🔄 Perbarui", callback_data: "stock:refresh:" + activeTab + ":" + page }, "primary", env)
   ]);
   rows.push([
-    styledButton({ text: "🔍 Cari", callback_data: "search:open" }, "primary", env),
-    styledButton({ text: "🏠 Beranda", callback_data: "nav:home" }, "primary", env)
+    styledButton({ text: isEn ? "🔍 Search" : "🔍 Cari", callback_data: "search:open" }, "primary", env),
+    styledButton({ text: isEn ? "🏠 Home" : "🏠 Beranda", callback_data: "nav:home" }, "primary", env)
   ]);
   return { inline_keyboard: rows };
 }
 
-export function buildCheckoutInlineKeyboard({ sku, qty, maxQty, availableMethods, qrisMode, backCallback }, env = {}) {
+export function buildCheckoutInlineKeyboard(
+  { sku, qty, maxQty, availableMethods, qrisMode, backCallback, totalAmount = 0, intlConfig = {}, lang = "id" },
+  env = {}
+) {
+  const isEn = normalizeLang(lang) === "en";
   const rows = [];
   const safeSku = String(sku || "").slice(0, 36);
   const canBuy = maxQty === null || maxQty > 0;
@@ -210,18 +265,49 @@ export function buildCheckoutInlineKeyboard({ sku, qty, maxQty, availableMethods
     ]);
 
     const methods = Array.isArray(availableMethods) ? availableMethods : [];
+    const usdtText = totalAmount > 0 ? ` (${convertIdrToUsdt(totalAmount, intlConfig?.usd_exchange_rate)} USDT)` : "";
+    const usdText = totalAmount > 0 ? ` ($${convertIdrToUsdt(totalAmount, intlConfig?.usd_exchange_rate)})` : "";
+    const starsText = totalAmount > 0 ? ` (⭐ ${convertIdrToStars(totalAmount, intlConfig?.stars_exchange_rate)})` : "";
+
     if (methods.includes("QRIS")) {
+      const qrisLabel = isEn
+        ? (qrisMode === "DYNAMIC" ? "⚡ Pay with QRIS (IDR)" : "📷 Pay with QRIS (Manual)")
+        : (qrisMode === "DYNAMIC" ? "⚡ Bayar QRIS" : "📷 Bayar QRIS (Manual)");
       rows.push([
         styledButton({
-          text: qrisMode === "DYNAMIC" ? "⚡ Bayar QRIS" : "📷 Bayar QRIS (Manual)",
+          text: qrisLabel,
           callback_data: "chk:pay:QRIS:" + safeSku + ":" + safeQty
         }, "success", env)
+      ]);
+    }
+    if (methods.includes("USDT")) {
+      rows.push([
+        styledButton({
+          text: (isEn ? "💎 Pay with USDT" : "💎 Bayar USDT") + usdtText,
+          callback_data: "chk:pay:USDT:" + safeSku + ":" + safeQty
+        }, "success", env)
+      ]);
+    }
+    if (methods.includes("PAYPAL")) {
+      rows.push([
+        styledButton({
+          text: (isEn ? "🅿️ Pay with PayPal" : "🅿️ Bayar PayPal") + usdText,
+          callback_data: "chk:pay:PAYPAL:" + safeSku + ":" + safeQty
+        }, "primary", env)
+      ]);
+    }
+    if (methods.includes("STARS")) {
+      rows.push([
+        styledButton({
+          text: (isEn ? "⭐ Pay with Telegram Stars" : "⭐ Bayar Telegram Stars") + starsText,
+          callback_data: "chk:pay:STARS:" + safeSku + ":" + safeQty
+        }, "primary", env)
       ]);
     }
     if (methods.includes("TRANSFER")) {
       rows.push([
         styledButton({
-          text: "🏦 Bayar Transfer Bank",
+          text: isEn ? "🏦 Bank Transfer (IDR)" : "🏦 Bayar Transfer Bank",
           callback_data: "chk:pay:TRANSFER:" + safeSku + ":" + safeQty
         }, "primary", env)
       ]);
@@ -229,7 +315,7 @@ export function buildCheckoutInlineKeyboard({ sku, qty, maxQty, availableMethods
     if (methods.includes("COD")) {
       rows.push([
         styledButton({
-          text: "💵 Pesan COD",
+          text: isEn ? "💵 Cash on Delivery (COD)" : "💵 Pesan COD",
           callback_data: "chk:pay:COD:" + safeSku + ":" + safeQty
         }, "primary", env)
       ]);
@@ -237,13 +323,14 @@ export function buildCheckoutInlineKeyboard({ sku, qty, maxQty, availableMethods
   }
 
   rows.push([
-    styledButton({ text: "⬅️ Kembali", callback_data: backCallback || "cat:page:0" }, "primary", env),
-    styledButton({ text: "🏠 Beranda", callback_data: "nav:home" }, "primary", env)
+    styledButton({ text: isEn ? "⬅️ Back" : "⬅️ Kembali", callback_data: backCallback || "cat:page:0" }, "primary", env),
+    styledButton({ text: isEn ? "🏠 Home" : "🏠 Beranda", callback_data: "nav:home" }, "primary", env)
   ]);
   return { inline_keyboard: rows };
 }
 
-export function buildHistoryInlineKeyboard({ orders, page, totalPages, qrisAvailable }, env = {}) {
+export function buildHistoryInlineKeyboard({ orders, page, totalPages, qrisAvailable, lang = "id" }, env = {}) {
+  const isEn = normalizeLang(lang) === "en";
   const rows = [];
   for (const order of orders || []) {
     const orderId = String(order.order_id || "");
@@ -252,16 +339,25 @@ export function buildHistoryInlineKeyboard({ orders, page, totalPages, qrisAvail
     const status = String(order.status || "").toUpperCase();
     const method = String(order.payment_method || "").toUpperCase();
     if (payConfirm === "DISETUJUI" && order.receipt_code) {
-      rows.push([styledButton({ text: "🎟️ Lihat Resi " + suffix, callback_data: "ticket:" + orderId }, "success", env)]);
+      rows.push([
+        styledButton({
+          text: (isEn ? "💬 Claim Product " : "💬 Klaim Produk ") + suffix,
+          callback_data: "claim:bot:" + orderId
+        }, "success", env),
+        styledButton({
+          text: (isEn ? "🎟️ Receipt " : "🎟️ Lihat Resi ") + suffix,
+          callback_data: "ticket:" + orderId
+        }, "primary", env)
+      ]);
     } else if (payConfirm === "MENUNGGU_VERIFIKASI") {
-      rows.push([styledButton({ text: "📎 Perbarui Bukti " + suffix, callback_data: "pc:req:" + orderId }, "primary", env)]);
+      rows.push([styledButton({ text: (isEn ? "📎 Send Proof " : "📎 Perbarui Bukti ") + suffix, callback_data: "pc:req:" + orderId }, "primary", env)]);
     } else if (status === "MENUNGGU_PEMBAYARAN" && method === "QRIS" && qrisAvailable) {
       rows.push([
         styledButton({ text: "📲 QR " + suffix, callback_data: "qris:show:" + orderId }, "success", env),
-        styledButton({ text: "⚡ Cek " + suffix, callback_data: "qris:check:" + orderId }, "primary", env)
+        styledButton({ text: (isEn ? "⚡ Check " : "⚡ Cek ") + suffix, callback_data: "qris:check:" + orderId }, "primary", env)
       ]);
     } else if (status === "MENUNGGU_PEMBAYARAN" && method !== "COD") {
-      rows.push([styledButton({ text: "💳 Konfirmasi " + suffix, callback_data: "pc:req:" + orderId }, "success", env)]);
+      rows.push([styledButton({ text: (isEn ? "📎 Upload Proof " : "💳 Konfirmasi ") + suffix, callback_data: "pc:req:" + orderId }, "success", env)]);
     }
   }
 
@@ -273,47 +369,54 @@ export function buildHistoryInlineKeyboard({ orders, page, totalPages, qrisAvail
     rows.push(nav);
   }
   rows.push([
-    styledButton({ text: "🛍️ List Produk", callback_data: "cat:page:0" }, "success", env),
-    styledButton({ text: "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
+    styledButton({ text: isEn ? "🛍️ Products" : "🛍️ List Produk", callback_data: "cat:page:0" }, "success", env),
+    styledButton({ text: isEn ? "🏠 Main Menu" : "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
   ]);
   return { inline_keyboard: rows };
 }
 
-export function buildGuideInlineKeyboard(env = {}) {
+export function buildGuideInlineKeyboard(env = {}, lang = "id") {
+  const isEn = normalizeLang(lang) === "en";
   const rows = [];
   const supportUrl = String(env?.SUPPORT_URL || "https://seiton.biz.id/kontak/").trim();
   if (/^https:\/\//i.test(supportUrl)) {
-    rows.push([styledButton({ text: "💬 Bantuan ↗", url: supportUrl }, "primary", env)]);
+    rows.push([styledButton({ text: isEn ? "💬 Contact Support ↗" : "💬 Bantuan ↗", url: supportUrl }, "primary", env)]);
   }
   rows.push([
-    styledButton({ text: "🛍️ List Produk", callback_data: "cat:page:0" }, "success", env),
-    styledButton({ text: "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
+    styledButton({ text: isEn ? "🌐 Switch Language" : "🌐 Ganti Bahasa", callback_data: "lang:open" }, "primary", env)
+  ]);
+  rows.push([
+    styledButton({ text: isEn ? "🛍️ Products" : "🛍️ List Produk", callback_data: "cat:page:0" }, "success", env),
+    styledButton({ text: isEn ? "🏠 Main Menu" : "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
   ]);
   return { inline_keyboard: rows };
 }
 
-export function buildSearchPromptInlineKeyboard(env = {}) {
+export function buildSearchPromptInlineKeyboard(env = {}, lang = "id") {
+  const isEn = normalizeLang(lang) === "en";
   return {
     inline_keyboard: [
-      [styledButton({ text: "❌ Batal", callback_data: "search:cancel" }, "danger", env)]
+      [styledButton({ text: isEn ? "❌ Cancel" : "❌ Batal", callback_data: "search:cancel" }, "danger", env)]
     ]
   };
 }
 
-export function buildSearchResultsInlineKeyboard(items, env = {}) {
+export function buildSearchResultsInlineKeyboard(items, env = {}, lang = "id") {
+  const isEn = normalizeLang(lang) === "en";
+  const outSuffix = isEn ? " (Out)" : " (Habis)";
   const rows = [];
   for (const item of (items || []).slice(0, 8)) {
     const inStock = item.stock === null || item.stock > 0;
     rows.push([
       styledButton({
-        text: String(item.name || item.sku).slice(0, 38) + (inStock ? "" : " (Habis)"),
+        text: String(item.name || item.sku).slice(0, 38) + (inStock ? "" : outSuffix),
         callback_data: "prod:view:" + String(item.sku).slice(0, 48)
       }, inStock ? "success" : "danger", env)
     ]);
   }
   rows.push([
-    styledButton({ text: "🔍 Cari Lagi", callback_data: "search:open" }, "primary", env),
-    styledButton({ text: "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
+    styledButton({ text: isEn ? "🔍 Search Again" : "🔍 Cari Lagi", callback_data: "search:open" }, "primary", env),
+    styledButton({ text: isEn ? "🏠 Main Menu" : "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
   ]);
   return { inline_keyboard: rows };
 }
@@ -326,6 +429,14 @@ export function parseUiCallback(raw) {
   const data = String(raw || "");
   if (data === "noop" || data === "noop:min" || data === "noop:max") {
     return { type: "NOOP", reason: data.split(":")[1] || "" };
+  }
+  if (data === "lang:open") return { type: "LANG_OPEN" };
+  if (data === "lang:set:id" || data === "lang:set:en") {
+    return { type: "LANG_SET", lang: data.slice("lang:set:".length) };
+  }
+  if (data.startsWith("claim:bot:")) {
+    const orderId = data.slice("claim:bot:".length).trim();
+    return orderId ? { type: "CLAIM_BOT", orderId } : null;
   }
   if (data === "search:open") return { type: "SEARCH_OPEN" };
   if (data === "search:cancel") return { type: "SEARCH_CANCEL" };
@@ -353,7 +464,7 @@ export function parseUiCallback(raw) {
     const method = String(parts[2] || "").toUpperCase();
     const sku = String(parts[3] || "").trim();
     const qty = Number(parts[4]);
-    if (!["QRIS", "TRANSFER", "COD"].includes(method) || !sku || !Number.isInteger(qty) || qty < 1 || qty > 1000) return null;
+    if (!SUPPORTED_CHECKOUT_METHODS.includes(method) || !sku || !Number.isInteger(qty) || qty < 1 || qty > 1000) return null;
     return { type: "CHK_PAY", method, sku, qty };
   }
   if (data.startsWith("hist:page:")) {

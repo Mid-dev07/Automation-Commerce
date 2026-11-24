@@ -462,6 +462,48 @@ function renderAdminSalesReportHtml({ dateLabel, revenue, paidCount, todayRevenu
   ].join("\n");
 }
 
+function parseQuickQrisCommand(rawText, maxAmount = 10_000_000) {
+  const text = String(rawText || "").trim();
+  if (/^\/qris_test(?:@[a-z0-9_]+)?(?:\s|$)/i.test(text)) return null;
+  const cmdMatch = text.match(/^\/qris(?:@[a-z0-9_]+)?(?:(?:\+|\s+)([\s\S]*))?$/i);
+  if (!cmdMatch) return null;
+  const rest = String(cmdMatch[1] || "").trim().replace(/^\++/, "").trim();
+  if (!rest) {
+    return { ok: false, error: "Format: /qris+nominal atau /qris <nominal> [keterangan]\nContoh: /qris+50000 atau /qris 150.000 Jasa Setup" };
+  }
+  const tokenMatch = rest.match(/^(?:rp\.?\s*)?([0-9][0-9.,]*)(?:\s+([\s\S]+))?$/i);
+  if (!tokenMatch) {
+    return { ok: false, error: "Nominal tidak valid. Contoh: /qris+50000 atau /qris 50.000" };
+  }
+  const rawDigits = tokenMatch[1].replace(/[.,]/g, "");
+  if (!/^\d{1,8}$/.test(rawDigits)) {
+    return { ok: false, error: "⚠️ Nominal QRIS harus antara Rp1 sampai Rp10.000.000." };
+  }
+  const amount = Number(rawDigits);
+  if (!Number.isSafeInteger(amount) || amount < 1 || amount > maxAmount) {
+    return { ok: false, error: "⚠️ Nominal QRIS harus antara Rp1 sampai Rp10.000.000." };
+  }
+  const note = String(tokenMatch[2] || "").trim().slice(0, 120);
+  return { ok: true, amount, note };
+}
+
+function renderQuickQrisCaptionHtml({ amount, merchantName = "SEITON.ID", merchantCity = "", note = "" }) {
+  const lines = [
+    "⚡ <b>QRIS PEMBAYARAN — SEITON.ID</b>",
+    ADMIN_DIVIDER,
+    `• <b>Merchant:</b> ${escapeHtml(merchantName || "SEITON.ID")}${merchantCity ? ` (${escapeHtml(merchantCity)})` : ""}`,
+    `• <b>Nominal Tagihan:</b> <b>${escapeHtml(formatRp(amount))}</b>`
+  ];
+  if (note) {
+    lines.push(`• <b>Keterangan:</b> ${escapeHtml(note)}`);
+  }
+  lines.push(
+    "",
+    "<blockquote>📲 Pindai kode QRIS di atas menggunakan aplikasi mobile banking atau e-wallet. Nominal sudah terisi otomatis — mohon kirimkan screenshot bukti pembayaran setelah transaksi berhasil.</blockquote>"
+  );
+  return lines.join("\n");
+}
+
 export {
   adminHomeKeyboard,
   adminOrdersInlineKeyboard,
@@ -480,5 +522,7 @@ export {
   renderAdminDeleteConfirmScreen,
   renderAdminDashboardLinkScreen,
   renderAdminExportsScreen,
-  renderAdminSalesReportHtml
+  renderAdminSalesReportHtml,
+  parseQuickQrisCommand,
+  renderQuickQrisCaptionHtml
 };

@@ -99,7 +99,7 @@ export function parseQrisPayload(payload) {
  * transaction-specific MPM payload. This only composes/validates the QR data;
  * the merchant's acquirer must permit this issuance method for production use.
  */
-export function buildDynamicQrisPayload(staticPayload, amount) {
+export function buildDynamicQrisPayload(staticPayload, amount, options = {}) {
   const amountText = typeof amount === "number" ? String(amount) : String(amount ?? "").trim();
   if (!/^\d{1,13}$/.test(amountText)) throw new Error("QRIS_AMOUNT_INVALID");
   const nominal = Number(amountText);
@@ -111,6 +111,7 @@ export function buildDynamicQrisPayload(staticPayload, amount) {
   if (!parsed.fields.some(field => Number(field.tag) >= 26 && Number(field.tag) <= 51)) {
     throw new Error("QRIS_MERCHANT_ACCOUNT_MISSING");
   }
+  const expectedPoi = options?.compatible === true ? "11" : "12";
 
   const fields = [];
   let hasAmount = parsed.fields.some(field => field.tag === "54");
@@ -118,7 +119,7 @@ export function buildDynamicQrisPayload(staticPayload, amount) {
   for (const field of parsed.fields) {
     if (field.tag === "63") continue;
     if (field.tag === "01") {
-      fields.push({ tag: "01", value: "12" });
+      fields.push({ tag: "01", value: expectedPoi });
       continue;
     }
     if (field.tag === "54") {
@@ -136,10 +137,26 @@ export function buildDynamicQrisPayload(staticPayload, amount) {
   const withCrcHeader = body + "6304";
   const dynamicPayload = withCrcHeader + crcHex(withCrcHeader);
   const result = parseQrisPayload(dynamicPayload);
-  if (result.pointOfInitiation !== "12" || result.amount !== nominal) {
+  if (result.pointOfInitiation !== expectedPoi || result.amount !== nominal) {
     throw new Error("QRIS_DYNAMIC_COMPOSITION_FAILED");
   }
   return dynamicPayload;
+}
+
+export function buildQrisPayloadByMode(staticPayload, amount, mode = "DYNAMIC") {
+  const normalizedMode = String(mode || "DYNAMIC").trim().toUpperCase();
+  if (normalizedMode === "STATIC_FALLBACK" || normalizedMode === "STATIC") {
+    const parsed = parseQrisPayload(staticPayload);
+    if (parsed.pointOfInitiation !== "11") throw new Error("QRIS_TEMPLATE_MUST_BE_STATIC_MPM");
+    return String(staticPayload);
+  }
+  if (normalizedMode === "COMPATIBLE") {
+    return buildDynamicQrisPayload(staticPayload, amount, { compatible: true });
+  }
+  if (normalizedMode === "DYNAMIC") {
+    return buildDynamicQrisPayload(staticPayload, amount, { compatible: false });
+  }
+  throw new Error("QRIS_MODE_INVALID");
 }
 
 

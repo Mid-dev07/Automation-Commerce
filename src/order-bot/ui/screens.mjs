@@ -2,6 +2,7 @@
  * Pure screen renderers for Seiton.id Telegram Bot (HTML parse mode).
  * Every screen follows a framed instrument card pattern:
  *   Header + live readout (<blockquote> / <pre>) + operational hint + controls.
+ * Supports bilingual mode ('id' / 'en') and dual IDR + USDT pricing.
  */
 
 import {
@@ -12,70 +13,103 @@ import {
   renderMonospaceTable,
   truncateText
 } from "./formatters.mjs";
+import { convertIdrToUsdt, formatDualPrice, normalizeLang } from "./i18n.mjs";
 import {
   buildCatalogInlineKeyboard,
   buildCatalogKeypadKeyboard,
   buildCheckoutInlineKeyboard,
   buildGuideInlineKeyboard,
   buildHistoryInlineKeyboard,
+  buildHomeInlineKeyboard,
   buildMainReplyKeyboard,
   buildSearchPromptInlineKeyboard,
   buildSearchResultsInlineKeyboard,
   buildStockInlineKeyboard
 } from "./keyboards.mjs";
 
-export function renderHomeScreen({ user = {}, stats = {}, storeName = "Seiton.id Store" } = {}, env = {}) {
-  const firstName = escapeHtml(truncateText(user.firstName || "Pelanggan", 48));
+export function renderHomeScreen({ user = {}, stats = {}, storeName = "Seiton.id Store", lang = "id" } = {}, env = {}) {
+  const isEn = normalizeLang(lang) === "en";
+  const firstName = escapeHtml(truncateText(user.firstName || (isEn ? "Customer" : "Pelanggan"), 48));
   const userId = escapeHtml(String(user.id || "-"));
   const username = user.username ? "@" + escapeHtml(truncateText(user.username, 32)) : "-";
 
-  const accountBlock = renderBlockquote([
-    "<b>Info Akun</b>",
-    "• Telegram ID: <code>" + userId + "</code>",
-    "• Username: " + username
-  ]);
+  const accountBlock = renderBlockquote(
+    isEn
+      ? [
+        "<b>Account Info</b>",
+        "• Telegram ID: <code>" + userId + "</code>",
+        "• Username: " + username
+      ]
+      : [
+        "<b>Info Akun</b>",
+        "• Telegram ID: <code>" + userId + "</code>",
+        "• Username: " + username
+      ]
+  );
 
-  const statsBlock = renderBlockquote([
-    "<b>Statistik Toko</b>",
-    "• Total transaksi: <b>" + escapeHtml(formatRp(stats.totalRevenue || 0)) + "</b>",
-    "• Transaksi sukses: <b>" + Number(stats.successTx || 0) + "</b>",
-    "• Produk terjual: <b>" + Number(stats.soldUnits || 0) + " unit</b>",
-    "• Produk aktif: <b>" + Number(stats.activeProducts || 0) + "</b> • Pengguna: <b>" + Number(stats.totalUsers || 0) + "</b>"
-  ]);
+  const statsBlock = renderBlockquote(
+    isEn
+      ? [
+        "<b>Store Statistics</b>",
+        "• Total volume: <b>" + escapeHtml(formatRp(stats.totalRevenue || 0)) + "</b>",
+        "• Completed orders: <b>" + Number(stats.successTx || 0) + "</b>",
+        "• Units sold: <b>" + Number(stats.soldUnits || 0) + " units</b>",
+        "• Active products: <b>" + Number(stats.activeProducts || 0) + "</b> • Users: <b>" + Number(stats.totalUsers || 0) + "</b>"
+      ]
+      : [
+        "<b>Statistik Toko</b>",
+        "• Total transaksi: <b>" + escapeHtml(formatRp(stats.totalRevenue || 0)) + "</b>",
+        "• Transaksi sukses: <b>" + Number(stats.successTx || 0) + "</b>",
+        "• Produk terjual: <b>" + Number(stats.soldUnits || 0) + " unit</b>",
+        "• Produk aktif: <b>" + Number(stats.activeProducts || 0) + "</b> • Pengguna: <b>" + Number(stats.totalUsers || 0) + "</b>"
+      ]
+  );
 
   const text = [
     "🛍️ <b>" + escapeHtml(storeName) + "</b>",
-    "Halo, <b>" + firstName + "</b>. Pilih produk, periksa detail, lalu lanjutkan pembayaran langsung.",
+    isEn
+      ? "Hello, <b>" + firstName + "</b>. Select a product, complete payment (QRIS / USDT / Bank), and claim your item directly with Admin."
+      : "Halo, <b>" + firstName + "</b>. Pilih produk, periksa detail, lalu lanjutkan pembayaran langsung.",
     "",
     accountBlock,
     statsBlock,
     "",
-    renderHint("Pilih menu melalui keyboard di bawah kolom chat.")
+    renderHint(
+      isEn
+        ? "Choose your language or use the menu keyboard below the chat box."
+        : "Pilih bahasa atau menu melalui keyboard di bawah kolom chat."
+    )
   ].join("\n");
 
   return {
     text,
     parseMode: "HTML",
-    replyKeyboard: buildMainReplyKeyboard(env)
+    inlineKeyboard: buildHomeInlineKeyboard(env, lang),
+    replyKeyboard: buildMainReplyKeyboard(env, lang)
   };
 }
 
-export function renderCatalogScreen({ items = [], page = 0, totalPages = 1, totalItems = 0 } = {}, env = {}) {
+export function renderCatalogScreen({ items = [], page = 0, totalPages = 1, totalItems = 0, lang = "id" } = {}, env = {}) {
+  const isEn = normalizeLang(lang) === "en";
   const safeTotalPages = Math.max(1, Number(totalPages) || 1);
   const safePage = Math.max(0, Math.min(safeTotalPages - 1, Number(page) || 0));
 
   if (!items.length) {
     return {
       text: [
-        "🛍️ <b>Daftar Produk</b>",
+        isEn ? "🛍️ <b>Product Catalog</b>" : "🛍️ <b>Daftar Produk</b>",
         "",
-        renderBlockquote(["Belum ada produk aktif di katalog saat ini."]),
+        renderBlockquote([isEn ? "No active products available right now." : "Belum ada produk aktif di katalog saat ini."]),
         "",
-        renderHint("Kembali ke Menu Utama atau hubungi admin untuk info produk terbaru.")
+        renderHint(
+          isEn
+            ? "Return to Main Menu or contact Admin for the latest catalog."
+            : "Kembali ke Menu Utama atau hubungi admin untuk info produk terbaru."
+        )
       ].join("\n"),
       parseMode: "HTML",
-      inlineKeyboard: buildCatalogInlineKeyboard({ page: 0, totalPages: 1 }, env),
-      replyKeyboard: buildCatalogKeypadKeyboard(0, env)
+      inlineKeyboard: buildCatalogInlineKeyboard({ page: 0, totalPages: 1, lang }, env),
+      replyKeyboard: buildCatalogKeypadKeyboard(0, env, lang)
     };
   }
 
@@ -87,42 +121,53 @@ export function renderCatalogScreen({ items = [], page = 0, totalPages = 1, tota
   const table = renderMonospaceTable(
     [
       { label: "No", width: 2, align: "right" },
-      { label: "Produk", width: 18, align: "left" },
-      { label: "Harga", width: 10, align: "right" }
+      { label: isEn ? "Product" : "Produk", width: 18, align: "left" },
+      { label: isEn ? "Price" : "Harga", width: 10, align: "right" }
     ],
     rows
   );
 
   const text = [
-    "🛍️ <b>Daftar Produk</b> (" + totalItems + " aktif)",
+    isEn
+      ? "🛍️ <b>Product Catalog</b> (" + totalItems + " active)"
+      : "🛍️ <b>Daftar Produk</b> (" + totalItems + " aktif)",
     table,
-    renderHint("Halaman " + (safePage + 1) + "/" + safeTotalPages + ". Pilih nomor 1–" + items.length + " lewat keypad di bawah.")
+    renderHint(
+      isEn
+        ? "Page " + (safePage + 1) + "/" + safeTotalPages + ". Pick number 1–" + items.length + " via the keypad below."
+        : "Halaman " + (safePage + 1) + "/" + safeTotalPages + ". Pilih nomor 1–" + items.length + " lewat keypad di bawah."
+    )
   ].join("\n");
 
   return {
     text,
     parseMode: "HTML",
-    inlineKeyboard: buildCatalogInlineKeyboard({ page: safePage, totalPages: safeTotalPages }, env),
-    replyKeyboard: buildCatalogKeypadKeyboard(items.length, env)
+    inlineKeyboard: buildCatalogInlineKeyboard({ page: safePage, totalPages: safeTotalPages, lang }, env),
+    replyKeyboard: buildCatalogKeypadKeyboard(items.length, env, lang)
   };
 }
 
 export function renderStockScreen(
-  { tab = "avail", items = [], availCount = 0, emptyCount = 0, page = 0, totalPages = 1 } = {},
+  { tab = "avail", items = [], availCount = 0, emptyCount = 0, page = 0, totalPages = 1, lang = "id" } = {},
   env = {}
 ) {
+  const isEn = normalizeLang(lang) === "en";
   const activeTab = tab === "empty" ? "empty" : "avail";
   const safeTotalPages = Math.max(1, Number(totalPages) || 1);
   const safePage = Math.max(0, Math.min(safeTotalPages - 1, Number(page) || 0));
-  const label = activeTab === "avail" ? "Stok Tersedia" : "Stok Habis";
+  const label = isEn
+    ? (activeTab === "avail" ? "Available Stock" : "Out of Stock")
+    : (activeTab === "avail" ? "Stok Tersedia" : "Stok Habis");
 
-  const summary = "Tersedia: <b>" + availCount + "</b> produk • Habis: <b>" + emptyCount + "</b> produk";
+  const summary = isEn
+    ? "Available: <b>" + availCount + "</b> items • Out of Stock: <b>" + emptyCount + "</b> items"
+    : "Tersedia: <b>" + availCount + "</b> produk • Habis: <b>" + emptyCount + "</b> produk";
   let contentBlock;
   if (!items.length) {
     contentBlock = renderBlockquote([
-      activeTab === "avail"
-        ? "Saat ini seluruh produk sedang habis."
-        : "Tidak ada produk yang habis stok."
+      isEn
+        ? (activeTab === "avail" ? "All products are currently out of stock." : "No products are out of stock.")
+        : (activeTab === "avail" ? "Saat ini seluruh produk sedang habis." : "Tidak ada produk yang habis stok.")
     ]);
   } else {
     const rows = items.map((item) => [
@@ -132,37 +177,42 @@ export function renderStockScreen(
     ]);
     contentBlock = renderMonospaceTable(
       [
-        { label: "Produk", width: 18, align: "left" },
-        { label: "Stok", width: 5, align: "right" },
-        { label: "Jual", width: 6, align: "right" }
+        { label: isEn ? "Product" : "Produk", width: 18, align: "left" },
+        { label: isEn ? "Stock" : "Stok", width: 5, align: "right" },
+        { label: isEn ? "Sold" : "Jual", width: 6, align: "right" }
       ],
       rows
     );
   }
 
   const text = [
-    "📦 <b>Cek Stok</b>",
+    isEn ? "📦 <b>Stock Status</b>" : "📦 <b>Cek Stok</b>",
     summary,
     "",
     "<b>" + label + "</b>",
     contentBlock,
-    renderHint("Hal " + (safePage + 1) + "/" + safeTotalPages + " (" + label + "). Stok dapat berubah sampai pesanan dibuat.")
+    renderHint(
+      isEn
+        ? "Page " + (safePage + 1) + "/" + safeTotalPages + " (" + label + "). Tap any item below to order."
+        : "Hal " + (safePage + 1) + "/" + safeTotalPages + " (" + label + "). Stok dapat berubah sampai pesanan dibuat."
+    )
   ].join("\n");
 
   return {
     text,
     parseMode: "HTML",
     inlineKeyboard: buildStockInlineKeyboard(
-      { tab: activeTab, availCount, emptyCount, page: safePage, totalPages: safeTotalPages, items },
+      { tab: activeTab, availCount, emptyCount, page: safePage, totalPages: safeTotalPages, items, lang },
       env
     )
   };
 }
 
 export function renderProductCheckoutScreen(
-  { product, qty = 1, availableMethods = [], qrisMode = "STATIC_FALLBACK", backCallback = "cat:page:0" },
+  { product, qty = 1, availableMethods = [], qrisMode = "STATIC_FALLBACK", backCallback = "cat:page:0", intlConfig = {}, lang = "id" },
   env = {}
 ) {
+  const isEn = normalizeLang(lang) === "en";
   const maxQty = product.stock === null ? null : Math.max(0, Number(product.stock) || 0);
   const canBuy = maxQty === null || maxQty > 0;
   const clampedQty = canBuy
@@ -172,38 +222,46 @@ export function renderProductCheckoutScreen(
   const totalAmount = unitPrice * clampedQty;
 
   const stockLabel = product.stock === null
-    ? "Tidak dibatasi"
+    ? (isEn ? "Unlimited" : "Tidak dibatasi")
     : maxQty === 0
-      ? "Habis (0)"
-      : maxQty + " unit tersedia";
+      ? (isEn ? "Out of Stock (0)" : "Habis (0)")
+      : maxQty + (isEn ? " units available" : " unit tersedia");
+
+  const showDual = isEn || availableMethods.includes("USDT") || availableMethods.includes("PAYPAL");
+  const unitPriceText = showDual
+    ? `${formatRp(unitPrice)} (≈ ${convertIdrToUsdt(unitPrice, intlConfig?.usd_exchange_rate)} USDT)`
+    : formatRp(unitPrice);
+  const totalPriceText = showDual
+    ? formatDualPrice(totalAmount, intlConfig, lang)
+    : formatRp(totalAmount);
 
   const cardLines = [
     "<b>" + escapeHtml(product.name || product.sku) + "</b>",
     "• SKU: <code>" + escapeHtml(product.sku) + "</code>",
-    "• Harga satuan: <b>" + escapeHtml(formatRp(unitPrice)) + "</b>",
-    "• Stok: <b>" + escapeHtml(stockLabel) + "</b>"
+    (isEn ? "• Unit price: <b>" : "• Harga satuan: <b>") + escapeHtml(unitPriceText) + "</b>",
+    (isEn ? "• Stock: <b>" : "• Stok: <b>") + escapeHtml(stockLabel) + "</b>"
   ];
   if (product.description) {
-    cardLines.push("• Detail: " + escapeHtml(truncateText(product.description, 220)));
+    cardLines.push((isEn ? "• Details: " : "• Detail: ") + escapeHtml(truncateText(product.description, 220)));
   }
   if (canBuy) {
-    cardLines.push("• Jumlah: <b>" + clampedQty + " unit</b>");
-    cardLines.push("• Total Bayar: <b>" + escapeHtml(formatRp(totalAmount)) + "</b>");
+    cardLines.push((isEn ? "• Quantity: <b>" : "• Jumlah: <b>") + clampedQty + (isEn ? " units</b>" : " unit</b>"));
+    cardLines.push((isEn ? "• Total Payment: <b>" : "• Total Bayar: <b>") + escapeHtml(totalPriceText) + "</b>");
   }
 
   const noMethodsWarning = canBuy && (!availableMethods || availableMethods.length === 0)
-    ? "\n⚠️ <i>Belum ada metode pembayaran aktif. Hubungi admin.</i>"
+    ? (isEn ? "\n⚠️ <i>No active payment methods configured. Contact Admin.</i>" : "\n⚠️ <i>Belum ada metode pembayaran aktif. Hubungi admin.</i>")
     : "";
 
   const text = [
-    "🧾 <b>Checkout Produk</b>",
+    isEn ? "🧾 <b>Product Checkout</b>" : "🧾 <b>Checkout Produk</b>",
     "",
     renderBlockquote(cardLines) + noMethodsWarning,
     "",
     renderHint(
       canBuy
-        ? "Atur jumlah dengan ➖ / ➕ lalu pilih metode pembayaran di bawah."
-        : "Stok produk sedang habis. Periksa produk lain di Daftar Produk atau Cek Stok."
+        ? (isEn ? "Adjust quantity with ➖ / ➕ then choose a payment method below." : "Atur jumlah dengan ➖ / ➕ lalu pilih metode pembayaran di bawah.")
+        : (isEn ? "This product is currently out of stock." : "Stok produk sedang habis. Periksa produk lain di Daftar Produk atau Cek Stok.")
     )
   ].join("\n");
 
@@ -218,42 +276,47 @@ export function renderProductCheckoutScreen(
         maxQty,
         availableMethods,
         qrisMode,
-        backCallback
+        backCallback,
+        totalAmount,
+        intlConfig,
+        lang
       },
       env
     )
   };
 }
 
-function formatOrderStatusBadge(order) {
+function formatOrderStatusBadge(order, lang = "id") {
+  const isEn = normalizeLang(lang) === "en";
   const status = String(order.status || "").toUpperCase();
   const payConfirm = String(order.payment_confirmation_status || "").toUpperCase();
-  if (payConfirm === "DISETUJUI") return "✅ Lunas";
-  if (payConfirm === "MENUNGGU_VERIFIKASI") return "⏳ Verifikasi";
-  if (payConfirm === "DITOLAK") return "❌ Bukti Ditolak";
-  if (status === "MENUNGGU_PEMBAYARAN") return "💳 Belum Bayar";
-  if (status === "DIBATALKAN") return "⛔ Batal";
+  if (payConfirm === "DISETUJUI") return isEn ? "✅ Paid & Verified" : "✅ Lunas";
+  if (payConfirm === "MENUNGGU_VERIFIKASI") return isEn ? "⏳ Verifying" : "⏳ Verifikasi";
+  if (payConfirm === "DITOLAK") return isEn ? "❌ Proof Rejected" : "❌ Bukti Ditolak";
+  if (status === "MENUNGGU_PEMBAYARAN") return isEn ? "💳 Unpaid" : "💳 Belum Bayar";
+  if (status === "DIBATALKAN") return isEn ? "⛔ Cancelled" : "⛔ Batal";
   return escapeHtml(status || "-");
 }
 
 export function renderHistoryScreen(
-  { orders = [], page = 0, totalPages = 1, totalCount = 0, qrisAvailable = true } = {},
+  { orders = [], page = 0, totalPages = 1, totalCount = 0, qrisAvailable = true, lang = "id" } = {},
   env = {}
 ) {
+  const isEn = normalizeLang(lang) === "en";
   const safeTotalPages = Math.max(1, Number(totalPages) || 1);
   const safePage = Math.max(0, Math.min(safeTotalPages - 1, Number(page) || 0));
 
   if (!orders.length) {
     return {
       text: [
-        "📜 <b>Riwayat Pesanan</b>",
+        isEn ? "📜 <b>Order History</b>" : "📜 <b>Riwayat Pesanan</b>",
         "",
-        renderBlockquote(["Belum ada pesanan. Mulai belanja melalui Daftar Produk."]),
+        renderBlockquote([isEn ? "You have no orders yet. Browse Products to get started." : "Belum ada pesanan. Mulai belanja melalui Daftar Produk."]),
         "",
-        renderHint("Pesanan dan resi otomatis muncul di sini setelah checkout.")
+        renderHint(isEn ? "Your orders and claim links will appear here after checkout." : "Pesanan dan resi otomatis muncul di sini setelah checkout.")
       ].join("\n"),
       parseMode: "HTML",
-      inlineKeyboard: buildHistoryInlineKeyboard({ orders: [], page: 0, totalPages: 1, qrisAvailable }, env)
+      inlineKeyboard: buildHistoryInlineKeyboard({ orders: [], page: 0, totalPages: 1, qrisAvailable, lang }, env)
     };
   }
 
@@ -262,76 +325,99 @@ export function renderHistoryScreen(
     const prod = escapeHtml(truncateText(order.product_name || order.sku || "-", 28));
     const qty = Number(order.quantity || 1);
     const total = escapeHtml(formatRp(order.total || 0));
-    const badge = formatOrderStatusBadge(order);
+    const badge = formatOrderStatusBadge(order, lang);
     return "• <code>" + id + "</code> — " + badge + "\n  " + prod + " ×" + qty + " • <b>" + total + "</b>";
   });
 
   const text = [
-    "📜 <b>Riwayat Pesanan</b> (" + totalCount + " total • Hal " + (safePage + 1) + "/" + safeTotalPages + ")",
+    isEn
+      ? "📜 <b>Order History</b> (" + totalCount + " total • Page " + (safePage + 1) + "/" + safeTotalPages + ")"
+      : "📜 <b>Riwayat Pesanan</b> (" + totalCount + " total • Hal " + (safePage + 1) + "/" + safeTotalPages + ")",
     "",
     renderBlockquote(cards),
     "",
-    renderHint("Barang / resi dikirim setelah pembayaran terverifikasi.")
+    renderHint(
+      isEn
+        ? "Once verified, tap Claim Product to contact Admin and receive your item."
+        : "Barang / resi dikirim atau diklaim ke Admin setelah pembayaran terverifikasi."
+    )
   ].join("\n");
 
   return {
     text,
     parseMode: "HTML",
-    inlineKeyboard: buildHistoryInlineKeyboard({ orders, page: safePage, totalPages: safeTotalPages, qrisAvailable }, env)
+    inlineKeyboard: buildHistoryInlineKeyboard({ orders, page: safePage, totalPages: safeTotalPages, qrisAvailable, lang }, env)
   };
 }
 
-export function renderGuideScreen(env = {}) {
-  const steps = renderBlockquote([
-    "1. Tekan <b>🛍️ List Produk</b> atau <b>📦 Cek Stok</b> untuk memilih produk.",
-    "2. Pilih nomor produk lewat keypad bawah atau tombol inline.",
-    "3. Atur jumlah (<b>➖ / ➕</b>) dan periksa <b>Total Bayar</b>.",
-    "4. Pilih metode bayar (<b>QRIS</b>, <b>Transfer Bank</b>, atau <b>COD</b>).",
-    "5. Selesaikan pembayaran, unggah bukti, lalu pantau resi di <b>📜 Riwayat</b>."
-  ]);
+export function renderGuideScreen(env = {}, lang = "id") {
+  const isEn = normalizeLang(lang) === "en";
+  const steps = renderBlockquote(
+    isEn
+      ? [
+        "1. Tap <b>🛍️ Products</b> or <b>📦 Check Stock</b> to select an item.",
+        "2. Pick the product number via the bottom keypad or inline button.",
+        "3. Adjust quantity (<b>➖ / ➕</b>) and check the <b>Total Payment</b> (IDR / USDT).",
+        "4. Choose your payment method (<b>QRIS</b>, <b>USDT</b>, <b>PayPal</b>, <b>Bank Transfer</b>, or <b>COD</b>).",
+        "5. Send your payment screenshot directly in this chat — our system auto-validates it and directs you to <b>Chat Admin</b> to claim your product."
+      ]
+      : [
+        "1. Tekan <b>🛍️ List Produk</b> atau <b>📦 Cek Stok</b> untuk memilih produk.",
+        "2. Pilih nomor produk lewat keypad bawah atau tombol inline.",
+        "3. Atur jumlah (<b>➖ / ➕</b>) dan periksa <b>Total Bayar</b> (IDR / USDT).",
+        "4. Pilih metode bayar (<b>QRIS</b>, <b>USDT</b>, <b>PayPal</b>, <b>Transfer Bank</b>, atau <b>COD</b>).",
+        "5. Kirim screenshot bukti bayar langsung di chat — sistem memvalidasi otomatis dan mengarahkan Anda ke <b>Chat Admin</b> untuk meminta produk."
+      ]
+  );
 
   const text = [
-    "📖 <b>Cara Order</b>",
+    isEn ? "📖 <b>How to Order</b>" : "📖 <b>Cara Order</b>",
     "",
     steps,
     "",
-    renderHint("Baca detail produk dan pastikan total sebelum membayar.")
+    renderHint(
+      isEn
+        ? "Review product details and exact total before completing payment."
+        : "Baca detail produk dan pastikan total sebelum membayar."
+    )
   ].join("\n");
 
   return {
     text,
     parseMode: "HTML",
-    inlineKeyboard: buildGuideInlineKeyboard(env)
+    inlineKeyboard: buildGuideInlineKeyboard(env, lang)
   };
 }
 
-export function renderSearchPromptScreen(env = {}) {
+export function renderSearchPromptScreen(env = {}, lang = "id") {
+  const isEn = normalizeLang(lang) === "en";
   return {
     text: [
-      "🔍 <b>Cari Produk</b>",
+      isEn ? "🔍 <b>Search Products</b>" : "🔍 <b>Cari Produk</b>",
       "",
-      renderBlockquote(["Ketik nama produk atau kode SKU yang ingin dicari."]),
+      renderBlockquote([isEn ? "Type the product name or SKU code you want to find." : "Ketik nama produk atau kode SKU yang ingin dicari."]),
       "",
-      renderHint("Mode pencarian aktif 5 menit. Tekan ❌ Batal untuk keluar.")
+      renderHint(isEn ? "Search mode is active for 5 minutes. Tap ❌ Cancel to exit." : "Mode pencarian aktif 5 menit. Tekan ❌ Batal untuk keluar.")
     ].join("\n"),
     parseMode: "HTML",
-    inlineKeyboard: buildSearchPromptInlineKeyboard(env)
+    inlineKeyboard: buildSearchPromptInlineKeyboard(env, lang)
   };
 }
 
-export function renderSearchResultsScreen({ query = "", items = [] } = {}, env = {}) {
+export function renderSearchResultsScreen({ query = "", items = [], lang = "id" } = {}, env = {}) {
+  const isEn = normalizeLang(lang) === "en";
   const safeQuery = escapeHtml(truncateText(query, 40));
   if (!items.length) {
     return {
       text: [
-        "🔍 <b>Hasil Pencarian:</b> <code>" + safeQuery + "</code>",
+        (isEn ? "🔍 <b>Search Results:</b> <code>" : "🔍 <b>Hasil Pencarian:</b> <code>") + safeQuery + "</code>",
         "",
-        renderBlockquote(["Tidak ditemukan produk yang cocok dengan kata kunci tersebut."]),
+        renderBlockquote([isEn ? "No matching products found for that keyword." : "Tidak ditemukan produk yang cocok dengan kata kunci tersebut."]),
         "",
-        renderHint("Coba kata kunci lebih singkat atau buka Daftar Produk.")
+        renderHint(isEn ? "Try a shorter keyword or open Product Catalog." : "Coba kata kunci lebih singkat atau buka Daftar Produk.")
       ].join("\n"),
       parseMode: "HTML",
-      inlineKeyboard: buildSearchResultsInlineKeyboard([], env)
+      inlineKeyboard: buildSearchResultsInlineKeyboard([], env, lang)
     };
   }
 
@@ -342,20 +428,24 @@ export function renderSearchResultsScreen({ query = "", items = [] } = {}, env =
   ]);
   const table = renderMonospaceTable(
     [
-      { label: "Produk", width: 16, align: "left" },
-      { label: "Stok", width: 4, align: "right" },
-      { label: "Harga", width: 10, align: "right" }
+      { label: isEn ? "Product" : "Produk", width: 16, align: "left" },
+      { label: isEn ? "Stock" : "Stok", width: 4, align: "right" },
+      { label: isEn ? "Price" : "Harga", width: 10, align: "right" }
     ],
     rows
   );
 
   return {
     text: [
-      "🔍 <b>Hasil Pencarian:</b> <code>" + safeQuery + "</code> (" + items.length + ")",
+      (isEn ? "🔍 <b>Search Results:</b> <code>" : "🔍 <b>Hasil Pencarian:</b> <code>") + safeQuery + "</code> (" + items.length + ")",
       table,
-      renderHint("Pilih produk di bawah untuk langsung melihat detail & checkout.")
+      renderHint(
+        isEn
+          ? "Tap a product below to view details & checkout."
+          : "Pilih produk di bawah untuk langsung melihat detail & checkout."
+      )
     ].join("\n"),
     parseMode: "HTML",
-    inlineKeyboard: buildSearchResultsInlineKeyboard(items, env)
+    inlineKeyboard: buildSearchResultsInlineKeyboard(items, env, lang)
   };
 }

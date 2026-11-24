@@ -10,7 +10,8 @@ const TZ_OFFSET_MS = 7 * 60 * 60 * 1000;
 const SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const PAID_STATUSES = new Set(["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI", "PAID", "COMPLETED"]);
 const CANCELLED_STATUSES = new Set(["DIBATALKAN", "CANCELLED", "CANCELED"]);
-const ONLINE_METHODS = new Set(["QRIS", "TRANSFER", "TRANSFER_BANK"]);
+const ONLINE_METHODS = new Set(["QRIS", "TRANSFER", "TRANSFER_BANK", "USDT", "PAYPAL", "STARS"]);
+const INTL_METHODS = new Set(["USDT", "PAYPAL", "STARS"]);
 
 function nowJakarta() {
   return new Date(Date.now() + TZ_OFFSET_MS).toISOString().replace("Z", "+07:00");
@@ -139,7 +140,7 @@ async function createOrderD1(db, input) {
   if (!/^[A-Z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU produk tidak valid.");
   if (!Number.isInteger(qty) || qty < 1 || qty > 1000) throw new Error("Jumlah pesanan tidak valid.");
   const method = clean(input.paymentMethod, 20).toUpperCase();
-  if (!["QRIS", "TRANSFER", "COD"].includes(method)) throw new Error("Metode pembayaran tidak valid.");
+  if (!["QRIS", "TRANSFER", "COD", "USDT", "PAYPAL", "STARS"].includes(method)) throw new Error("Metode pembayaran tidak valid.");
   const dedupe = idempotencyKey(input);
   const prior = await db.prepare("SELECT * FROM orders WHERE idempotency_key = ?").bind(dedupe).first();
   if (prior) return { ...prior, duplicate: true, created: false, stock_reserved: Boolean(prior.stock_reserved) };
@@ -167,17 +168,20 @@ async function createOrderD1(db, input) {
     FROM catalog_products p
     WHERE p.sku = ? COLLATE NOCASE AND p.active = 1
       AND (p.stock IS NULL OR p.stock >= ?)
-      AND EXISTS (
-        SELECT 1 FROM payment_method_settings pms
-        WHERE pms.method_key = ? AND pms.enabled = 1
-          AND (? <> 'TRANSFER' OR EXISTS (
-            SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled = 1
-          ))
+      AND (
+        EXISTS (
+          SELECT 1 FROM payment_method_settings pms
+          WHERE pms.method_key = ? AND pms.enabled = 1
+            AND (? <> 'TRANSFER' OR EXISTS (
+              SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled = 1
+            ))
+        )
+        OR ? IN ('USDT','PAYPAL','STARS')
       )`).bind(
         id, dedupe, createdAt, createdMs, clean(input.channel || "telegram",24),
         clean(input.customerId,128), clean(input.customerName || "Pelanggan",100),
         qty, qty, shipping, qty, shipping, method, "MENUNGGU_PEMBAYARAN",
-        createdAt, sku, qty, method, method
+        createdAt, sku, qty, method, method, method
       ),
     db.prepare(`INSERT OR IGNORE INTO inventory_movements(order_id,sku,movement_type,quantity,created_at)
       SELECT order_id,sku,'RESERVE',quantity,? FROM orders
@@ -193,10 +197,12 @@ async function createOrderD1(db, input) {
     const created = current.order_id === id;
     return { ...current, duplicate: !created, created: created, stock_reserved: Boolean(current.stock_reserved) };
   }
-  const methodAvailable = await db.prepare(
-    "SELECT 1 AS available FROM payment_method_settings pms WHERE pms.method_key=? AND pms.enabled=1 " +
-    "AND (? <> 'TRANSFER' OR EXISTS (SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled=1))"
-  ).bind(method,method).first();
+  const methodAvailable = INTL_METHODS.has(method)
+    ? { available: 1 }
+    : await db.prepare(
+      "SELECT 1 AS available FROM payment_method_settings pms WHERE pms.method_key=? AND pms.enabled=1 " +
+      "AND (? <> 'TRANSFER' OR EXISTS (SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled=1))"
+    ).bind(method,method).first();
   if (!methodAvailable) {
     throw new Error("Metode pembayaran baru saja dinonaktifkan atau belum dikonfigurasi admin. Pilih metode lain.");
   }
@@ -635,6 +641,73 @@ export async function requestVerificationTransactional(env,id,userId) {
 export async function approvePaymentTransactional(env,id,actor) {
   return orderOperation(env,id,"approvePayment",actor);
 }
+async function approvePaymentByMutationD1(db,id,mutationInfo={},actor="qris-mutation") {
+  await requireReady(db);
+  const o=await getOrderD1(db,id);
+  if(!o)throw new Error("Pesanan tidak ditemukan.");
+  const method=String(o.payment_method||"").toUpperCase();
+  if(method!=="QRIS")throw new Error("Auto-approval mutasi hanya berlaku untuk pembayaran QRIS.");
+  if(CANCELLED_STATUSES.has(String(o.status).toUpperCase()))throw new Error("Pesanan sudah dibatalkan.");
+  if (String(o.payment_confirmation_status).toUpperCase() === "DISETUJUI" && o.receipt_code) {
+    return { ...o, alreadyApproved: true };
+  }
+  const payment=await db.prepare(
+    "SELECT status,base_amount,unique_code,expected_amount,expires_at FROM qris_payments WHERE order_id=? LIMIT 1"
+  ).bind(id).first();
+  if(!payment)throw new Error("Tagihan QRIS untuk pesanan ini tidak ditemukan.");
+  const base=Number(payment.base_amount),suffix=Number(payment.unique_code),expected=Number(payment.expected_amount);
+  const matchedAmount=Number(mutationInfo?.amount);
+  if(!Number.isSafeInteger(base)||base!==Number(o.total)||!Number.isInteger(suffix)||suffix<1||suffix>999
+    ||!Number.isSafeInteger(expected)||expected!==base+suffix||matchedAmount!==expected) {
+    throw new Error("Nominal mutasi tidak cocok eksak dengan tagihan QRIS.");
+  }
+  if(String(payment.status||"").toUpperCase()==="PAID") {
+    throw new Error("QRIS sudah tercatat lunas, tetapi status pesanan belum sinkron.");
+  }
+  const expiresMs=Date.parse(String(payment.expires_at||""));
+  if(Number.isFinite(expiresMs)&&expiresMs<Date.now()) {
+    throw new Error("Tagihan QRIS sudah kedaluwarsa.");
+  }
+
+  const at=nowJakarta(), code="SEI-"+dateStamp(at)+"-"+crypto.randomUUID().slice(0,6).toUpperCase();
+  const sourceKey="approve:"+code;
+  const eventPayload=JSON.stringify({
+    via: "mutation_ingest",
+    mutation_id: clean(mutationInfo?.mutationId, 80),
+    source_app: clean(mutationInfo?.sourceApp, 120),
+    matched_amount: matchedAmount
+  });
+  const results=await db.batch([
+    db.prepare(`UPDATE orders SET status='DIBAYAR',payment_confirmation_status='DISETUJUI',
+      payment_confirmed_at=?,receipt_code=?,pickup_status='BELUM_DIAMBIL',updated_at=?
+      WHERE order_id=? AND COALESCE(payment_confirmation_status,'')<>'DISETUJUI'
+        AND status NOT IN ('DIBATALKAN','CANCELLED','CANCELED')
+        AND EXISTS (
+          SELECT 1 FROM qris_payments qp WHERE qp.order_id=orders.order_id
+            AND qp.status<>'PAID' AND qp.base_amount=orders.total
+            AND qp.expected_amount=qp.base_amount+qp.unique_code
+            AND qp.expected_amount=?
+        )`).bind(at,code,at,id,matchedAmount),
+    db.prepare(`UPDATE qris_payments SET status='PAID',raw_provider_status='MUTATION_MATCHED',
+      reviewed_by=?,reviewed_at=?,paid_at=?,updated_at=?
+      WHERE order_id=? AND status<>'PAID' AND base_amount=?
+        AND expected_amount=base_amount+unique_code AND expected_amount=?
+        AND EXISTS (SELECT 1 FROM orders o WHERE o.order_id=qris_payments.order_id
+          AND o.payment_confirmation_status='DISETUJUI' AND o.receipt_code=?)`)
+      .bind(clean(actor,100),at,at,at,id,Number(o.total),matchedAmount,code),
+    db.prepare(`INSERT INTO order_events(order_id,event_type,from_status,to_status,actor,source_key,payload_json,created_at)
+      SELECT order_id,'PAYMENT_APPROVED',?,'DIBAYAR',?,?,?,? FROM orders
+      WHERE order_id=? AND receipt_code=?`).bind(o.status,clean(actor,128),sourceKey,eventPayload,at,id,code),
+    adminActivityAuditStatement(db,actor,"PAYMENT_APPROVED",id,{from_status:String(o.status||""),to_status:"DIBAYAR",transition_type:"order_status",via:"mutation_ingest"},at,sourceKey),
+    sheetMirrorStatement(db,id,at)
+  ].filter(Boolean));
+  checkChanges(results[0],"Pembayaran sudah diproses atau tidak memenuhi syarat auto-approval.");
+  checkChanges(results[1],"Pembaruan ledger QRIS tidak berhasil.");
+  return getOrderD1(db,id);
+}
+export async function approvePaymentByMutationTransactional(env,id,mutationInfo,actor="qris-mutation") {
+  return orderOperation(env,id,"approvePaymentByMutation",mutationInfo,actor);
+}
 export async function rejectPaymentTransactional(env,id,actor) {
   return orderOperation(env,id,"rejectPayment",actor);
 }
@@ -760,6 +833,13 @@ export class OrderCoordinator extends DurableObject {
     return this.enqueue(async()=>{
       const result=await approvePaymentD1(this.env.DB,id,actor);
       this.audit("APPROVE_PAYMENT",id,result.receipt_code);
+      return result;
+    });
+  }
+  async approvePaymentByMutation(id,mutationInfo,actor) {
+    return this.enqueue(async()=>{
+      const result=await approvePaymentByMutationD1(this.env.DB,id,mutationInfo,actor);
+      this.audit("APPROVE_PAYMENT_MUTATION",id,result.receipt_code);
       return result;
     });
   }
