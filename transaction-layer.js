@@ -10,7 +10,8 @@ const TZ_OFFSET_MS = 7 * 60 * 60 * 1000;
 const SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
 const PAID_STATUSES = new Set(["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI", "PAID", "COMPLETED"]);
 const CANCELLED_STATUSES = new Set(["DIBATALKAN", "CANCELLED", "CANCELED"]);
-const ONLINE_METHODS = new Set(["QRIS", "TRANSFER", "TRANSFER_BANK"]);
+const ONLINE_METHODS = new Set(["QRIS", "TRANSFER", "TRANSFER_BANK", "USDT", "PAYPAL", "STARS"]);
+const INTL_METHODS = new Set(["USDT", "PAYPAL", "STARS"]);
 
 function nowJakarta() {
   return new Date(Date.now() + TZ_OFFSET_MS).toISOString().replace("Z", "+07:00");
@@ -139,7 +140,7 @@ async function createOrderD1(db, input) {
   if (!/^[A-Z0-9._-]{1,40}$/.test(sku)) throw new Error("SKU produk tidak valid.");
   if (!Number.isInteger(qty) || qty < 1 || qty > 1000) throw new Error("Jumlah pesanan tidak valid.");
   const method = clean(input.paymentMethod, 20).toUpperCase();
-  if (!["QRIS", "TRANSFER", "COD"].includes(method)) throw new Error("Metode pembayaran tidak valid.");
+  if (!["QRIS", "TRANSFER", "COD", "USDT", "PAYPAL", "STARS"].includes(method)) throw new Error("Metode pembayaran tidak valid.");
   const dedupe = idempotencyKey(input);
   const prior = await db.prepare("SELECT * FROM orders WHERE idempotency_key = ?").bind(dedupe).first();
   if (prior) return { ...prior, duplicate: true, created: false, stock_reserved: Boolean(prior.stock_reserved) };
@@ -167,17 +168,20 @@ async function createOrderD1(db, input) {
     FROM catalog_products p
     WHERE p.sku = ? COLLATE NOCASE AND p.active = 1
       AND (p.stock IS NULL OR p.stock >= ?)
-      AND EXISTS (
-        SELECT 1 FROM payment_method_settings pms
-        WHERE pms.method_key = ? AND pms.enabled = 1
-          AND (? <> 'TRANSFER' OR EXISTS (
-            SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled = 1
-          ))
+      AND (
+        EXISTS (
+          SELECT 1 FROM payment_method_settings pms
+          WHERE pms.method_key = ? AND pms.enabled = 1
+            AND (? <> 'TRANSFER' OR EXISTS (
+              SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled = 1
+            ))
+        )
+        OR ? IN ('USDT','PAYPAL','STARS')
       )`).bind(
         id, dedupe, createdAt, createdMs, clean(input.channel || "telegram",24),
         clean(input.customerId,128), clean(input.customerName || "Pelanggan",100),
         qty, qty, shipping, qty, shipping, method, "MENUNGGU_PEMBAYARAN",
-        createdAt, sku, qty, method, method
+        createdAt, sku, qty, method, method, method
       ),
     db.prepare(`INSERT OR IGNORE INTO inventory_movements(order_id,sku,movement_type,quantity,created_at)
       SELECT order_id,sku,'RESERVE',quantity,? FROM orders
@@ -193,10 +197,12 @@ async function createOrderD1(db, input) {
     const created = current.order_id === id;
     return { ...current, duplicate: !created, created: created, stock_reserved: Boolean(current.stock_reserved) };
   }
-  const methodAvailable = await db.prepare(
-    "SELECT 1 AS available FROM payment_method_settings pms WHERE pms.method_key=? AND pms.enabled=1 " +
-    "AND (? <> 'TRANSFER' OR EXISTS (SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled=1))"
-  ).bind(method,method).first();
+  const methodAvailable = INTL_METHODS.has(method)
+    ? { available: 1 }
+    : await db.prepare(
+      "SELECT 1 AS available FROM payment_method_settings pms WHERE pms.method_key=? AND pms.enabled=1 " +
+      "AND (? <> 'TRANSFER' OR EXISTS (SELECT 1 FROM payment_bank_accounts pba WHERE pba.enabled=1))"
+    ).bind(method,method).first();
   if (!methodAvailable) {
     throw new Error("Metode pembayaran baru saja dinonaktifkan atau belum dikonfigurasi admin. Pilih metode lain.");
   }
