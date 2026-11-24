@@ -38,6 +38,10 @@ import {
   handleCustomerHybridCallback,
   handleCustomerHybridMessage
 } from "../src/order-bot/ui/controller.mjs";
+import {
+  parseQuickQrisCommand,
+  renderQuickQrisCaptionHtml
+} from "../src/order-bot/ui/admin-screens.mjs";
 
 function createMemoryKv() {
   const store = new Map();
@@ -265,4 +269,38 @@ test("handleCustomerHybridCallback switches language and triggers claim:bot hand
     globalThis.fetch = originalFetch;
   }
 });
+
+test("admin /qris+nominal and /qris <nominal> [note] command parser and HTML caption renderer", () => {
+  assert.deepEqual(parseQuickQrisCommand("/qris+50000"), { ok: true, amount: 50000, note: "" });
+  assert.deepEqual(parseQuickQrisCommand("/qris+150.000"), { ok: true, amount: 150000, note: "" });
+  assert.deepEqual(parseQuickQrisCommand("/qris 75000"), { ok: true, amount: 75000, note: "" });
+  assert.deepEqual(parseQuickQrisCommand("/qris+250000 Jasa Setup Website"), {
+    ok: true,
+    amount: 250000,
+    note: "Jasa Setup Website"
+  });
+  assert.deepEqual(parseQuickQrisCommand("/qris@seiton_bot+88.500 Paket Pro"), {
+    ok: true,
+    amount: 88500,
+    note: "Paket Pro"
+  });
+  assert.equal(parseQuickQrisCommand("/qris_test 10000"), null);
+  assert.equal(parseQuickQrisCommand("/start"), null);
+  assert.equal(parseQuickQrisCommand("/qris").ok, false);
+  assert.equal(parseQuickQrisCommand("/qris+0").ok, false);
+  assert.equal(parseQuickQrisCommand("/qris+15000000").ok, false);
+
+  const caption = renderQuickQrisCaptionHtml({
+    amount: 150000,
+    merchantName: "SEITON.ID",
+    merchantCity: "JEMBER",
+    note: "Transaksi <Luar Bot>"
+  });
+  assert.match(caption, /<b>QRIS PEMBAYARAN — SEITON\.ID<\/b>/);
+  assert.match(caption, /Rp 150\.000/);
+  assert.match(caption, /SEITON\.ID \(JEMBER\)/);
+  assert.ok(!caption.includes("<Luar Bot>"), "Must escape HTML in note");
+  assert.ok(caption.includes("&lt;Luar Bot&gt;"));
+});
+
 

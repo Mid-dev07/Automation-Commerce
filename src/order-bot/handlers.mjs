@@ -112,7 +112,9 @@ import {
   renderAdminCatalogItemScreen,
   renderAdminDeleteConfirmScreen,
   renderAdminDashboardLinkScreen,
-  renderAdminExportsScreen
+  renderAdminExportsScreen,
+  parseQuickQrisCommand,
+  renderQuickQrisCaptionHtml
 } from "./ui/admin-screens.mjs";
 import {
   orderRowsToObjects, productRowsToObjects, localDateKey,
@@ -617,6 +619,44 @@ async function handleTelegram(request, env, ctx) {
       }
       return;
     }
+
+    const quickQris = parseQuickQrisCommand(text, MAX_QRIS_TRANSACTION_AMOUNT);
+    if (quickQris) {
+      if (!isAdmin(customerId, env)) {
+        await sendTelegram(env, chatId, "⛔ Perintah /qris khusus admin.");
+        return;
+      }
+      if (!quickQris.ok) {
+        await sendTelegram(env, chatId, quickQris.error);
+        return;
+      }
+      try {
+        const staticPayload = String(env.QRIS_STATIC_PAYLOAD || "").trim();
+        if (!staticPayload) throw new Error("QRIS_STATIC_PAYLOAD belum dikonfigurasi.");
+        const merchant = extractQrisMerchantProfile(staticPayload);
+        if (!merchant.merchantName) throw new Error("QRIS_MERCHANT_NAME_MISSING");
+        const payload = buildDynamicQrisPayload(staticPayload, quickQris.amount);
+        const image = await fetchInternalQrisImage(payload);
+        const caption = renderQuickQrisCaptionHtml({
+          amount: quickQris.amount,
+          merchantName: merchant.merchantName,
+          merchantCity: merchant.merchantCity,
+          note: quickQris.note
+        });
+        await sendTelegramPhotoBlob(env, chatId, image, caption, null, { parseMode: "HTML" });
+        await recordAdminActivity(env, {
+          actorId: customerId,
+          action: "ADMIN_QUICK_QRIS_GENERATED",
+          resourceType: "qris_quick",
+          resourceId: "direct-" + quickQris.amount,
+          summary: { amount: quickQris.amount, merchant_name: merchant.merchantName, has_note: Boolean(quickQris.note) }
+        });
+      } catch (error) {
+        await sendTelegram(env, chatId, "⚠️ Gagal membuat QRIS: " + String(error?.message || "QRIS_QUICK_FAILED").slice(0, 220));
+      }
+      return;
+    }
+
     if (text.startsWith("/ambilsetup")) {
       if (!isAdmin(customerId, env)) return sendTelegram(env, chatId, "⛔ Perintah ini khusus admin.");
       const setupId=text.split(/\s+/)[1];
