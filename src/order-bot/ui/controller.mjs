@@ -190,19 +190,7 @@ export async function showCatalogScreen(env, ctx, { chatId, userId, page = 0, me
       ]);
       return;
     }
-    await sendTelegram(env, chatId, screen.text, screen.replyKeyboard, { parseMode: screen.parseMode });
-    if (totalPages > 1) {
-      const navHint = lang === "en"
-        ? `<i>📄 Catalog page navigation (${safePage + 1}/${totalPages}):</i>`
-        : "<i>📄 Navigasi halaman katalog (" + (safePage + 1) + "/" + totalPages + "):</i>";
-      await sendTelegram(
-        env,
-        chatId,
-        navHint,
-        screen.inlineKeyboard,
-        { parseMode: "HTML" }
-      );
-    }
+    await sendTelegram(env, chatId, screen.text, screen.inlineKeyboard, { parseMode: screen.parseMode });
   });
   tracker.emit({ page: safePage, items: pageItems.length, lang });
 }
@@ -543,13 +531,30 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
   const callbackId = String(query?.id || "");
   const admin = deps.isAdmin(userId, env);
 
-  // Non-admin Home button returns upgraded hybrid Beranda card + persistent Reply Keyboard.
-  if (data === "nav:home" && !admin) {
+  // Home / Customer View button returns upgraded hybrid Beranda card + persistent Reply Keyboard.
+  if (data === "nav:home") {
     await Promise.all([
       answerTelegramCallback(env, callbackId),
       deleteTelegramMessage(env, message)
     ]);
     await sendCustomerHome(env, ctx, chatId, query.from);
+    return true;
+  }
+
+  if (data === "nav:catalog") {
+    await showCatalogScreen(env, ctx, {
+      chatId,
+      userId,
+      page: 0,
+      message,
+      callbackId,
+      fallbackRowsReader: deps.readTelegramCatalogRows
+    });
+    return true;
+  }
+
+  if (data === "nav:guide" || data === "nav:help") {
+    await showGuideScreen(env, ctx, { chatId, userId, message, callbackId });
     return true;
   }
 
@@ -647,7 +652,7 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
       qty: 1,
       message,
       callbackId,
-      backCallback: "stock:tab:avail:0",
+      backCallback: parsed.backCallback || "stock:tab:avail:0",
       fallbackRowsReader: deps.readTelegramCatalogRows,
       getAvailablePaymentMethods: deps.getAvailablePaymentMethods
     });
@@ -662,7 +667,7 @@ export async function handleCustomerHybridCallback(env, ctx, query, deps) {
       qty: parsed.qty,
       message,
       callbackId,
-      backCallback: "cat:page:0",
+      backCallback: parsed.backCallback || "cat:page:0",
       fallbackRowsReader: deps.readTelegramCatalogRows,
       getAvailablePaymentMethods: deps.getAvailablePaymentMethods
     });
