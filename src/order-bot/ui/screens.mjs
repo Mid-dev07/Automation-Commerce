@@ -10,7 +10,6 @@ import {
   formatRp,
   renderBlockquote,
   renderHint,
-  renderMonospaceTable,
   truncateText
 } from "./formatters.mjs";
 import { convertIdrToUsdt, formatDualPrice, normalizeLang } from "./i18n.mjs";
@@ -113,36 +112,37 @@ export function renderCatalogScreen({ items = [], page = 0, totalPages = 1, tota
     };
   }
 
-  const rows = items.map((item, idx) => [
-    String(idx + 1),
-    item.name || item.sku,
-    formatRp(item.price).replace(/^Rp /, "")
-  ]);
-  const table = renderMonospaceTable(
-    [
-      { label: "No", width: 2, align: "right" },
-      { label: isEn ? "Product" : "Produk", width: 18, align: "left" },
-      { label: isEn ? "Price" : "Harga", width: 10, align: "right" }
-    ],
-    rows
-  );
+  const itemLines = items.map((item, idx) => {
+    const fullName = escapeHtml(truncateText(item.name || item.sku, 100));
+    const priceText = isEn
+      ? `${formatRp(item.price)} (≈ ${convertIdrToUsdt(item.price, env?.USD_EXCHANGE_RATE)} USDT)`
+      : formatRp(item.price);
+    const stockBadge = item.stock === null
+      ? "♾️ Unlimited"
+      : Number(item.stock) > 0
+        ? (isEn ? `📦 Stock: ${Number(item.stock)}` : `📦 Stok: ${Number(item.stock)}`)
+        : (isEn ? "❌ Out of stock" : "❌ Habis");
+    return `<b>${idx + 1}. ${fullName}</b>\n   💰 <b>${escapeHtml(priceText)}</b> • ${stockBadge}`;
+  });
 
   const text = [
     isEn
       ? "🛍️ <b>Product Catalog</b> (" + totalItems + " active)"
       : "🛍️ <b>Daftar Produk</b> (" + totalItems + " aktif)",
-    table,
+    "",
+    renderBlockquote(itemLines),
+    "",
     renderHint(
       isEn
-        ? "Page " + (safePage + 1) + "/" + safeTotalPages + ". Pick number 1–" + items.length + " via the keypad below."
-        : "Halaman " + (safePage + 1) + "/" + safeTotalPages + ". Pilih nomor 1–" + items.length + " lewat keypad di bawah."
+        ? "Page " + (safePage + 1) + "/" + safeTotalPages + ". Tap a product button below (or type 1–" + items.length + ") to order."
+        : "Halaman " + (safePage + 1) + "/" + safeTotalPages + ". Ketuk tombol produk di bawah (atau ketik 1–" + items.length + ") untuk beli."
     )
   ].join("\n");
 
   return {
     text,
     parseMode: "HTML",
-    inlineKeyboard: buildCatalogInlineKeyboard({ page: safePage, totalPages: safeTotalPages, lang }, env),
+    inlineKeyboard: buildCatalogInlineKeyboard({ page: safePage, totalPages: safeTotalPages, items, lang }, env),
     replyKeyboard: buildCatalogKeypadKeyboard(items.length, env, lang)
   };
 }
@@ -170,19 +170,20 @@ export function renderStockScreen(
         : (activeTab === "avail" ? "Saat ini seluruh produk sedang habis." : "Tidak ada produk yang habis stok.")
     ]);
   } else {
-    const rows = items.map((item) => [
-      item.name || item.sku,
-      item.stock === null ? "∞" : String(item.stock),
-      String(Number(item.soldUnits || 0))
-    ]);
-    contentBlock = renderMonospaceTable(
-      [
-        { label: isEn ? "Product" : "Produk", width: 18, align: "left" },
-        { label: isEn ? "Stock" : "Stok", width: 5, align: "right" },
-        { label: isEn ? "Sold" : "Jual", width: 6, align: "right" }
-      ],
-      rows
-    );
+    const stockLines = items.map((item, idx) => {
+      const fullName = escapeHtml(truncateText(item.name || item.sku, 100));
+      const priceStr = escapeHtml(formatRp(item.price || 0));
+      const stockStr = item.stock === null
+        ? "♾️ Unlimited"
+        : Number(item.stock) > 0
+          ? (isEn ? `📦 ${Number(item.stock)} units` : `📦 ${Number(item.stock)} unit`)
+          : (isEn ? "❌ Out of stock (0)" : "❌ Habis (0)");
+      const soldStr = isEn
+        ? `Sold: ${Number(item.soldUnits || 0)}`
+        : `Terjual: ${Number(item.soldUnits || 0)}`;
+      return `<b>${idx + 1}. ${fullName}</b>\n   💰 ${priceStr} • ${stockStr} • ${soldStr}`;
+    });
+    contentBlock = renderBlockquote(stockLines);
   }
 
   const text = [
@@ -191,10 +192,11 @@ export function renderStockScreen(
     "",
     "<b>" + label + "</b>",
     contentBlock,
+    "",
     renderHint(
       isEn
         ? "Page " + (safePage + 1) + "/" + safeTotalPages + " (" + label + "). Tap any item below to order."
-        : "Hal " + (safePage + 1) + "/" + safeTotalPages + " (" + label + "). Stok dapat berubah sampai pesanan dibuat."
+        : "Hal " + (safePage + 1) + "/" + safeTotalPages + " (" + label + "). Ketuk produk di bawah untuk langsung checkout."
     )
   ].join("\n");
 
@@ -236,13 +238,13 @@ export function renderProductCheckoutScreen(
     : formatRp(totalAmount);
 
   const cardLines = [
-    "<b>" + escapeHtml(product.name || product.sku) + "</b>",
+    "<b>" + escapeHtml(truncateText(product.name || product.sku, 100)) + "</b>",
     "• SKU: <code>" + escapeHtml(product.sku) + "</code>",
     (isEn ? "• Unit price: <b>" : "• Harga satuan: <b>") + escapeHtml(unitPriceText) + "</b>",
     (isEn ? "• Stock: <b>" : "• Stok: <b>") + escapeHtml(stockLabel) + "</b>"
   ];
   if (product.description) {
-    cardLines.push((isEn ? "• Details: " : "• Detail: ") + escapeHtml(truncateText(product.description, 220)));
+    cardLines.push((isEn ? "• Details: " : "• Detail: ") + escapeHtml(truncateText(product.description, 180)));
   }
   if (canBuy) {
     cardLines.push((isEn ? "• Quantity: <b>" : "• Jumlah: <b>") + clampedQty + (isEn ? " units</b>" : " unit</b>"));
@@ -322,7 +324,7 @@ export function renderHistoryScreen(
 
   const cards = orders.map((order) => {
     const id = escapeHtml(String(order.order_id || "-"));
-    const prod = escapeHtml(truncateText(order.product_name || order.sku || "-", 28));
+    const prod = escapeHtml(truncateText(order.product_name || order.sku || "-", 80));
     const qty = Number(order.quantity || 1);
     const total = escapeHtml(formatRp(order.total || 0));
     const badge = formatOrderStatusBadge(order, lang);
@@ -355,15 +357,15 @@ export function renderGuideScreen(env = {}, lang = "id") {
   const steps = renderBlockquote(
     isEn
       ? [
-        "1. Tap <b>🛍️ Products</b> or <b>📦 Check Stock</b> to select an item.",
-        "2. Pick the product number via the bottom keypad or inline button.",
+        "1. Tap <b>🛍️ Products</b> or <b>📦 Check Stock</b> to browse full product names & prices.",
+        "2. Tap your desired product button directly (or type its item number).",
         "3. Adjust quantity (<b>➖ / ➕</b>) and check the <b>Total Payment</b> (IDR / USDT).",
         "4. Choose your payment method (<b>QRIS</b>, <b>USDT</b>, <b>PayPal</b>, <b>Bank Transfer</b>, or <b>COD</b>).",
         "5. Send your payment screenshot directly in this chat — our system auto-validates it and directs you to <b>Chat Admin</b> to claim your product."
       ]
       : [
-        "1. Tekan <b>🛍️ List Produk</b> atau <b>📦 Cek Stok</b> untuk memilih produk.",
-        "2. Pilih nomor produk lewat keypad bawah atau tombol inline.",
+        "1. Tekan <b>🛍️ List Produk</b> atau <b>📦 Cek Stok</b> untuk melihat nama lengkap & harga produk.",
+        "2. Ketuk tombol produk pilihan Anda (atau ketik nomor urut produk).",
         "3. Atur jumlah (<b>➖ / ➕</b>) dan periksa <b>Total Bayar</b> (IDR / USDT).",
         "4. Pilih metode bayar (<b>QRIS</b>, <b>USDT</b>, <b>PayPal</b>, <b>Transfer Bank</b>, atau <b>COD</b>).",
         "5. Kirim screenshot bukti bayar langsung di chat — sistem memvalidasi otomatis dan mengarahkan Anda ke <b>Chat Admin</b> untuk meminta produk."
@@ -421,24 +423,23 @@ export function renderSearchResultsScreen({ query = "", items = [], lang = "id" 
     };
   }
 
-  const rows = items.slice(0, 8).map((item) => [
-    item.name || item.sku,
-    item.stock === null ? "∞" : String(item.stock),
-    formatRp(item.price).replace(/^Rp /, "")
-  ]);
-  const table = renderMonospaceTable(
-    [
-      { label: isEn ? "Product" : "Produk", width: 16, align: "left" },
-      { label: isEn ? "Stock" : "Stok", width: 4, align: "right" },
-      { label: isEn ? "Price" : "Harga", width: 10, align: "right" }
-    ],
-    rows
-  );
+  const resultLines = items.slice(0, 8).map((item, idx) => {
+    const fullName = escapeHtml(truncateText(item.name || item.sku, 100));
+    const priceStr = escapeHtml(formatRp(item.price));
+    const stockBadge = item.stock === null
+      ? "♾️ Unlimited"
+      : Number(item.stock) > 0
+        ? (isEn ? `📦 Stock: ${Number(item.stock)}` : `📦 Stok: ${Number(item.stock)}`)
+        : (isEn ? "❌ Out of stock" : "❌ Habis");
+    return `<b>${idx + 1}. ${fullName}</b>\n   💰 <b>${priceStr}</b> • ${stockBadge}`;
+  });
 
   return {
     text: [
       (isEn ? "🔍 <b>Search Results:</b> <code>" : "🔍 <b>Hasil Pencarian:</b> <code>") + safeQuery + "</code> (" + items.length + ")",
-      table,
+      "",
+      renderBlockquote(resultLines),
+      "",
       renderHint(
         isEn
           ? "Tap a product below to view details & checkout."

@@ -40,14 +40,43 @@ async function telegramApiRequest(env, method, payload, { allowStyleFallback = t
   return result;
 }
 
+function stripHtmlToPlain(htmlText) {
+  return String(htmlText || "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function prepareTelegramContent(rawText, limit, parseMode = null) {
+  const str = String(rawText || "");
+  if (str.length <= limit) {
+    return { text: str, parseMode: parseMode || null };
+  }
+  if (parseMode === "HTML") {
+    const plain = stripHtmlToPlain(str);
+    return {
+      text: plain.length <= limit ? plain : plain.slice(0, Math.max(1, limit - 1)).trimEnd() + "…",
+      parseMode: null
+    };
+  }
+  return {
+    text: str.slice(0, Math.max(1, limit - 1)).trimEnd() + "…",
+    parseMode: parseMode || null
+  };
+}
+
 async function sendTelegramPhoto(env, chatId, photo, caption, replyMarkup = null, options = {}) {
+  const prepared = prepareTelegramContent(caption, 1024, options.parseMode);
   const payload = {
     chat_id: chatId,
     photo,
-    caption: String(caption || "").slice(0, 1024),
+    caption: prepared.text,
     disable_notification: options.disableNotification ?? true
   };
-  if (options.parseMode) payload.parse_mode = options.parseMode;
+  if (prepared.parseMode) payload.parse_mode = prepared.parseMode;
   if (replyMarkup) payload.reply_markup = replyMarkup;
   return telegramApiRequest(env, "sendPhoto", payload);
 }
@@ -66,12 +95,13 @@ async function sendSeitonWelcome(env, chatId, isAdminUser = false) {
 
 async function sendTelegramPhotoBlob(env, chatId, blob, caption, replyMarkup = null, options = {}) {
   if (!env?.TELEGRAM_TOKEN) throw new Error("TELEGRAM_TOKEN belum diatur");
+  const prepared = prepareTelegramContent(caption, 1024, options.parseMode);
   const sendBlob = async (markup) => {
     const form = new FormData();
     form.append("chat_id", String(chatId));
     form.append("photo", blob, "seiton-qris.png");
-    form.append("caption", String(caption || "").slice(0, 1024));
-    if (options.parseMode) form.append("parse_mode", options.parseMode);
+    form.append("caption", prepared.text);
+    if (prepared.parseMode) form.append("parse_mode", prepared.parseMode);
     if (markup) form.append("reply_markup", JSON.stringify(markup));
     const response = await fetch(TELEGRAM_API + "/bot" + env.TELEGRAM_TOKEN + "/sendPhoto", {
       method: "POST",
@@ -126,9 +156,9 @@ async function updateTelegramMessage(env, message, options) {
   const hasPhoto = Array.isArray(message.photo) && message.photo.length > 0;
   const markup = replyMarkup || { inline_keyboard: [] };
 
-  // Photo -> photo: replace the media and keep the same Telegram message.
-  if (hasPhoto && photo) {
-    const media = { type: "photo", media: photo, caption: text.slice(0, 1024) };
+  // Photo -> photo: replace the media and keep the same Telegram message when caption fits 1024 chars.
+  if (hasPhoto && photo && text.length <= 1024) {
+    const media = { type: "photo", media: photo, caption: text };
     if (parseMode) media.parse_mode = parseMode;
     return telegramApiRequest(env, "editMessageMedia", {
       chat_id: chatId,
@@ -209,12 +239,13 @@ async function sendTelegramDocumentById(env, chatId, fileId, caption = "") {
 }
 
 async function sendTelegram(env, chatId, text, replyMarkup = null, options = {}) {
+  const prepared = prepareTelegramContent(text, 4096, options.parseMode);
   const payload = {
     chat_id: chatId,
-    text: String(text || "").slice(0, 4096),
+    text: prepared.text,
     disable_web_page_preview: true
   };
-  if (options.parseMode) payload.parse_mode = options.parseMode;
+  if (prepared.parseMode) payload.parse_mode = prepared.parseMode;
   if (replyMarkup) payload.reply_markup = replyMarkup;
   return telegramApiRequest(env, "sendMessage", payload);
 }
@@ -222,5 +253,5 @@ async function sendTelegram(env, chatId, text, replyMarkup = null, options = {})
 export {
   sendTelegramPhoto, sendSeitonWelcome, sendTelegramPhotoBlob, telegramApiRequest,
   deleteTelegramMessage, deleteTelegramMessageById, updateTelegramMessage, answerTelegramCallback,
-  sendTelegramDocument, sendTelegramDocumentById, sendTelegram
+  sendTelegramDocument, sendTelegramDocumentById, sendTelegram, prepareTelegramContent
 };

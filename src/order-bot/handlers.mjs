@@ -610,6 +610,15 @@ async function handleTelegram(request, env, ctx) {
           const approved=await approvePaymentAndIssueTicket(env,reference,"telegram:"+customerId);
           try{await sendPickupReceipt(env,String(approved.row[3]),approved.row,String(approved.row[0]),approved.receiptCode);}
           catch(error){receiptSent=false;console.error(JSON.stringify({level:"error",event:"telegram_receipt_delivery",order_id:approved.row[0],message:error.message}));}
+          if(!approved.alreadyApproved) {
+            try {
+              await sendVerifiedProductClaimToCustomer(env, String(approved.row[3]), approved.row, approved.receiptCode, {
+                proofFileId: String(approved.row[14] || ""),
+                proofType: String(approved.row[15] || ""),
+                actor: "telegram:" + customerId
+              });
+            } catch {}
+          }
         }
         const delivered=await deliverDigitalProductAfterPayment(env,String(found.order.order_id));
         const status=delivered.status||"PAYMENT_APPROVED";
@@ -777,13 +786,17 @@ async function handleTelegram(request, env, ctx) {
       }
       return;
     }
-    if (text.startsWith("/start") || text.startsWith("/help")) {
+    if (text.startsWith("/start") || text.startsWith("/help") || text.startsWith("/admin")) {
       const admin = isAdmin(customerId, env);
+      if (text.startsWith("/admin") && !admin) {
+        await sendTelegram(env, chatId, "⛔ Perintah /admin khusus admin.");
+        return;
+      }
       if (admin) {
         await sendSeitonWelcome(env, chatId, true);
         await recordAdminActivity(env, {
           actorId: customerId, action: "ADMIN_MENU_OPENED", resourceType: "admin_menu",
-          summary: { entry_point: text.startsWith("/start") ? "start" : "help" }
+          summary: { entry_point: text.startsWith("/admin") ? "admin" : text.startsWith("/start") ? "start" : "help" }
         });
         return;
       }
@@ -805,13 +818,15 @@ async function handleTelegram(request, env, ctx) {
       }
       return;
     }
-    if (!isAdmin(customerId, env)) {
-      if (message.chat.type && message.chat.type !== "private") return;
+    if (!message.chat.type || message.chat.type === "private") {
       const handledUi = await handleCustomerHybridMessage(env, ctx, message, text, {
         readTelegramCatalogRows,
         getAvailablePaymentMethods
       });
       if (handledUi) return;
+    }
+    if (!isAdmin(customerId, env)) {
+      if (message.chat.type && message.chat.type !== "private") return;
       if (await messagingCoreReady(env)) {
         const event = telegramMessagingEvent(update, message, text);
         await processMessagingEvent(env, event, createMessagingServices(env));
@@ -824,10 +839,10 @@ async function handleTelegram(request, env, ctx) {
       const legacyOrderInput = parseOrderText(text);
       if (!legacyOrderInput) {
         await sendTelegram(env, chatId,
-          "🛍️ *Selamat datang di Seiton.id!*\\n\\n" +
-          "Format pesanan:\\n`beli SKU jumlah metode_pembayaran`\\n" +
-          "Contoh: `beli SEI-001 2 QRIS`\\n\\n" +
-          "Ketik /help untuk bantuan.");
+          "🛍️ Selamat datang di Seiton.id!\n\n" +
+          "Format pesanan:\nbeli SKU jumlah metode_pembayaran\n" +
+          "Contoh: beli SEI-001 2 QRIS\n\n" +
+          "Ketik /start untuk membuka menu katalog interaktif.");
         return;
       }
       const legacyResult = await createOrder(env, {
@@ -835,16 +850,16 @@ async function handleTelegram(request, env, ctx) {
         idempotencyKey: String(update.update_id ?? (chatId + ":" + message.message_id))
       });
       await sendTelegram(env, chatId, await orderConfirmationWithPaymentInstructions(env, legacyResult), orderConfirmationKeyboard(legacyResult));
-      if (String(legacyResult.paymentMethod || "").toUpperCase() === "QRIS") await sendQrisPaymentScreen(env, chatId, legacyResult);
+      if (String(legacyResult.paymentMethod || "").toUpperCase() === "QRIS") await sendQrisPaymentScreen(env, chatId, legacyResult, customerId);
       return;
     }
     const orderInput = parseOrderText(text);
     if (!orderInput) {
       await sendTelegram(env, chatId,
-        "🛍️ *Selamat datang di Seiton.id!*\\n\\n" +
-        "Format pesanan:\\n`beli SKU jumlah metode_pembayaran`\\n" +
-        "Contoh: `beli SEI-001 2 QRIS`\\n\\n" +
-        "Ketik /help untuk bantuan.");
+        "🛠️ Perintah tidak dikenali.\n\n" +
+        "• Ketik /admin atau /start untuk membuka Panel Admin\n" +
+        "• Ketik /qris+nominal untuk membuat QRIS cepat\n" +
+        "• Format pesanan manual: beli SKU jumlah metode_pembayaran");
       return;
     }
     const result = await createOrder(env, {
@@ -1876,8 +1891,14 @@ async function handleTelegramCallback(env, query, ctx = null) {
     const found = await findOrderById(env, orderId);
     if (!found || String(found.row[3] || "") !== userId) throw new Error("Resi tidak ditemukan untuk akun Telegram ini.");
     if (String(found.row[13] || "") !== "DISETUJUI" || !found.row[18] || !PAID_ORDER_STATUSES.includes(String(found.row[12] || "").toUpperCase())) throw new Error("Pembayaran belum disetujui admin atau pesanan sudah dibatalkan.");
+    const langPref = await getUserLang(env, userId);
+    const lang = normalizeLang(langPref?.lang);
     await sendPickupReceipt(env, userId, found.row, orderId, String(found.row[18]));
-    await updateTelegramMessage(env, message, { text: "🎟️ Resi pengambilan dikirim kembali.", replyMarkup: customerMenuKeyboard(), clearMedia: true });
+    await updateTelegramMessage(env, message, {
+      text: lang === "en" ? "🎟️ Your verified receipt has been re-sent." : "🎟️ Resi pengambilan telah dikirim kembali.",
+      replyMarkup: customerOrderActionsKeyboard(orderId, lang, { includeClaim: true }),
+      clearMedia: true
+    });
     return;
   }
 
@@ -2687,7 +2708,7 @@ async function handleAdminPaymentAction(request, env) {
   try {
     if (body.action==="approve") {
       const method=String(found.row[11]||"").toUpperCase();
-      if (!["QRIS","TRANSFER","TRANSFER_BANK"].includes(method)) throw new Error("Hanya pembayaran QRIS/transfer yang dapat diverifikasi melalui menu ini.");
+      if (!["QRIS","TRANSFER","TRANSFER_BANK","USDT","PAYPAL","STARS"].includes(method)) throw new Error("Hanya pembayaran online yang dapat diverifikasi melalui menu ini.");
       const approved=await approvePaymentAndIssueTicket(env,found.rowNumber ?? body.order_id,"web-admin");
       if (approved.alreadyApproved) {
         return json({ok:true,status:"ALREADY_APPROVED",already_approved:true,receipt_code:approved.receiptCode,receipt_sent:false});
@@ -2698,6 +2719,14 @@ async function handleAdminPaymentAction(request, env) {
         receiptSent = false;
         console.error(JSON.stringify({level:"error",event:"dashboard_receipt_delivery",order_id:approved.row[0],message:error.message}));
       }
+      try {
+        await sendVerifiedProductClaimToCustomer(env, String(approved.row[3]), approved.row, approved.receiptCode, {
+          proofFileId: String(approved.row[14] || ""),
+          proofType: String(approved.row[15] || ""),
+          actor: "web-admin"
+        });
+      } catch {}
+      try { await deliverDigitalProductAfterPayment(env, String(approved.row[0])); } catch {}
       return json({ok:true,status:"DIBAYAR",receipt_code:approved.receiptCode,receipt_sent:receiptSent});
     }
     if (body.action==="reject") {
@@ -2748,7 +2777,7 @@ async function setOrderStatus(env, rowNumber, status, actor = "admin") {
     throw new Error("Pesanan yang sudah dibayar tidak dapat dibatalkan dari panel ini. Refund perlu dicatat terpisah.");
   }
   if (["DIBAYAR", "DIPROSES", "DIKIRIM", "SELESAI"].includes(status) &&
-      ["QRIS", "TRANSFER", "TRANSFER_BANK"].includes(method) &&
+      ["QRIS", "TRANSFER", "TRANSFER_BANK", "USDT", "PAYPAL", "STARS"].includes(method) &&
       String(row[13] || "").trim().toUpperCase() !== "DISETUJUI") {
     throw new Error("Pembayaran QRIS/transfer harus disetujui melalui menu Verifikasi Pembayaran agar resi diterbitkan.");
   }
@@ -3106,36 +3135,94 @@ async function fetchInternalQrisImage(payload) {
   return image;
 }
 
-async function sendQrisPaymentScreen(env, chatId, order) {
-  const payment = await createOrReuseQrisPayment(env, order);
+function customerOrderActionsKeyboard(orderId = "", lang = "id", { includeUpload = false, includeClaim = false } = {}) {
+  const isEn = normalizeLang(lang) === "en";
+  const rows = [];
+  const safeOrderId = String(orderId || "").trim();
+  if (includeClaim && safeOrderId) {
+    rows.push([{
+      text: isEn ? "💬 Claim Product with Admin" : "💬 Klaim Produk ke Admin",
+      callback_data: "claim:bot:" + safeOrderId.slice(0, 48),
+      style: "success"
+    }]);
+  }
+  if (includeUpload && safeOrderId) {
+    rows.push([{
+      text: isEn ? "📎 Upload / Resend Proof" : "📎 Upload / Kirim Ulang Bukti",
+      callback_data: "pc:req:" + safeOrderId,
+      style: "success"
+    }]);
+  }
+  rows.push([
+    {
+      text: isEn ? "📜 My Orders" : "📜 Riwayat Pesanan",
+      callback_data: "nav:orders",
+      style: "primary"
+    },
+    {
+      text: isEn ? "🏠 Main Menu" : "🏠 Menu Utama",
+      callback_data: "nav:home",
+      style: "primary"
+    }
+  ]);
+  return { inline_keyboard: rows };
+}
+
+async function sendQrisPaymentScreen(env, chatId, order, userId = "") {
+  const [payment, langPref] = await Promise.all([
+    createOrReuseQrisPayment(env, order),
+    getUserLang(env, userId || order?.customerId || chatId)
+  ]);
+  const lang = normalizeLang(langPref?.lang);
+  const isEn = lang === "en";
   if (payment.status === "PAID") {
-    await sendTelegram(env, chatId, "✅ Pembayaran pesanan " + order.orderId + " sudah disetujui.");
+    await sendTelegram(
+      env,
+      chatId,
+      isEn
+        ? "✅ Payment for order " + order.orderId + " is already verified."
+        : "✅ Pembayaran pesanan " + order.orderId + " sudah disetujui.",
+      customerOrderActionsKeyboard(order.orderId, lang, { includeClaim: true })
+    );
     return payment;
   }
   const image = await fetchInternalQrisImage(payment.qris_payload);
   const uniqueCode = String(payment.unique_code).padStart(3, "0");
   const staticFallback = String(payment.qris_mode || "DYNAMIC") === "STATIC_FALLBACK";
   const caption = [
-    staticFallback ? "📷 QRIS STATIS SEITON.ID — NOMINAL DIISI MANUAL" : "⚡ QRIS DINAMIS SEITON.ID",
-    "Pesanan: " + order.orderId,
-    "Merchant: " + (payment.merchant_name || "Seiton.id"),
-    "Total pesanan: " + rupiah(payment.base_amount),
-    "Kode unik: " + uniqueCode,
-    "TRANSFER PERSIS: " + rupiah(payment.expected_amount),
+    staticFallback
+      ? "📷 <b>QRIS STATIS SEITON.ID — NOMINAL DIISI MANUAL</b>"
+      : "⚡ <b>QRIS DINAMIS SEITON.ID</b>",
+    "",
+    "<blockquote>" + [
+      (isEn ? "• Order ID: <code>" : "• Pesanan: <code>") + escapeHtml(order.orderId) + "</code>",
+      "• Merchant: <b>" + escapeHtml(payment.merchant_name || "Seiton.id") + "</b>",
+      (isEn ? "• Base Amount: " : "• Total pesanan: ") + escapeHtml(rupiah(payment.base_amount)),
+      (isEn ? "• Unique Code: <code>" : "• Kode unik: <code>") + escapeHtml(uniqueCode) + "</code>",
+      "• <b>TRANSFER PERSIS: " + escapeHtml(rupiah(payment.expected_amount)) + "</b>"
+    ].join("\n") + "</blockquote>",
     "",
     staticFallback
-      ? "QR ini adalah QRIS statis asli merchant, jadi nominal tidak terisi otomatis. Setelah memindai, masukkan " + rupiah(payment.expected_amount) + " secara manual. Jangan bulatkan nominal."
-      : "Nominal sudah tertanam di QR. Pindai menggunakan aplikasi pembayaran dan pastikan nominalnya " + rupiah(payment.expected_amount) + ".",
-    "Setelah pembayaran berhasil, tekan Upload Bukti Pembayaran dan kirim screenshot transaksi.",
-    "Sistem membaca nominal dan data bukti. Admin tetap mencocokkan transaksi masuk sebelum pembayaran disahkan."
+      ? (isEn
+        ? "Scan this merchant QRIS and enter <b>" + escapeHtml(rupiah(payment.expected_amount)) + "</b> manually (do not round)."
+        : "Setelah memindai QRIS statis ini, masukkan <b>" + escapeHtml(rupiah(payment.expected_amount)) + "</b> secara manual (jangan dibulatkan).")
+      : (isEn
+        ? "Amount <b>" + escapeHtml(rupiah(payment.expected_amount)) + "</b> is embedded automatically. Scan with any QRIS banking/e-wallet app."
+        : "Nominal sudah tertanam otomatis di QR. Pindai dan pastikan nominalnya <b>" + escapeHtml(rupiah(payment.expected_amount)) + "</b>."),
+    isEn
+      ? "📸 Once paid, send your payment screenshot directly in this chat (or tap the button below) to auto-verify and claim your product with Admin."
+      : "📸 Jika tidak terdeteksi otomatis dalam beberapa detik, kirim screenshot bukti bayar langsung di chat ini untuk validasi otomatis &amp; klaim produk ke Admin."
   ].join("\n");
   const sent = await sendTelegramPhotoBlob(env, chatId, image, caption, {
     inline_keyboard: [
-      [{ text: "📎 Saya Sudah Bayar — Upload Bukti", callback_data: "pc:req:" + order.orderId, style: "success" }],
-      [{ text: "🔄 Periksa Status Pembayaran", callback_data: "qris:check:" + order.orderId, style: "primary" }],
-      [{ text: "📜 Riwayat Pesanan", callback_data: "nav:orders", style: "primary" }]
+      [{ text: isEn ? "📎 I Have Paid — Send Proof" : "📎 Saya Sudah Bayar — Upload Bukti", callback_data: "pc:req:" + order.orderId, style: "success" }],
+      [{ text: isEn ? "🔄 Check Payment Status" : "🔄 Periksa Status Pembayaran", callback_data: "qris:check:" + order.orderId, style: "primary" }],
+      [
+        { text: isEn ? "📜 My Orders" : "📜 Riwayat Pesanan", callback_data: "nav:orders", style: "primary" },
+        { text: isEn ? "🏠 Main Menu" : "🏠 Menu Utama", callback_data: "nav:home", style: "primary" }
+      ]
     ]
-  });
+  }, { parseMode: "HTML" });
   const qrisMsgId = sent?.result?.message_id;
   if (qrisMsgId && order?.orderId) {
     await setQrisMessageRef(env, order.orderId, { chatId: String(chatId), messageId: qrisMsgId });
@@ -3145,29 +3232,39 @@ async function sendQrisPaymentScreen(env, chatId, order) {
 
 async function handleQrisPaymentShow(env, message, chatId, userId, orderId) {
   if (!isQrisCheckoutAvailable(env)) throw new Error("QRIS internal belum diaktifkan.");
-  const order = await findOrderTransactional(env, orderId);
+  const [order, langPref] = await Promise.all([
+    findOrderTransactional(env, orderId),
+    getUserLang(env, userId)
+  ]);
+  const lang = normalizeLang(langPref?.lang);
+  const isEn = lang === "en";
   if (!order || String(order.customer_id) !== String(userId)) throw new Error("Pesanan tidak ditemukan untuk akun Telegram ini.");
   if (String(order.payment_confirmation_status).toUpperCase() === "DISETUJUI") {
     await updateTelegramMessage(env, message, {
-      text: "✅ Pembayaran pesanan ini telah disetujui.",
-      replyMarkup: customerMenuKeyboard(), clearMedia: true
+      text: isEn ? "✅ Payment for this order is already verified." : "✅ Pembayaran pesanan ini telah disetujui.",
+      replyMarkup: customerOrderActionsKeyboard(orderId, lang, { includeClaim: true }),
+      clearMedia: true
     });
     return;
   }
   if (CANCELLED_ORDER_STATUSES.includes(String(order.status || "").toUpperCase())) {
     await updateTelegramMessage(env, message, {
-      text: "⛔ Pesanan ini sudah dibatalkan. QRIS tidak dapat ditampilkan kembali. Jika Anda terlanjur membayar, hubungi admin dan kirim bukti transaksi untuk rekonsiliasi.",
-      replyMarkup: customerMenuKeyboard(), clearMedia: true
+      text: isEn
+        ? "⛔ This order has been cancelled. QRIS tidak dapat ditampilkan kembali. Contact Admin if you have already sent a payment."
+        : "⛔ Pesanan ini sudah dibatalkan. QRIS tidak dapat ditampilkan kembali. Jika Anda terlanjur membayar, hubungi admin dan kirim bukti transaksi untuk rekonsiliasi.",
+      replyMarkup: customerOrderActionsKeyboard(orderId, lang),
+      clearMedia: true
     });
     return;
   }
-    const payment = await createOrReuseQrisPayment(env, {
+  const payment = await createOrReuseQrisPayment(env, {
     orderId: order.order_id, total: Number(order.total)
   });
   if (payment.status === "PAID") {
     await updateTelegramMessage(env, message, {
-      text: "✅ Pembayaran pesanan ini telah disetujui.",
-      replyMarkup: customerMenuKeyboard(), clearMedia: true
+      text: isEn ? "✅ Payment for this order is already verified." : "✅ Pembayaran pesanan ini telah disetujui.",
+      replyMarkup: customerOrderActionsKeyboard(orderId, lang, { includeClaim: true }),
+      clearMedia: true
     });
     return;
   }
@@ -3175,40 +3272,59 @@ async function handleQrisPaymentShow(env, message, chatId, userId, orderId) {
   await sendQrisPaymentScreen(env, chatId, {
     orderId: order.order_id, total: Number(order.total), sku: order.sku,
     product: order.product_name, unitPrice: Number(order.unit_price),
-    quantity: Number(order.quantity), shipping: Number(order.shipping || 0)
-  });
+    quantity: Number(order.quantity), shipping: Number(order.shipping || 0),
+    customerId: String(userId)
+  }, userId);
 }
 
 async function handleQrisStatusCheck(env, message, chatId, userId, orderId) {
   if (!isQrisCheckoutAvailable(env)) throw new Error("QRIS internal belum diaktifkan.");
-  const order = await findOrderTransactional(env, orderId);
+  const [order, langPref] = await Promise.all([
+    findOrderTransactional(env, orderId),
+    getUserLang(env, userId)
+  ]);
+  const lang = normalizeLang(langPref?.lang);
+  const isEn = lang === "en";
   if (!order || String(order.customer_id) !== String(userId)) throw new Error("Pesanan tidak ditemukan untuk akun Telegram ini.");
   const payment = await getQrisPaymentForOrder(env, orderId);
   if (!payment) throw new Error("QRIS untuk pesanan ini belum dibuat. Buka kembali detail pesanan untuk membuat QR.");
   if (payment.status === "PAID" || String(order.payment_confirmation_status).toUpperCase() === "DISETUJUI") {
     await updateTelegramMessage(env, message, {
-      text: "✅ Pembayaran QRIS untuk " + orderId + " sudah disetujui. Resi tersedia di menu Pesanan Saya.",
-      replyMarkup: customerMenuKeyboard(), clearMedia: true
+      text: isEn
+        ? "✅ QRIS payment for " + orderId + " is verified! Tap below to claim your product with Admin."
+        : "✅ Pembayaran QRIS untuk " + orderId + " sudah disetujui. Silakan klaim produk Anda ke Admin.",
+      replyMarkup: customerOrderActionsKeyboard(orderId, lang, { includeClaim: true }),
+      clearMedia: true
     });
     return;
   }
   const ocrText = payment.ocr_status === "MATCHED"
-    ? "Pembacaan bukti: nominal, merchant, dan waktu cocok."
+    ? (isEn ? "Receipt check: amount, merchant, and time matched." : "Pembacaan bukti: nominal, merchant, dan waktu cocok.")
     : payment.ocr_status === "MISMATCH"
-      ? "Pembacaan bukti menemukan data yang tidak cocok."
+      ? (isEn ? "Receipt check detected mismatched data." : "Pembacaan bukti menemukan data yang tidak cocok.")
       : payment.ocr_status === "UNAVAILABLE"
-        ? "Pembacaan otomatis belum tersedia; admin akan memeriksa bukti."
-        : payment.receipt_file_id ? "Bukti sudah diterima dan menunggu pemeriksaan admin."
-          : "Belum ada bukti pembayaran yang diunggah.";
+        ? (isEn ? "Auto-OCR unavailable; Admin will review your proof." : "Pembacaan otomatis belum tersedia; admin akan memeriksa bukti.")
+        : payment.receipt_file_id
+          ? (isEn ? "Proof received and awaiting review." : "Bukti sudah diterima dan menunggu pemeriksaan admin.")
+          : (isEn ? "No payment screenshot uploaded yet." : "Belum ada bukti pembayaran yang diunggah.");
   await updateTelegramMessage(env, message, {
-    text: "⏳ STATUS PEMBAYARAN QRIS\nPesanan: " + orderId +
-      "\nNominal yang harus dibayar: " + rupiah(payment.expected_amount) +
-      "\nStatus: " + String(payment.status || "PENDING") +
-      "\n" + ocrText +
-      "\n\nOCR hanya mencocokkan isi gambar. Pembayaran baru disahkan setelah admin memastikan transaksi masuk.",
+    text: (isEn ? "⏳ <b>QRIS PAYMENT STATUS</b>" : "⏳ <b>STATUS PEMBAYARAN QRIS</b>") +
+      "\n• Order: <code>" + escapeHtml(orderId) + "</code>" +
+      "\n• " + (isEn ? "Exact Amount: <b>" : "Nominal tagihan: <b>") + escapeHtml(rupiah(payment.expected_amount)) + "</b>" +
+      "\n• Status: <code>" + escapeHtml(String(payment.status || "PENDING")) + "</code>" +
+      "\n• " + escapeHtml(ocrText) +
+      "\n\n<blockquote>" +
+      (isEn
+        ? "Send your payment screenshot directly in chat if not uploaded yet. (OCR hanya mencocokkan isi gambar.)"
+        : "OCR hanya mencocokkan isi gambar. Pembayaran baru disahkan setelah mutasi masuk terkonfirmasi.") +
+      "</blockquote>",
+    parseMode: "HTML",
     replyMarkup: { inline_keyboard: [
-      [{ text: "📎 Upload / Kirim Ulang Bukti", callback_data: "pc:req:" + orderId }],
-      [{ text: "📦 Pesanan Saya", callback_data: "nav:orders" }]
+      [{ text: isEn ? "📎 Upload / Resend Proof" : "📎 Upload / Kirim Ulang Bukti", callback_data: "pc:req:" + orderId, style: "success" }],
+      [
+        { text: isEn ? "📲 Show QR" : "📲 Tampilkan QR", callback_data: "qris:show:" + orderId, style: "primary" },
+        { text: isEn ? "📜 My Orders" : "📜 Riwayat", callback_data: "nav:orders", style: "primary" }
+      ]
     ] },
     clearMedia: true
   });
@@ -3298,10 +3414,19 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
     if (payment.status === "PAID") throw new Error("Pembayaran pesanan ini sudah disetujui.");
   }
   if (!["QRIS","TRANSFER","TRANSFER_BANK","USDT","PAYPAL","STARS"].includes(method)) throw new Error("Metode pembayaran tidak didukung untuk verifikasi online.");
+  const langPref = await getUserLang(env, userId);
+  const lang = normalizeLang(langPref?.lang);
+  const isEn = lang === "en";
   if (PAID_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase()) && String(r[18] || "")) {
     await sendPickupReceipt(env, String(r[3]), r, orderId, String(r[18]));
     await sendVerifiedProductClaimToCustomer(env, String(r[3]), r, String(r[18]), { actor: "already-verified" });
-    await updateTelegramMessage(env, message, { text: "✅ Pembayaran pesanan ini sudah diverifikasi. Resi pengambilan telah dikirim kembali.", replyMarkup: customerMenuKeyboard(), clearMedia: true });
+    await updateTelegramMessage(env, message, {
+      text: isEn
+        ? "✅ Payment for this order is already verified. Your receipt and claim link have been re-sent."
+        : "✅ Pembayaran pesanan ini sudah diverifikasi. Resi pengambilan & tautan klaim telah dikirim kembali.",
+      replyMarkup: customerOrderActionsKeyboard(orderId, lang, { includeClaim: true }),
+      clearMedia: true
+    });
     return;
   }
   if (CANCELLED_ORDER_STATUSES.includes(String(r[12] || "").toUpperCase())) throw new Error("Pesanan ini sudah dibatalkan.");
@@ -3310,8 +3435,6 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
     throw new Error("Status pesanan tidak mengizinkan permintaan verifikasi pembayaran.");
   }
   await setPendingProofOrder(env, userId, orderId);
-  const langPref = await getUserLang(env, userId);
-  const isEn = normalizeLang(langPref?.lang) === "en";
   if (state.ready) {
     const updated = await requestVerificationTransactional(env,orderId,userId);
     r = orderToSheetRow(updated);
@@ -3321,17 +3444,30 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
     await updateSheetRange(env, "Pesanan!N" + found.rowNumber + ":T" + found.rowNumber,
       [["MENUNGGU_VERIFIKASI", "", "", requestedAt, "", "", ""]]);
   }
+  const uploadCardText = isEn
+    ? [
+      "📎 <b>UPLOAD PAYMENT SCREENSHOT</b>",
+      "",
+      "<blockquote>• Reference: <code>ORDER_ID=" + escapeHtml(orderId) + "</code>\n• Product: <b>" + escapeHtml(String(r[5] || "-")) + "</b>\n• Total: <b>" + escapeHtml(rupiah(r[10])) + "</b> (" + escapeHtml(method) + ")</blockquote>",
+      "",
+      "📸 <b>Send your payment screenshot or PDF receipt directly in this chat now</b> (tap the 📎 attachment icon below). No need to reply to a specific message — our system will automatically validate it and direct you to Admin to claim your product."
+    ].join("\n")
+    : [
+      "📎 <b>KIRIM BUKTI PEMBAYARAN</b>",
+      "",
+      "<blockquote>• Referensi: <code>ORDER_ID=" + escapeHtml(orderId) + "</code>\n• Produk: <b>" + escapeHtml(String(r[5] || "-")) + "</b>\n• Total: <b>" + escapeHtml(rupiah(r[10])) + "</b> (" + escapeHtml(method) + ")</blockquote>",
+      "",
+      "📸 <b>Langsung kirim foto screenshot atau dokumen bukti bayar di chat ini sekarang</b> (tekan ikon 📎 di bawah). Sistem akan memvalidasi otomatis dan langsung mengarahkan Anda ke chat Admin untuk klaim produk."
+    ].join("\n");
+
+  await updateTelegramMessage(env, message, {
+    text: uploadCardText,
+    parseMode: "HTML",
+    replyMarkup: customerOrderActionsKeyboard(orderId, lang),
+    clearMedia: true
+  });
+
   if (String(r[13] || "") === "MENUNGGU_VERIFIKASI") {
-    await updateTelegramMessage(env, message, {
-      text: isEn
-        ? "⏳ Verification request for " + orderId + " is active. Send your payment screenshot directly in this chat (or reply to the prompt below) for automatic validation."
-        : "⏳ Permintaan verifikasi untuk " + orderId + " sudah tercatat. Kirim foto atau dokumen bukti pembayaran langsung di chat ini (atau balas pesan instruksi bot) untuk validasi otomatis.",
-      replyMarkup: customerMenuKeyboard(), clearMedia: true
-    });
-    await sendTelegram(env, chatId, paymentProofPrompt(orderId), {
-      force_reply: true,
-      input_field_placeholder: isEn ? "Attach payment screenshot/document" : "Lampirkan foto/dokumen bukti pembayaran"
-    });
     const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
     for (const adminId of admins) {
       try {
@@ -3342,13 +3478,7 @@ async function requestPaymentVerification(env, message, chatId, userId, orderId)
         console.warn(JSON.stringify({ level: "warn", event: "payment_admin_notify", message: error.message }));
       }
     }
-    return;
   }
-  await updateTelegramMessage(env, message, {
-    text: "✅ Permintaan verifikasi pembayaran untuk " + orderId + " telah dikirim ke admin.\n\nSilakan lampirkan bukti transfer/QRIS dengan membalas pesan instruksi bot. Resi pengambilan akan dikirim setelah admin menyetujui pembayaran.",
-    replyMarkup: customerMenuKeyboard(), clearMedia: true
-  });
-  await sendTelegram(env, chatId, paymentProofPrompt(orderId), { force_reply: true, input_field_placeholder: "Lampirkan foto/dokumen bukti pembayaran" });
 }
 async function handlePaymentProofUpload(env, message, chatId, userId) {
   const state = await transactionReadiness(env);
@@ -3506,6 +3636,7 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
         const approved = await approvePaymentAndIssueTicket(env, orderId, "auto:qris-ocr");
         if (!approved.alreadyApproved) {
           try { await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode); } catch {}
+          try { await deliverDigitalProductAfterPayment(env, String(approved.row[0])); } catch {}
         }
         await sendVerifiedProductClaimToCustomer(env, userId, approved.row, approved.receiptCode, {
           proofFileId: fileId,
@@ -3519,7 +3650,13 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
     }
 
     if (ocrStatus === "MATCHED") {
-      await sendTelegram(env, chatId, "✅ Bukti diterima. Pembacaan gambar menemukan nominal, merchant, dan waktu yang cocok. Admin tetap akan memastikan dana masuk sebelum pesanan disahkan.");
+      await sendTelegram(
+        env,
+        chatId,
+        isEn
+          ? "✅ Proof received. Amount, merchant, and timestamp matched. Admin will finalize verification shortly."
+          : "✅ Bukti diterima. Pembacaan gambar menemukan nominal, merchant, dan waktu yang cocok. Admin tetap akan memastikan dana masuk sebelum pesanan disahkan."
+      );
     } else if (ocrStatus === "MISMATCH") {
       await sendTelegram(
         env,
@@ -3530,7 +3667,13 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
         { inline_keyboard: [[{ text: isEn ? "📎 Re-upload Payment Proof" : "📎 Kirim Ulang Bukti", callback_data: "pc:req:" + orderId, style: "primary" }]] }
       );
     } else {
-      await sendTelegram(env, chatId, "✅ Bukti diterima. Sebagian data belum terbaca otomatis; admin akan memeriksanya secara manual.");
+      await sendTelegram(
+        env,
+        chatId,
+        isEn
+          ? "✅ Payment proof received. Our Admin has been notified and will verify your order shortly."
+          : "✅ Bukti diterima. Sebagian data belum terbaca otomatis; admin akan memeriksanya secara manual."
+      );
     }
   } else {
     // Non-QRIS methods (USDT, TRANSFER, PAYPAL, STARS): check anti-duplicate screenshot & auto-validate
@@ -3568,6 +3711,7 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
         const approved = await approvePaymentAndIssueTicket(env, orderId, "auto:proof-" + method.toLowerCase());
         if (!approved.alreadyApproved) {
           try { await sendPickupReceipt(env, String(approved.row[3]), approved.row, String(approved.row[0]), approved.receiptCode); } catch {}
+          try { await deliverDigitalProductAfterPayment(env, String(approved.row[0])); } catch {}
         }
         await sendVerifiedProductClaimToCustomer(env, userId, approved.row, approved.receiptCode, {
           proofFileId: fileId,
@@ -3580,7 +3724,13 @@ async function handlePaymentProofUpload(env, message, chatId, userId) {
       }
     }
 
-    await sendTelegram(env, chatId, "✅ Bukti pembayaran untuk " + orderId + " berhasil diterima. Admin akan memeriksanya.");
+    await sendTelegram(
+      env,
+      chatId,
+      isEn
+        ? "✅ Payment proof for " + orderId + " received. Admin will review it shortly."
+        : "✅ Bukti pembayaran untuk " + orderId + " berhasil diterima. Admin akan memeriksanya."
+    );
   }
 
   const admins = String(env.ADMIN_CHAT_ID || "").split(",").map(v => v.trim()).filter(Boolean);
@@ -4465,6 +4615,7 @@ async function handleMutationIngest(request, env) {
         const row = orderToSheetRow(approved);
         await sendPickupReceipt(env, String(approved.customer_id), row, String(approved.order_id), String(approved.receipt_code));
         await sendVerifiedProductClaimToCustomer(env, String(approved.customer_id), row, String(approved.receipt_code), { actor });
+        try { await deliverDigitalProductAfterPayment(env, String(approved.order_id)); } catch {}
         receiptSent = true;
       } catch (error) {
         console.error(JSON.stringify({ level: "error", event: "mutation_receipt_delivery", order_id: approved.order_id, message: String(error?.message || error).slice(0, 200) }));

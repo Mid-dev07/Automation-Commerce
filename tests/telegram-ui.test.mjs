@@ -12,8 +12,10 @@ import {
 } from "../src/order-bot/ui/formatters.mjs";
 import {
   MENU_LABELS,
+  buildCatalogInlineKeyboard,
   buildCatalogKeypadKeyboard,
   buildCheckoutInlineKeyboard,
+  buildHistoryInlineKeyboard,
   buildMainReplyKeyboard,
   buildStockInlineKeyboard,
   hasButtonStyles,
@@ -40,6 +42,7 @@ import {
   handleCustomerHybridMessage
 } from "../src/order-bot/ui/controller.mjs";
 import {
+  prepareTelegramContent,
   telegramApiRequest,
   updateTelegramMessage
 } from "../src/order-bot/telegram-api.mjs";
@@ -331,4 +334,163 @@ test("end-to-end hybrid UI flow caches banner file_id, maps keypad 1..N, edits s
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("catalog, stock, and search render full product names without <pre> SALIN KODE truncation and paginate in a single message", async () => {
+  const longVariants = [
+    { sku: "GEM-1M-PRIV", name: "Akun Gemini Pro 1 Bulan (Private Full Garansi)", price: 100000, stock: 12 },
+    { sku: "GEM-1Y-PRIV", name: "Akun Gemini Pro 1 Tahun (Private Full Garansi)", price: 150000, stock: 8 },
+    { sku: "GEM-2TB-FAM", name: "Akun Gemini Pro 2TB + Google One Family Plan", price: 175000, stock: null },
+    { sku: "JP-GEM-1M", name: "Jaspay Gemini Pro 1 Bulan Via Invite Link", price: 100000, stock: 5 },
+    { sku: "JP-GEM-3M", name: "Jaspay Gemini Pro 3 Bulan Via Login Akun", price: 125000, stock: 3 },
+    { sku: "JP-GEM-1Y", name: "Jaspay Gemini Pro 1 Tahun Full Garansi Resmi", price: 150000, stock: 4 },
+    { sku: "CLAUDE-PRO-1M", name: "Akun Claude 3.7 Sonnet Pro 1 Bulan Private", price: 320000, stock: 2 }
+  ];
+
+  const catScreen = renderCatalogScreen({
+    items: longVariants.slice(0, 6),
+    page: 0,
+    totalPages: 2,
+    totalItems: 7,
+    lang: "id"
+  });
+  assert.doesNotMatch(catScreen.text, /<pre>/, "Catalog must not use <pre> (prevents Telegram SALIN KODE bar)");
+  assert.match(catScreen.text, /<blockquote>/);
+  // Every distinguishing variant title must appear in full without 18-char truncation!
+  for (const item of longVariants.slice(0, 6)) {
+    assert.ok(catScreen.text.includes(item.name), `Missing full product name: ${item.name}`);
+  }
+  const catCallbacks = collectCallbackButtons(catScreen.inlineKeyboard).map((b) => b.callback_data);
+  assert.ok(catCallbacks.includes("prod:view:GEM-1M-PRIV:c0"));
+  assert.ok(catCallbacks.includes("cat:page:1"));
+  for (const cb of catCallbacks) {
+    assert.ok(Buffer.byteLength(cb, "utf8") < 64, `Callback too long: ${cb}`);
+  }
+
+  const stockScreen = renderStockScreen({
+    tab: "avail",
+    items: longVariants.slice(0, 3),
+    availCount: 7,
+    emptyCount: 0,
+    page: 0,
+    totalPages: 2,
+    lang: "id"
+  });
+  assert.doesNotMatch(stockScreen.text, /<pre>/, "Stock screen must not use <pre>");
+  assert.ok(stockScreen.text.includes("Akun Gemini Pro 1 Bulan (Private Full Garansi)"));
+  assert.ok(stockScreen.text.includes("Akun Gemini Pro 1 Tahun (Private Full Garansi)"));
+
+  const searchScreen = renderSearchResultsScreen({
+    query: "Gemini",
+    items: longVariants.slice(0, 2),
+    lang: "id"
+  });
+  assert.doesNotMatch(searchScreen.text, /<pre>/, "Search results must not use <pre>");
+  assert.ok(searchScreen.text.includes("Akun Gemini Pro 1 Bulan (Private Full Garansi)"));
+  assert.ok(searchScreen.text.includes("Akun Gemini Pro 1 Tahun (Private Full Garansi)"));
+
+  // Verify multi-page List Produk sends ONLY ONE message (no duplicate stacked catalog!) and syncs page 2
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(readFileSync(new URL("../migrations/0001_transaction_core.sql", import.meta.url), "utf8"));
+  sqlite.exec("INSERT INTO app_meta(key, value, updated_at) VALUES ('transaction_store_state', 'READY', '2026-11-25T00:00:00+07:00');");
+  const insertStmt = sqlite.prepare(
+    "INSERT INTO catalog_products(sku, name, price, stock, active, photo_url, description, updated_at) VALUES (?, ?, ?, ?, 1, '', '', '2026-11-25T00:00:00+07:00')"
+  );
+  for (const v of longVariants) {
+    insertStmt.run(v.sku, v.name, v.price, v.stock);
+  }
+
+  const kv = createMemoryKv();
+  const db = createMemoryD1(sqlite);
+  const bg = [];
+  const ctx = { waitUntil: (p) => bg.push(p) };
+  const tgCalls = [];
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (url, init) => {
+      const method = String(url).split("/").pop();
+      const body = JSON.parse(init.body);
+      tgCalls.push({ method, body });
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 55 } }), { status: 200 });
+    };
+    const env = { TELEGRAM_TOKEN: "test-token", MUSE_KV: kv, DB: db };
+    const deps = {
+      isAdmin: () => true, // Also verifies Admin testing Customer UI!
+      readTelegramCatalogRows: async () => [],
+      getAvailablePaymentMethods: async () => ["QRIS", "USDT"],
+      createOrder: async () => ({ orderId: "ORD-X" }),
+      deliverOrderCheckout: async () => {}
+    };
+
+    await handleCustomerHybridMessage(env, ctx, { chat: { id: "999" }, from: { id: 999, first_name: "Owner" } }, MENU_LABELS.LIST_PRODUCTS, deps);
+    await Promise.all(bg);
+
+    // Must send strictly 1 message (zero extra navigation message!)
+    assert.equal(tgCalls.length, 1);
+    assert.equal(tgCalls[0].method, "sendMessage");
+    assert.ok(Array.isArray(tgCalls[0].body.reply_markup?.inline_keyboard));
+
+    // Clicking Berikutnya (cat:page:1) edits that single message in-place & updates mapping to page 2
+    await handleCustomerHybridCallback(env, ctx, {
+      id: "cb-p2",
+      from: { id: 999, first_name: "Owner" },
+      message: { chat: { id: 999 }, message_id: 55 },
+      data: "cat:page:1"
+    }, deps);
+    await Promise.all(bg);
+
+    // getCatalogSnapshot sorts by name COLLATE NOCASE -> 7th item on page 2 is "Jaspay Gemini Pro 3 Bulan Via Login Akun" (JP-GEM-3M)
+    const editCall = tgCalls.find((c) => c.method === "editMessageText");
+    assert.ok(editCall, "Page 2 navigation must edit message in-place");
+    assert.ok(editCall.body.text.includes("Jaspay Gemini Pro 3 Bulan Via Login Akun"));
+
+    const page2Mapping = await getCatalogMapping(env, "999");
+    assert.equal(page2Mapping.page, 1);
+    assert.deepEqual(page2Mapping.skus, ["JP-GEM-3M"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("origin backCallback survives quantity changes, DITOLAK history shows re-upload button, and HTML captions >1024 never slice mid-tag", () => {
+  // 1. Origin preservation across PROD_VIEW and CHK_QTY
+  const viewParsed = parseUiCallback("prod:view:GEM-1Y-PRIV:c1");
+  assert.deepEqual(viewParsed, { type: "PROD_VIEW", sku: "GEM-1Y-PRIV", backCallback: "cat:page:1" });
+
+  const chkKb = buildCheckoutInlineKeyboard({
+    sku: "GEM-1Y-PRIV",
+    qty: 1,
+    maxQty: 5,
+    availableMethods: ["QRIS"],
+    qrisMode: "DYNAMIC",
+    backCallback: viewParsed.backCallback
+  });
+  const incBtn = chkKb.inline_keyboard[0][2];
+  assert.equal(incBtn.callback_data, "chk:qty:GEM-1Y-PRIV:2:c1");
+  const qtyParsed = parseUiCallback(incBtn.callback_data);
+  assert.deepEqual(qtyParsed, { type: "CHK_QTY", sku: "GEM-1Y-PRIV", qty: 2, backCallback: "cat:page:1" });
+
+  // 2. Rejected proof (DITOLAK) in Order History displays re-upload button
+  const histKb = buildHistoryInlineKeyboard({
+    orders: [{
+      order_id: "SEI-20261125-REJ1",
+      status: "DITOLAK",
+      payment_confirmation_status: "DITOLAK",
+      payment_method: "QRIS"
+    }],
+    page: 0,
+    totalPages: 1,
+    qrisAvailable: true,
+    lang: "id"
+  });
+  const histCallbacks = collectCallbackButtons(histKb).map((b) => b.callback_data);
+  assert.ok(histCallbacks.includes("pc:req:SEI-20261125-REJ1"), "Rejected order must offer pc:req re-upload button");
+
+  // 3. Long HTML caption > 1024 chars safely strips HTML instead of leaving unclosed tags
+  const hugeHtml = "<b>Judul Penting</b>\n<blockquote>" + "Detail produk lengkap sekali ".repeat(45) + "</blockquote>";
+  assert.ok(hugeHtml.length > 1024);
+  const safe = prepareTelegramContent(hugeHtml, 1024, "HTML");
+  assert.ok(safe.text.length <= 1024);
+  assert.equal(safe.parseMode, null);
+  assert.ok(!safe.text.includes("<blockquote>") && !safe.text.includes("<b>"));
 });

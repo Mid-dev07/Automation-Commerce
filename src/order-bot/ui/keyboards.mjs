@@ -4,6 +4,7 @@
  * Supports bilingual mode ('id' / 'en') and flexible local + international payment methods.
  */
 
+import { formatRp, truncateText } from "./formatters.mjs";
 import {
   MENU_LABELS_BY_LANG,
   convertIdrToStars,
@@ -166,23 +167,69 @@ export function buildHomeInlineKeyboard(env = {}, lang = "id") {
   };
 }
 
-export function buildCatalogInlineKeyboard({ page, totalPages, lang = "id" }, env = {}) {
+export function encodeBackOrigin(backCallback = "") {
+  const cb = String(backCallback || "").trim();
+  if (cb.startsWith("cat:page:")) {
+    return "c" + Math.max(0, Number(cb.slice("cat:page:".length)) || 0);
+  }
+  if (cb.startsWith("stock:tab:avail:")) {
+    return "sa" + Math.max(0, Number(cb.slice("stock:tab:avail:".length)) || 0);
+  }
+  if (cb.startsWith("stock:tab:empty:")) {
+    return "se" + Math.max(0, Number(cb.slice("stock:tab:empty:".length)) || 0);
+  }
+  if (cb === "search:open") {
+    return "sr";
+  }
+  return "";
+}
+
+export function decodeBackOrigin(origin = "") {
+  const token = String(origin || "").trim();
+  if (/^c\d{1,3}$/.test(token)) return "cat:page:" + Number(token.slice(1));
+  if (/^sa\d{1,3}$/.test(token)) return "stock:tab:avail:" + Number(token.slice(2));
+  if (/^se\d{1,3}$/.test(token)) return "stock:tab:empty:" + Number(token.slice(2));
+  if (token === "sr") return "search:open";
+  return "";
+}
+
+export function buildCatalogInlineKeyboard({ page = 0, totalPages = 1, items = [], lang = "id" }, env = {}) {
   const isEn = normalizeLang(lang) === "en";
+  const safePage = Math.max(0, Number(page) || 0);
+  const safeTotalPages = Math.max(1, Number(totalPages) || 1);
   const rows = [];
-  if (totalPages > 1) {
+
+  (items || []).forEach((item, idx) => {
+    const inStock = item.stock === null || Number(item.stock) > 0;
+    const outSuffix = isEn ? " (Out)" : " (Habis)";
+    const title = truncateText(item.name || item.sku, 32);
+    const priceLabel = inStock ? " · " + formatRp(item.price) : outSuffix;
+    const safeSku = String(item.sku || "").slice(0, 40);
+    rows.push([
+      styledButton({
+        text: `${idx + 1}. ${title}${priceLabel}`,
+        callback_data: `prod:view:${safeSku}:c${safePage}`
+      }, inStock ? "success" : "danger", env)
+    ]);
+  });
+
+  if (safeTotalPages > 1) {
     const navRow = [];
-    if (page > 0) {
-      navRow.push(styledButton({ text: isEn ? "◀️ Prev" : "◀️ Sebelumnya", callback_data: "cat:page:" + (page - 1) }, "primary", env));
+    if (safePage > 0) {
+      navRow.push(styledButton({ text: isEn ? "◀️ Prev" : "◀️ Sebelumnya", callback_data: "cat:page:" + (safePage - 1) }, "primary", env));
     }
-    navRow.push(styledButton({ text: (isEn ? "Page " : "Hal ") + (page + 1) + "/" + totalPages, callback_data: "noop" }, "primary", env));
-    if (page + 1 < totalPages) {
-      navRow.push(styledButton({ text: isEn ? "Next ▶️" : "Berikutnya ▶️", callback_data: "cat:page:" + (page + 1) }, "primary", env));
+    navRow.push(styledButton({ text: (isEn ? "Page " : "Hal ") + (safePage + 1) + "/" + safeTotalPages, callback_data: "noop" }, "primary", env));
+    if (safePage + 1 < safeTotalPages) {
+      navRow.push(styledButton({ text: isEn ? "Next ▶️" : "Berikutnya ▶️", callback_data: "cat:page:" + (safePage + 1) }, "primary", env));
     }
     rows.push(navRow);
   }
   rows.push([
-    styledButton({ text: isEn ? "📦 Check Stock" : "📦 Cek Stok", callback_data: "stock:tab:avail:0" }, "primary", env),
-    styledButton({ text: isEn ? "🏠 Home" : "🏠 Beranda", callback_data: "nav:home" }, "primary", env)
+    styledButton({ text: isEn ? "🔍 Search" : "🔍 Cari", callback_data: "search:open" }, "primary", env),
+    styledButton({ text: isEn ? "📦 Check Stock" : "📦 Cek Stok", callback_data: "stock:tab:avail:0" }, "primary", env)
+  ]);
+  rows.push([
+    styledButton({ text: isEn ? "🏠 Main Menu" : "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
   ]);
   return { inline_keyboard: rows };
 }
@@ -191,6 +238,8 @@ export function buildStockInlineKeyboard({ tab, availCount, emptyCount, page, to
   const isEn = normalizeLang(lang) === "en";
   const rows = [];
   const activeTab = tab === "empty" ? "empty" : "avail";
+  const safePage = Math.max(0, Number(page) || 0);
+  const originCode = (activeTab === "empty" ? "se" : "sa") + safePage;
   rows.push([
     styledButton({
       text: (activeTab === "avail" ? "✓ " : "") + (isEn ? `Available (${availCount})` : "Tersedia (" + availCount + ")"),
@@ -202,32 +251,33 @@ export function buildStockInlineKeyboard({ tab, availCount, emptyCount, page, to
     }, "danger", env)
   ]);
 
-  for (const item of items || []) {
+  (items || []).forEach((item, idx) => {
     const inStock = item.stock === null || item.stock > 0;
     const outSuffix = isEn ? " (Out)" : " (Habis)";
-    const label = String(item.name || item.sku).slice(0, 38) + (inStock ? "" : outSuffix);
+    const priceSuffix = item.price != null && inStock ? " · " + formatRp(item.price) : (inStock ? "" : outSuffix);
+    const label = `${idx + 1}. ${truncateText(item.name || item.sku, 32)}${priceSuffix}`;
     rows.push([
       styledButton({
         text: label,
-        callback_data: "prod:view:" + String(item.sku).slice(0, 48)
+        callback_data: "prod:view:" + String(item.sku).slice(0, 40) + ":" + originCode
       }, inStock ? "success" : "danger", env)
     ]);
-  }
+  });
 
   if (totalPages > 1) {
     const nav = [];
-    if (page > 0) {
-      nav.push(styledButton({ text: "◀️ Prev", callback_data: "stock:tab:" + activeTab + ":" + (page - 1) }, "primary", env));
+    if (safePage > 0) {
+      nav.push(styledButton({ text: isEn ? "◀️ Prev" : "◀️ Sebelumnya", callback_data: "stock:tab:" + activeTab + ":" + (safePage - 1) }, "primary", env));
     }
-    nav.push(styledButton({ text: (page + 1) + "/" + totalPages, callback_data: "noop" }, "primary", env));
-    if (page + 1 < totalPages) {
-      nav.push(styledButton({ text: "Next ▶️", callback_data: "stock:tab:" + activeTab + ":" + (page + 1) }, "primary", env));
+    nav.push(styledButton({ text: (isEn ? "Page " : "Hal ") + (safePage + 1) + "/" + totalPages, callback_data: "noop" }, "primary", env));
+    if (safePage + 1 < totalPages) {
+      nav.push(styledButton({ text: isEn ? "Next ▶️" : "Berikutnya ▶️", callback_data: "stock:tab:" + activeTab + ":" + (safePage + 1) }, "primary", env));
     }
     rows.push(nav);
   }
 
   rows.push([
-    styledButton({ text: isEn ? "🔄 Refresh" : "🔄 Perbarui", callback_data: "stock:refresh:" + activeTab + ":" + page }, "primary", env)
+    styledButton({ text: isEn ? "🔄 Refresh" : "🔄 Perbarui", callback_data: "stock:refresh:" + activeTab + ":" + safePage }, "primary", env)
   ]);
   rows.push([
     styledButton({ text: isEn ? "🔍 Search" : "🔍 Cari", callback_data: "search:open" }, "primary", env),
@@ -245,6 +295,7 @@ export function buildCheckoutInlineKeyboard(
   const safeSku = String(sku || "").slice(0, 36);
   const canBuy = maxQty === null || maxQty > 0;
   const safeQty = Math.max(1, Number(qty) || 1);
+  const originSuffix = backCallback ? (encodeBackOrigin(backCallback) ? ":" + encodeBackOrigin(backCallback) : "") : "";
 
   if (canBuy) {
     const decAllowed = safeQty > 1;
@@ -252,7 +303,7 @@ export function buildCheckoutInlineKeyboard(
     rows.push([
       styledButton({
         text: "➖",
-        callback_data: decAllowed ? "chk:qty:" + safeSku + ":" + (safeQty - 1) : "noop:min"
+        callback_data: decAllowed ? "chk:qty:" + safeSku + ":" + (safeQty - 1) + originSuffix : "noop:min"
       }, decAllowed ? "primary" : "danger", env),
       styledButton({
         text: "Qty: " + safeQty,
@@ -260,7 +311,7 @@ export function buildCheckoutInlineKeyboard(
       }, "primary", env),
       styledButton({
         text: "➕",
-        callback_data: incAllowed ? "chk:qty:" + safeSku + ":" + (safeQty + 1) : "noop:max"
+        callback_data: incAllowed ? "chk:qty:" + safeSku + ":" + (safeQty + 1) + originSuffix : "noop:max"
       }, incAllowed ? "primary" : "danger", env)
     ]);
 
@@ -351,6 +402,8 @@ export function buildHistoryInlineKeyboard({ orders, page, totalPages, qrisAvail
       ]);
     } else if (payConfirm === "MENUNGGU_VERIFIKASI") {
       rows.push([styledButton({ text: (isEn ? "📎 Send Proof " : "📎 Perbarui Bukti ") + suffix, callback_data: "pc:req:" + orderId }, "primary", env)]);
+    } else if (payConfirm === "DITOLAK" && !["DIBATALKAN", "CANCELLED", "CANCELED"].includes(status)) {
+      rows.push([styledButton({ text: (isEn ? "🔁 Re-upload Proof " : "🔁 Kirim Ulang Bukti ") + suffix, callback_data: "pc:req:" + orderId }, "danger", env)]);
     } else if (status === "MENUNGGU_PEMBAYARAN" && method === "QRIS" && qrisAvailable) {
       rows.push([
         styledButton({ text: "📲 QR " + suffix, callback_data: "qris:show:" + orderId }, "success", env),
@@ -363,9 +416,9 @@ export function buildHistoryInlineKeyboard({ orders, page, totalPages, qrisAvail
 
   if (totalPages > 1) {
     const nav = [];
-    if (page > 0) nav.push(styledButton({ text: "◀️ Prev", callback_data: "hist:page:" + (page - 1) }, "primary", env));
-    nav.push(styledButton({ text: (page + 1) + "/" + totalPages, callback_data: "noop" }, "primary", env));
-    if (page + 1 < totalPages) nav.push(styledButton({ text: "Next ▶️", callback_data: "hist:page:" + (page + 1) }, "primary", env));
+    if (page > 0) nav.push(styledButton({ text: isEn ? "◀️ Prev" : "◀️ Sebelumnya", callback_data: "hist:page:" + (page - 1) }, "primary", env));
+    nav.push(styledButton({ text: (isEn ? "Page " : "Hal ") + (page + 1) + "/" + totalPages, callback_data: "noop" }, "primary", env));
+    if (page + 1 < totalPages) nav.push(styledButton({ text: isEn ? "Next ▶️" : "Berikutnya ▶️", callback_data: "hist:page:" + (page + 1) }, "primary", env));
     rows.push(nav);
   }
   rows.push([
@@ -405,15 +458,16 @@ export function buildSearchResultsInlineKeyboard(items, env = {}, lang = "id") {
   const isEn = normalizeLang(lang) === "en";
   const outSuffix = isEn ? " (Out)" : " (Habis)";
   const rows = [];
-  for (const item of (items || []).slice(0, 8)) {
+  (items || []).slice(0, 8).forEach((item, idx) => {
     const inStock = item.stock === null || item.stock > 0;
+    const priceSuffix = item.price != null && inStock ? " · " + formatRp(item.price) : (inStock ? "" : outSuffix);
     rows.push([
       styledButton({
-        text: String(item.name || item.sku).slice(0, 38) + (inStock ? "" : outSuffix),
-        callback_data: "prod:view:" + String(item.sku).slice(0, 48)
+        text: `${idx + 1}. ${truncateText(item.name || item.sku, 32)}${priceSuffix}`,
+        callback_data: "prod:view:" + String(item.sku).slice(0, 40) + ":sr"
       }, inStock ? "success" : "danger", env)
     ]);
-  }
+  });
   rows.push([
     styledButton({ text: isEn ? "🔍 Search Again" : "🔍 Cari Lagi", callback_data: "search:open" }, "primary", env),
     styledButton({ text: isEn ? "🏠 Main Menu" : "🏠 Menu Utama", callback_data: "nav:home" }, "primary", env)
@@ -449,15 +503,19 @@ export function parseUiCallback(raw) {
     return { type: "STOCK_REFRESH", tab: parts[2] === "empty" ? "empty" : "avail", page: Math.max(0, Number(parts[3]) || 0) };
   }
   if (data.startsWith("prod:view:")) {
-    const sku = data.slice("prod:view:".length).trim();
-    return sku ? { type: "PROD_VIEW", sku } : null;
+    const parts = data.split(":");
+    const sku = String(parts[2] || "").trim();
+    if (!sku) return null;
+    const backCallback = decodeBackOrigin(parts[3] || "");
+    return backCallback ? { type: "PROD_VIEW", sku, backCallback } : { type: "PROD_VIEW", sku };
   }
   if (data.startsWith("chk:qty:")) {
     const parts = data.split(":");
     const sku = String(parts[2] || "").trim();
     const qty = Number(parts[3]);
     if (!sku || !Number.isInteger(qty) || qty < 1 || qty > 1000) return null;
-    return { type: "CHK_QTY", sku, qty };
+    const backCallback = decodeBackOrigin(parts[4] || "");
+    return backCallback ? { type: "CHK_QTY", sku, qty, backCallback } : { type: "CHK_QTY", sku, qty };
   }
   if (data.startsWith("chk:pay:")) {
     const parts = data.split(":");

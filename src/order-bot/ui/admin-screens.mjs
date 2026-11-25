@@ -1,8 +1,7 @@
 import {
-  MOBILE_TABLE_MAX_WIDTH,
   escapeHtml,
   formatRp,
-  renderMonospaceTable,
+  renderBlockquote,
   truncateText
 } from "./formatters.mjs";
 
@@ -154,33 +153,25 @@ function renderAdminRecentOrdersScreen(recent = [], mode = "recent") {
       replyMarkup: adminHomeKeyboard()
     };
   }
-  const rows = recent.map((entry, idx) => [
-    String(idx + 1),
-    truncateText(String(entry.r[0] || "-").replace(/^ORD-/, ""), 10),
-    truncateText(formatRp(entry.r[10]).replace(/^Rp\s*/, ""), 9),
-    shortStatusLabel(entry.r[12])
-  ]);
-  const table = renderMonospaceTable(
-    [
-      { label: "#", width: 2, align: "right" },
-      { label: "Order", width: 10, align: "left" },
-      { label: "Total", width: 9, align: "right" },
-      { label: "Status", width: 8, align: "left" }
-    ],
-    rows,
-    MOBILE_TABLE_MAX_WIDTH
-  );
+  const itemLines = recent.map((entry, idx) => {
+    const orderId = escapeHtml(String(entry.r[0] || "-"));
+    const prodName = escapeHtml(truncateText(String(entry.r[5] || "-"), 56));
+    const totalStr = escapeHtml(formatRp(entry.r[10]));
+    const statusStr = escapeHtml(shortStatusLabel(entry.r[12]));
+    return `<b>${idx + 1}.</b> <code>${orderId}</code> • <code>${statusStr}</code>\n   ${prodName} — <b>${totalStr}</b>`;
+  });
+  const listBlock = renderBlockquote(itemLines);
   const title = mode === "statuslist" ? "🔄 <b>PILIH PESANAN — UBAH STATUS</b>" : "📋 <b>10 PESANAN TERBARU</b>";
   const subtitle = mode === "statuslist"
     ? "Pilih pesanan di bawah untuk memperbarui status operasional:"
     : "Ketuk nomor/ID pesanan untuk melihat rincian lengkap:";
   const buttons = recent.map((x) => [{
-    text: `${truncateText(String(x.r[0] || "-"), 20)} · ${shortStatusLabel(x.r[12])}`,
+    text: `${truncateText(String(x.r[0] || "-"), 22)} · ${shortStatusLabel(x.r[12])}`,
     callback_data: (mode === "statuslist" ? "st:" : "detail:") + x.reference
   }]);
   buttons.push([{ text: "⬅️ Menu Admin", callback_data: "adm:home" }]);
   return {
-    text: [title, ADMIN_DIVIDER, table, subtitle].join("\n"),
+    text: [title, ADMIN_DIVIDER, listBlock, subtitle].join("\n"),
     parseMode: "HTML",
     replyMarkup: { inline_keyboard: buttons }
   };
@@ -347,7 +338,7 @@ function renderAdminCatalogItemScreen({ row, current = 0, total = 1 }) {
     `• <b>Harga:</b> <b>${escapeHtml(formatRp(row[2]))}</b>`,
     `• <b>Stok:</b> ${escapeHtml(stockText)}`,
     `• <b>Status:</b> ${active ? "🟢 Aktif" : "⚪ Nonaktif"}`,
-    ...(row[6] ? ["", `<blockquote>${escapeHtml(truncateText(String(row[6]), 320))}</blockquote>`] : [])
+    ...(row[6] ? ["", `<blockquote>${escapeHtml(truncateText(String(row[6]), 240))}</blockquote>`] : [])
   ].join("\n");
   const nav = [];
   if (current > 0) nav.push({ text: "◀️ Sebelumnya", callback_data: "adm:catalog:" + (current - 1) });
@@ -432,16 +423,11 @@ function renderAdminSalesReportHtml({ dateLabel, revenue, paidCount, todayRevenu
   const filled = Math.round(pct / 10);
   const bar = "▓".repeat(filled) + "░".repeat(10 - filled);
   const methodEntries = Object.entries(paymentTotals);
-  const breakdownTable = methodEntries.length
-    ? renderMonospaceTable(
-      [
-        { label: "Metode", width: 14, align: "left" },
-        { label: "Total", width: 16, align: "right" }
-      ],
-      methodEntries.map(([k, v]) => [truncateText(k, 14), formatRp(v)]),
-      MOBILE_TABLE_MAX_WIDTH
+  const breakdownBlock = methodEntries.length
+    ? renderBlockquote(
+      methodEntries.map(([k, v]) => `• <b>${escapeHtml(truncateText(k, 28))}:</b> ${escapeHtml(formatRp(v))}`)
     )
-    : "<i>Belum ada transaksi dibayar.</i>";
+    : "<blockquote><i>Belum ada transaksi dibayar.</i></blockquote>";
 
   return [
     "📊 <b>REKAP PENJUALAN SEITON.ID</b>",
@@ -454,7 +440,7 @@ function renderAdminSalesReportHtml({ dateLabel, revenue, paidCount, todayRevenu
     `• <b>Produk Terlaris:</b> ${bestProduct ? `${escapeHtml(bestProduct[0])} (${escapeHtml(bestProduct[1])} pcs)` : "Belum ada data"}`,
     "",
     "<b>Distribusi Pembayaran</b>",
-    breakdownTable,
+    breakdownBlock,
     "",
     `🎯 <b>Target Harian:</b> ${target ? escapeHtml(formatRp(target)) : "Belum diatur"}`,
     `<code>[${bar}] ${pct}%</code>`,

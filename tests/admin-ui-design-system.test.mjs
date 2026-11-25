@@ -88,7 +88,8 @@ test("Telegram admin UI screens escape dynamic values, respect 64B callback limi
     target: 300000
   });
   assert.match(report, /<b>REKAP PENJUALAN SEITON\.ID<\/b>/);
-  assert.match(report, /<pre>/);
+  assert.match(report, /<blockquote>/);
+  assert.doesNotMatch(report, /<pre>/);
   assert.ok(!report.includes("<Unggulan>"));
   assert.ok(!report.includes("*Total Omset:*"));
 });
